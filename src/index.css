@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary: #153585;
+  --primary-light: #1E4499;
+  --primary-dark: #0F244D;
+  --primary-tint: rgba(21, 53, 133, 0.08);
+  --background: #F4F5F7;
+  --sidebar-bg: #FFFFFF;
+  --card-bg: #FFFFFF;
+  --text-primary: #1A1D21;
+  --text-secondary: #5E6368;
+  --text-muted: #8A8F94;
+  --border: #E3E5E8;
+  --border-light: #F0F1F2;
+  --success: #0D7D4D;
+  --success-bg: #E8F5EE;
+  --warning: #B86E00;
+  --warning-bg: #FFF4E5;
+  --error: #C92A2A;
+  --error-bg: #FFE8E8;
+  --info: #153585;
+  --info-bg: #E8EEFF;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-hover: 0 4px 12px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
+}
+
+body {
+  font-family: 'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  background-color: var(--background);
+  color: var(--text-primary);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-in-out;
+}
