@@ -814,7 +814,6 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
   const [filterStatus, setFilterStatus] = useState('')
   const [viewingFile, setViewingFile] = useState(null)
   const [resubmitModal, setResubmitModal] = useState(null)
-  const [resubmitModal, setResubmitModal] = useState(null)
 
   const filteredData = records.filter(item => {
     const matchesSearch = item.filename.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -1666,52 +1665,71 @@ function FileViewerModal({ file, onClose, onSave, onDelete }) {
 
   useEffect(() => {
     // load text preview for TXT/CSV types
-    const ext = (editData?.extension || file?.extension || (file?.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
-    if (['TXT', 'CSV'].includes(ext)) {
-      const url = editData?.previewUrl || file?.previewUrl || (file?.rawFile ? URL.createObjectURL(file.rawFile) : null)
-      if (!url) return
-      fetch(url).then(r => r.text()).then(t => setTextPreview(t)).catch(() => setTextPreview('Unable to load preview.'))
+    const active = selectedVersion || editData || file
+    const ext = (active?.extension || file?.extension || (active?.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
+    if (!['TXT', 'CSV'].includes(ext)) {
+      setTextPreview(null)
+      return
     }
-              {(() => {
-                const active = selectedVersion || editData
-                const ext = (active.extension || file.extension || (active.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
-                const url = (selectedVersion && selectedVersion.previewUrl) || editData.previewUrl || file.previewUrl || (file.rawFile ? URL.createObjectURL(file.rawFile) : null)
-                if (url && ext === 'PDF') {
-                  return <iframe title="pdf-preview" src={url} className="w-full h-64" />
-                }
-                if (url && ['PNG','JPG','JPEG','GIF','WEBP','BMP'].includes(ext)) {
-                  return <img src={url} alt={active.filename} className="w-full object-contain max-h-64" />
-                }
-                if (url && ['TXT','CSV'].includes(ext)) {
-                  return (
-                    <div className="p-3 text-sm font-mono whitespace-pre-wrap max-h-64 overflow-auto">
-                      {textPreview ?? 'Loading preview...'}
-                    </div>
-                  )
-                }
-                return (
-                  <div className="p-4 text-sm text-text-muted">Preview not available for this file type. You can download to view.</div>
-                )
-              })()}
-                const ext = (editData.extension || file.extension || (file.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
-                const url = editData.previewUrl || file.previewUrl || (file.rawFile ? URL.createObjectURL(file.rawFile) : null)
-                if (url && ext === 'PDF') {
-                  return <iframe title="pdf-preview" src={url} className="w-full h-64" />
-                }
-                if (url && ['PNG','JPG','JPEG','GIF','WEBP','BMP'].includes(ext)) {
-                  return <img src={url} alt={editData.filename} className="w-full object-contain max-h-64" />
-                }
-                if (url && ['TXT','CSV'].includes(ext)) {
-                  return (
-                    <div className="p-3 text-sm font-mono whitespace-pre-wrap max-h-64 overflow-auto">
-                      {textPreview ?? 'Loading preview...'}
-                    </div>
-                  )
-                }
-                return (
-                  <div className="p-4 text-sm text-text-muted">Preview not available for this file type. You can download to view.</div>
-                )
-              })()}
+    const url = active?.previewUrl || file?.previewUrl || (active?.rawFile ? URL.createObjectURL(active.rawFile) : null)
+    if (!url) {
+      setTextPreview('Preview not available for this file type.')
+      return
+    }
+
+    let cancelled = false
+    fetch(url)
+      .then((response) => response.text())
+      .then((value) => {
+        if (!cancelled) setTextPreview(value)
+      })
+      .catch(() => {
+        if (!cancelled) setTextPreview('Unable to load preview.')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [editData, file, selectedVersion])
+
+  const renderFilePreview = () => {
+    const active = selectedVersion || editData || file
+    const ext = (active?.extension || file?.extension || (active?.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
+    const url = active?.previewUrl || file?.previewUrl || (active?.rawFile ? URL.createObjectURL(active.rawFile) : null)
+
+    if (url && ext === 'PDF') {
+      return <iframe title="pdf-preview" src={url} className="w-full h-64" />
+    }
+    if (url && ['PNG', 'JPG', 'JPEG', 'GIF', 'WEBP', 'BMP'].includes(ext)) {
+      return <img src={url} alt={active?.filename || file?.filename || 'Preview'} className="w-full object-contain max-h-64" />
+    }
+    if (url && ['TXT', 'CSV'].includes(ext)) {
+      return (
+        <div className="p-3 text-sm font-mono whitespace-pre-wrap max-h-64 overflow-auto">
+          {textPreview ?? 'Loading preview...'}
+        </div>
+      )
+    }
+    return (
+      <div className="p-4 text-sm text-text-muted">Preview not available for this file type. You can download to view.</div>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white rounded-lg w-full max-w-4xl max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-border-light flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-text-primary">Document Details</h3>
+          <button onClick={onClose} className="w-8 h-8 border border-border rounded-md text-text-secondary hover:text-text-primary hover:border-primary">
+            <X className="w-4 h-4 mx-auto" />
+          </button>
+        </div>
+
+        <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-5 max-h-[calc(90vh-72px)] overflow-y-auto">
+          <div>
+            <label className="block text-xs text-text-muted mb-2">Preview</label>
+            <div className="border border-border rounded-md overflow-hidden bg-background">
+              {renderFilePreview()}
             </div>
           </div>
 

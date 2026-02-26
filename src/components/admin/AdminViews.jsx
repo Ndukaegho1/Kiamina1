@@ -117,6 +117,16 @@ const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
 const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
+const COMPLIANCE_STATUS = {
+  FULL: '🟢 Fully Compliant',
+  ACTION: '🟡 Action Required',
+  PENDING: '🔴 Verification Pending',
+}
+const COMPLIANCE_STATUS_OPTIONS = [
+  COMPLIANCE_STATUS.FULL,
+  COMPLIANCE_STATUS.ACTION,
+  COMPLIANCE_STATUS.PENDING,
+]
 const ADMIN_PAGE_PERMISSION_RULES = {
   'admin-documents': ['view_documents'],
   'admin-communications': ['send_notifications'],
@@ -244,6 +254,46 @@ const appendScopedClientActivityLog = (email, entry = {}) => {
   localStorage.setItem(key, JSON.stringify([nextEntry, ...list]))
 }
 
+const toTrimmedValue = (value) => String(value || '').trim()
+
+const normalizeComplianceStatus = (value, fallback = COMPLIANCE_STATUS.PENDING) => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return fallback
+
+  if (
+    normalized.includes('fully compliant')
+    || normalized === 'verified'
+    || normalized === 'approved'
+    || normalized === 'compliant'
+  ) {
+    return COMPLIANCE_STATUS.FULL
+  }
+
+  if (
+    normalized.includes('action required')
+    || normalized === 'suspended'
+    || normalized === 'rejected'
+    || normalized.includes('clarification')
+    || normalized.includes('info requested')
+  ) {
+    return COMPLIANCE_STATUS.ACTION
+  }
+
+  if (
+    normalized.includes('verification pending')
+    || normalized === 'pending'
+    || normalized.includes('awaiting')
+  ) {
+    return COMPLIANCE_STATUS.PENDING
+  }
+
+  return fallback
+}
+
+const isActionRequiredStatus = (status) => (
+  normalizeComplianceStatus(status, '') === COMPLIANCE_STATUS.ACTION
+)
+
 const createClientDocumentFallback = (client) => {
   const ownerName = client?.primaryContact || client?.settings?.fullName || 'Client User'
   const businessName = client?.businessName || 'Client Business'
@@ -344,8 +394,8 @@ const readClientActivityLogs = (client) => {
     },
     {
       id: `${client?.id || 'CL'}-LOG-STATUS`,
-      action: 'Verification status',
-      details: `Current verification status: ${client?.verificationStatus || 'Pending'}.`,
+      action: 'Compliance status',
+      details: `Current compliance state: ${client?.verificationStatus || COMPLIANCE_STATUS.PENDING}.`,
       actorName: 'System',
       actorRole: 'system',
       timestamp: formatTimestamp(new Date().toISOString()),
@@ -498,10 +548,11 @@ const readClientRows = () => {
       ? Boolean(onboarding.verificationPending)
       : true
     const accountSuspended = account.status === 'suspended'
-    const statusVerification = statusControl?.verificationStatus
-    const verificationStatus = accountSuspended
-      ? 'Suspended'
-      : (statusVerification || (verificationPending ? 'Pending' : 'Verified'))
+    const statusVerification = normalizeComplianceStatus(statusControl?.verificationStatus, '')
+    let verificationStatus = statusVerification || (verificationPending ? COMPLIANCE_STATUS.PENDING : COMPLIANCE_STATUS.FULL)
+    if (accountSuspended && verificationStatus === COMPLIANCE_STATUS.FULL) {
+      verificationStatus = COMPLIANCE_STATUS.ACTION
+    }
 
     const cri = settings.cri || `CRI-${String(index + 1).padStart(4, '0')}`
     const businessName = settings.businessName?.trim() || account.businessName || account.companyName || 'Unassigned Business'
@@ -811,8 +862,13 @@ function AdminClientsPage({
   const refreshClientRows = () => setClients(readClientRows())
 
   const getStatusBadge = (status) => {
-    if (status === 'Verified' || status === 'Completed' || status === 'Active') return 'bg-success-bg text-success'
-    if (status === 'Pending' || status === 'In Progress') return 'bg-warning-bg text-warning'
+    const normalizedCompliance = normalizeComplianceStatus(status, '')
+    if (normalizedCompliance === COMPLIANCE_STATUS.FULL) return 'bg-success-bg text-success'
+    if (normalizedCompliance === COMPLIANCE_STATUS.ACTION) return 'bg-warning-bg text-warning'
+    if (normalizedCompliance === COMPLIANCE_STATUS.PENDING) return 'bg-error-bg text-error'
+
+    if (status === 'Completed' || status === 'Active') return 'bg-success-bg text-success'
+    if (status === 'In Progress') return 'bg-warning-bg text-warning'
     if (status === 'Suspended') return 'bg-error-bg text-error'
     return 'bg-info-bg text-primary'
   }
@@ -948,7 +1004,7 @@ function AdminClientsPage({
   }
 
   const actionItemsForClient = (client) => ([
-    { id: 'view-profile', label: 'View Client Profile', disabled: !canViewBusinesses, disabledMessage: 'Insufficient Permissions' },
+    { id: 'view-profile', label: 'View / Edit Client Profile', disabled: !canViewBusinesses, disabledMessage: 'Insufficient Permissions' },
     { id: 'view-documents', label: 'View Documents', disabled: !canViewDocuments, disabledMessage: 'Insufficient Permissions' },
     { id: 'view-upload-history', label: 'View Upload History', disabled: !canViewDocuments, disabledMessage: 'Insufficient Permissions' },
     { id: 'reset-password', label: 'Reset Password', disabled: !canManageUsers, disabledMessage: 'Insufficient Permissions' },
@@ -997,7 +1053,7 @@ function AdminClientsPage({
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Primary Contact</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Email</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Country</th>
-              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Verification Status</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Compliance State</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Onboarding Status</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Subscription Status</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date Created</th>
@@ -1124,17 +1180,81 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   const clientLogs = readClientActivityLogs({ ...clientSnapshot, settings, onboarding })
 
   const [verificationStatusDraft, setVerificationStatusDraft] = useState(
-    statusControl?.verificationStatus || safeClient?.verificationStatus || 'Pending',
+    normalizeComplianceStatus(statusControl?.verificationStatus || safeClient?.verificationStatus || '', COMPLIANCE_STATUS.PENDING),
   )
   const [suspensionMessage, setSuspensionMessage] = useState(
     statusControl?.suspensionMessage || safeClient?.suspensionMessage || '',
   )
   const [isSavingVerificationStatus, setIsSavingVerificationStatus] = useState(false)
+  const [isEditingProfile, setIsEditingProfile] = useState(false)
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [isEditingIdentityAssets, setIsEditingIdentityAssets] = useState(false)
+  const [isSavingIdentityAssets, setIsSavingIdentityAssets] = useState(false)
+  const [identityDraft, setIdentityDraft] = useState(() => ({
+    profilePhoto: profilePhoto || '',
+    companyLogo: companyLogo || '',
+    govId: verificationDocs.govId || '',
+    proofOfAddress: verificationDocs.proofOfAddress || '',
+    businessReg: verificationDocs.businessReg || '',
+  }))
+  const [profileDraft, setProfileDraft] = useState(() => ({
+    primaryContact: safeClient?.primaryContact || settings.fullName || '',
+    businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
+    phone: settings.phone || '',
+    roleInCompany: settings.roleInCompany || '',
+    country: safeClient?.country || settings.country || onboardingData.country || '',
+    industry: settings.industry || onboardingData.industry || '',
+    tin: settings.tin || onboardingData.tin || '',
+    reportingCycle: settings.reportingCycle || onboardingData.reportingCycle || '',
+    startMonth: settings.startMonth || onboardingData.startMonth || '',
+    currency: settings.currency || onboardingData.currency || 'NGN',
+    language: settings.language || onboardingData.language || 'English',
+    businessReg: settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg || '',
+    address1: settings.address1 || '',
+    address2: settings.address2 || '',
+    city: settings.city || '',
+    postalCode: settings.postalCode || '',
+    addressCountry: settings.addressCountry || settings.country || onboardingData.country || '',
+  }))
 
   useEffect(() => {
-    setVerificationStatusDraft(statusControl?.verificationStatus || safeClient?.verificationStatus || 'Pending')
+    setVerificationStatusDraft(normalizeComplianceStatus(statusControl?.verificationStatus || safeClient?.verificationStatus || '', COMPLIANCE_STATUS.PENDING))
     setSuspensionMessage(statusControl?.suspensionMessage || safeClient?.suspensionMessage || '')
   }, [statusControl?.verificationStatus, statusControl?.suspensionMessage, safeClient?.verificationStatus, safeClient?.suspensionMessage])
+
+  useEffect(() => {
+    setIdentityDraft({
+      profilePhoto: profilePhoto || '',
+      companyLogo: companyLogo || '',
+      govId: verificationDocs.govId || '',
+      proofOfAddress: verificationDocs.proofOfAddress || '',
+      businessReg: verificationDocs.businessReg || '',
+    })
+    setIsEditingIdentityAssets(false)
+  }, [safeClient?.id, safeClient?.email, profilePhoto, companyLogo, verificationDocs.govId, verificationDocs.proofOfAddress, verificationDocs.businessReg])
+
+  useEffect(() => {
+    setProfileDraft({
+      primaryContact: safeClient?.primaryContact || settings.fullName || '',
+      businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
+      phone: settings.phone || '',
+      roleInCompany: settings.roleInCompany || '',
+      country: safeClient?.country || settings.country || onboardingData.country || '',
+      industry: settings.industry || onboardingData.industry || '',
+      tin: settings.tin || onboardingData.tin || '',
+      reportingCycle: settings.reportingCycle || onboardingData.reportingCycle || '',
+      startMonth: settings.startMonth || onboardingData.startMonth || '',
+      currency: settings.currency || onboardingData.currency || 'NGN',
+      language: settings.language || onboardingData.language || 'English',
+      businessReg: settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg || '',
+      address1: settings.address1 || '',
+      address2: settings.address2 || '',
+      city: settings.city || '',
+      postalCode: settings.postalCode || '',
+      addressCountry: settings.addressCountry || settings.country || onboardingData.country || '',
+    })
+    setIsEditingProfile(false)
+  }, [safeClient?.id, safeClient?.email])
 
   if (!safeClient) {
     return (
@@ -1151,12 +1271,10 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     )
   }
 
-  const saveVerificationStatus = () => {
+  const saveVerificationStatus = (forcedStatus) => {
     if (!normalizedEmail) return
-    if (verificationStatusDraft === 'Suspended' && !suspensionMessage.trim()) {
-      showToast?.('error', 'Please include a reason message before suspending this client.')
-      return
-    }
+    const nextVerificationStatus = normalizeComplianceStatus(forcedStatus || verificationStatusDraft, COMPLIANCE_STATUS.PENDING)
+    const nextSuspensionMessage = isActionRequiredStatus(nextVerificationStatus) ? suspensionMessage.trim() : ''
 
     setIsSavingVerificationStatus(true)
     try {
@@ -1168,7 +1286,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       if (accountIndex !== -1) {
         nextAccounts[accountIndex] = {
           ...nextAccounts[accountIndex],
-          status: verificationStatusDraft === 'Suspended' ? 'suspended' : 'active',
+          status: 'active',
         }
         localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(nextAccounts))
       }
@@ -1176,33 +1294,179 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       const onboardingState = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
       writeScopedStorageObject('kiaminaOnboardingState', normalizedEmail, {
         ...onboardingState,
-        verificationPending: verificationStatusDraft !== 'Verified',
+        verificationPending: nextVerificationStatus !== COMPLIANCE_STATUS.FULL,
       })
 
       writeScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail, {
-        verificationStatus: verificationStatusDraft,
-        suspensionMessage: verificationStatusDraft === 'Suspended' ? suspensionMessage.trim() : '',
+        verificationStatus: nextVerificationStatus,
+        suspensionMessage: nextSuspensionMessage,
         updatedAt: new Date().toISOString(),
       })
 
       appendScopedClientActivityLog(normalizedEmail, {
         actorName: 'Admin User',
         actorRole: 'admin',
-        action: 'Updated verification status',
-        details: `Verification status changed to ${verificationStatusDraft}.${verificationStatusDraft === 'Suspended' ? ` Reason: ${suspensionMessage.trim()}` : ''}`,
+        action: 'Updated compliance status',
+        details: `Compliance state changed to ${nextVerificationStatus}.${nextSuspensionMessage ? ` Note: ${nextSuspensionMessage}` : ''}`,
       })
 
       onAdminActionLog?.({
-        action: 'Updated client verification status',
+        action: 'Updated client compliance state',
         affectedUser: safeClient.businessName || normalizedEmail,
-        details: `Set verification status to ${verificationStatusDraft}.${verificationStatusDraft === 'Suspended' ? ` Reason: ${suspensionMessage.trim()}` : ''}`,
+        details: `Set compliance state to ${nextVerificationStatus}.${nextSuspensionMessage ? ` Note: ${nextSuspensionMessage}` : ''}`,
       })
 
       const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
       if (refreshed) setClientSnapshot(refreshed)
-      showToast?.('success', 'Client verification status updated.')
+      setVerificationStatusDraft(nextVerificationStatus)
+      if (!isActionRequiredStatus(nextVerificationStatus)) setSuspensionMessage('')
+      showToast?.('success', 'Client compliance state updated.')
     } finally {
       setIsSavingVerificationStatus(false)
+    }
+  }
+
+  const saveProfileChanges = () => {
+    if (!normalizedEmail) return
+    const nextPrimaryContact = toTrimmedValue(profileDraft.primaryContact)
+    const nextBusinessName = toTrimmedValue(profileDraft.businessName)
+    if (!nextPrimaryContact || !nextBusinessName) {
+      showToast?.('error', 'Primary contact and business name are required.')
+      return
+    }
+
+    setIsSavingProfile(true)
+    try {
+      const nextSettings = {
+        ...getScopedStorageObject('settingsFormData', normalizedEmail),
+        fullName: nextPrimaryContact,
+        businessName: nextBusinessName,
+        phone: toTrimmedValue(profileDraft.phone),
+        roleInCompany: toTrimmedValue(profileDraft.roleInCompany),
+        country: toTrimmedValue(profileDraft.country),
+        industry: toTrimmedValue(profileDraft.industry),
+        tin: toTrimmedValue(profileDraft.tin),
+        reportingCycle: toTrimmedValue(profileDraft.reportingCycle),
+        startMonth: toTrimmedValue(profileDraft.startMonth),
+        currency: toTrimmedValue(profileDraft.currency) || 'NGN',
+        language: toTrimmedValue(profileDraft.language) || 'English',
+        cacNumber: toTrimmedValue(profileDraft.businessReg),
+        businessReg: toTrimmedValue(profileDraft.businessReg),
+        address1: toTrimmedValue(profileDraft.address1),
+        address2: toTrimmedValue(profileDraft.address2),
+        city: toTrimmedValue(profileDraft.city),
+        postalCode: toTrimmedValue(profileDraft.postalCode),
+        addressCountry: toTrimmedValue(profileDraft.addressCountry),
+      }
+      writeScopedStorageObject('settingsFormData', normalizedEmail, nextSettings)
+
+      const onboardingState = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
+      writeScopedStorageObject('kiaminaOnboardingState', normalizedEmail, {
+        ...onboardingState,
+        data: {
+          ...(onboardingState?.data || {}),
+          businessName: nextBusinessName,
+          country: toTrimmedValue(profileDraft.country),
+          industry: toTrimmedValue(profileDraft.industry),
+          tin: toTrimmedValue(profileDraft.tin),
+          reportingCycle: toTrimmedValue(profileDraft.reportingCycle),
+          startMonth: toTrimmedValue(profileDraft.startMonth),
+          currency: toTrimmedValue(profileDraft.currency) || 'NGN',
+          language: toTrimmedValue(profileDraft.language) || 'English',
+          cacNumber: toTrimmedValue(profileDraft.businessReg),
+          businessReg: toTrimmedValue(profileDraft.businessReg),
+        },
+      })
+
+      const accounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
+      if (Array.isArray(accounts)) {
+        const nextAccounts = [...accounts]
+        const accountIndex = nextAccounts.findIndex((account) => (
+          (account?.email || '').trim().toLowerCase() === normalizedEmail
+        ))
+        if (accountIndex !== -1) {
+          nextAccounts[accountIndex] = {
+            ...nextAccounts[accountIndex],
+            fullName: nextPrimaryContact,
+            businessName: nextBusinessName,
+            companyName: nextBusinessName,
+          }
+          localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(nextAccounts))
+        }
+      }
+
+      appendScopedClientActivityLog(normalizedEmail, {
+        actorName: 'Admin User',
+        actorRole: 'admin',
+        action: 'Updated client profile',
+        details: 'Client profile fields were edited in Admin Client Profile.',
+      })
+
+      onAdminActionLog?.({
+        action: 'Edited client profile',
+        affectedUser: nextBusinessName,
+        details: 'Updated profile fields (contact, business, address, and compliance metadata).',
+      })
+
+      const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
+      if (refreshed) setClientSnapshot(refreshed)
+      setIsEditingProfile(false)
+      showToast?.('success', 'Client profile updated.')
+    } finally {
+      setIsSavingProfile(false)
+    }
+  }
+
+  const handleIdentityImageUpload = (field, file) => {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      setIdentityDraft((prev) => ({ ...prev, [field]: String(reader.result || '') }))
+    }
+    reader.onerror = () => {
+      showToast?.('error', 'Unable to read selected image file.')
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const saveIdentityAssets = () => {
+    if (!normalizedEmail) return
+    setIsSavingIdentityAssets(true)
+    try {
+      const nextProfilePhoto = toTrimmedValue(identityDraft.profilePhoto)
+      const nextCompanyLogo = toTrimmedValue(identityDraft.companyLogo)
+      if (nextProfilePhoto) writeScopedStorageString('profilePhoto', normalizedEmail, nextProfilePhoto)
+      else removeScopedStorageValue('profilePhoto', normalizedEmail)
+      if (nextCompanyLogo) writeScopedStorageString('companyLogo', normalizedEmail, nextCompanyLogo)
+      else removeScopedStorageValue('companyLogo', normalizedEmail)
+
+      const nextVerificationDocs = {
+        ...getScopedStorageObject('verificationDocs', normalizedEmail),
+        govId: toTrimmedValue(identityDraft.govId),
+        proofOfAddress: toTrimmedValue(identityDraft.proofOfAddress),
+        businessReg: toTrimmedValue(identityDraft.businessReg),
+      }
+      writeScopedStorageObject('verificationDocs', normalizedEmail, nextVerificationDocs)
+
+      appendScopedClientActivityLog(normalizedEmail, {
+        actorName: 'Admin User',
+        actorRole: 'admin',
+        action: 'Updated identity assets',
+        details: 'Updated profile photo, company logo, or verification document references.',
+      })
+
+      onAdminActionLog?.({
+        action: 'Edited client identity assets',
+        affectedUser: safeClient.businessName || normalizedEmail,
+        details: 'Updated profile picture, company logo, and identity asset metadata.',
+      })
+
+      const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
+      if (refreshed) setClientSnapshot(refreshed)
+      setIsEditingIdentityAssets(false)
+      showToast?.('success', 'Identity assets updated.')
+    } finally {
+      setIsSavingIdentityAssets(false)
     }
   }
 
@@ -1239,7 +1503,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
 
       <div className="grid grid-cols-3 gap-4 mb-6">
         <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
-          <p className="text-xs uppercase tracking-wide text-text-muted">Verification Status</p>
+          <p className="text-xs uppercase tracking-wide text-text-muted">Compliance Status</p>
           <p className="text-lg font-semibold text-text-primary mt-1">{safeClient.verificationStatus || '--'}</p>
         </div>
         <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
@@ -1253,92 +1517,348 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light p-6 mb-6">
-        <h3 className="text-base font-semibold text-text-primary">Verification Control</h3>
-        <p className="text-sm text-text-muted mt-1">Set this client to Verified, Suspended, or Pending.</p>
+        <h3 className="text-base font-semibold text-text-primary">Compliance Control</h3>
+        <p className="text-sm text-text-muted mt-1">Set this client to a compliance state.</p>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Verification Status</label>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Compliance State</label>
             <select
               value={verificationStatusDraft}
               onChange={(event) => setVerificationStatusDraft(event.target.value)}
               className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             >
-              <option value="Verified">Verified</option>
-              <option value="Pending">Pending</option>
-              <option value="Suspended">Suspended</option>
+              {COMPLIANCE_STATUS_OPTIONS.map((statusLabel) => (
+                <option key={statusLabel} value={statusLabel}>{statusLabel}</option>
+              ))}
             </select>
           </div>
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Suspension Message</label>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Action Required Note (Optional)</label>
             <textarea
               value={suspensionMessage}
               onChange={(event) => setSuspensionMessage(event.target.value)}
-              placeholder="Write the message the client should receive when suspended."
+              placeholder="Document the required action for this client."
               className="w-full h-20 px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary resize-none"
-              disabled={verificationStatusDraft !== 'Suspended'}
+              disabled={!isActionRequiredStatus(verificationStatusDraft)}
             />
           </div>
         </div>
         <div className="mt-4">
           <button
             type="button"
+            onClick={() => saveVerificationStatus(COMPLIANCE_STATUS.FULL)}
+            disabled={isSavingVerificationStatus}
+            className="h-10 px-4 mr-2 border border-success text-success rounded-md text-sm font-semibold hover:bg-success-bg transition-colors disabled:opacity-60"
+          >
+            Mark Full Compliance
+          </button>
+          <button
+            type="button"
             onClick={saveVerificationStatus}
             disabled={isSavingVerificationStatus}
             className="h-10 px-4 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-60"
           >
-            {isSavingVerificationStatus ? 'Saving...' : 'Save Verification State'}
+            {isSavingVerificationStatus ? 'Saving...' : 'Save Compliance State'}
           </button>
         </div>
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light p-6 mb-6">
-        <h3 className="text-base font-semibold text-text-primary">Profile & Identity Assets</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
-          <div className="rounded-md border border-border-light bg-background p-4">
-            <p className="text-xs uppercase tracking-wide text-text-muted">Profile Picture</p>
-            <div className="mt-3 w-24 h-24 rounded-full overflow-hidden border border-border-light bg-white flex items-center justify-center">
-              {profilePhoto ? (
-                <img src={profilePhoto} alt="Client Profile" className="w-full h-full object-cover" />
-              ) : (
-                <User className="w-8 h-8 text-text-muted" />
-              )}
-            </div>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-text-primary">Profile & Identity Assets</h3>
+            <p className="text-sm text-text-muted mt-1">Manage client images and verification document references.</p>
           </div>
-          <div className="rounded-md border border-border-light bg-background p-4">
-            <p className="text-xs uppercase tracking-wide text-text-muted">Company Logo</p>
-            <div className="mt-3 w-28 h-20 rounded border border-border-light bg-white p-2 flex items-center justify-center">
-              {companyLogo ? (
-                <img src={companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
-              ) : (
-                <Building2 className="w-8 h-8 text-text-muted" />
-              )}
+          {!isEditingIdentityAssets ? (
+            <button
+              type="button"
+              onClick={() => setIsEditingIdentityAssets(true)}
+              className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background inline-flex items-center gap-2"
+            >
+              <Edit2 className="w-4 h-4" />
+              Edit Assets
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIdentityDraft({
+                    profilePhoto: profilePhoto || '',
+                    companyLogo: companyLogo || '',
+                    govId: verificationDocs.govId || '',
+                    proofOfAddress: verificationDocs.proofOfAddress || '',
+                    businessReg: verificationDocs.businessReg || '',
+                  })
+                  setIsEditingIdentityAssets(false)
+                }}
+                className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveIdentityAssets}
+                disabled={isSavingIdentityAssets}
+                className="h-10 px-4 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-60"
+              >
+                {isSavingIdentityAssets ? 'Saving...' : 'Save Assets'}
+              </button>
             </div>
-          </div>
+          )}
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
-          {[
-            ['Government-issued ID', verificationDocs.govId],
-            ['Proof of Address', verificationDocs.proofOfAddress],
-            ['Business Registration Document', verificationDocs.businessReg],
-          ].map(([label, value]) => (
-            <div key={label} className="rounded-md border border-border-light bg-background px-3 py-2.5">
-              <p className="text-[11px] uppercase tracking-wide text-text-muted">{label}</p>
-              <p className="text-sm text-text-primary mt-1">{value || '--'}</p>
+
+        {isEditingIdentityAssets ? (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+              <div className="rounded-md border border-border-light bg-background p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Profile Picture</p>
+                <div className="mt-3 w-24 h-24 rounded-full overflow-hidden border border-border-light bg-white flex items-center justify-center">
+                  {identityDraft.profilePhoto ? (
+                    <img src={identityDraft.profilePhoto} alt="Client Profile" className="w-full h-full object-cover" />
+                  ) : (
+                    <User className="w-8 h-8 text-text-muted" />
+                  )}
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => handleIdentityImageUpload('profilePhoto', event.target.files?.[0])}
+                    className="block w-full text-xs text-text-secondary"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setIdentityDraft((prev) => ({ ...prev, profilePhoto: '' }))}
+                    className="h-8 px-2.5 border border-border rounded-md text-xs text-text-primary hover:bg-white"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-md border border-border-light bg-background p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Company Logo</p>
+                <div className="mt-3 w-28 h-20 rounded border border-border-light bg-white p-2 flex items-center justify-center">
+                  {identityDraft.companyLogo ? (
+                    <img src={identityDraft.companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
+                  ) : (
+                    <Building2 className="w-8 h-8 text-text-muted" />
+                  )}
+                </div>
+                <div className="mt-3 flex items-center gap-2">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(event) => handleIdentityImageUpload('companyLogo', event.target.files?.[0])}
+                    className="block w-full text-xs text-text-secondary"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setIdentityDraft((prev) => ({ ...prev, companyLogo: '' }))}
+                    className="h-8 px-2.5 border border-border rounded-md text-xs text-text-primary hover:bg-white"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
             </div>
-          ))}
-        </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+              <div>
+                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Government-issued ID</label>
+                <input value={identityDraft.govId} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, govId: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Proof of Address</label>
+                <input value={identityDraft.proofOfAddress} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, proofOfAddress: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              </div>
+              <div>
+                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Registration Document</label>
+                <input value={identityDraft.businessReg} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, businessReg: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+              <div className="rounded-md border border-border-light bg-background p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Profile Picture</p>
+                <div className="mt-3 w-24 h-24 rounded-full overflow-hidden border border-border-light bg-white flex items-center justify-center">
+                  {profilePhoto ? (
+                    <img src={profilePhoto} alt="Client Profile" className="w-full h-full object-cover" />
+                  ) : (
+                    <User className="w-8 h-8 text-text-muted" />
+                  )}
+                </div>
+              </div>
+              <div className="rounded-md border border-border-light bg-background p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Company Logo</p>
+                <div className="mt-3 w-28 h-20 rounded border border-border-light bg-white p-2 flex items-center justify-center">
+                  {companyLogo ? (
+                    <img src={companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
+                  ) : (
+                    <Building2 className="w-8 h-8 text-text-muted" />
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+              {[
+                ['Government-issued ID', verificationDocs.govId],
+                ['Proof of Address', verificationDocs.proofOfAddress],
+                ['Business Registration Document', verificationDocs.businessReg],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-md border border-border-light bg-background px-3 py-2.5">
+                  <p className="text-[11px] uppercase tracking-wide text-text-muted">{label}</p>
+                  <p className="text-sm text-text-primary mt-1">{value || '--'}</p>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light p-6 mb-6">
-        <h3 className="text-base font-semibold text-text-primary">Client Information</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
-          {profileFields.map(([label, value]) => (
-            <div key={label} className="rounded-md border border-border-light bg-background px-3 py-2.5">
-              <p className="text-[11px] uppercase tracking-wide text-text-muted">{label}</p>
-              <p className="text-sm text-text-primary mt-1">{value || '--'}</p>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-semibold text-text-primary">Client Information</h3>
+            <p className="text-sm text-text-muted mt-1">Edit client identity and business metadata from here.</p>
+          </div>
+          {!isEditingProfile ? (
+            <button
+              type="button"
+              onClick={() => setIsEditingProfile(true)}
+              className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background inline-flex items-center gap-2"
+            >
+              <Edit2 className="w-4 h-4" />
+              Edit Profile
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setProfileDraft({
+                    primaryContact: safeClient?.primaryContact || settings.fullName || '',
+                    businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
+                    phone: settings.phone || '',
+                    roleInCompany: settings.roleInCompany || '',
+                    country: safeClient?.country || settings.country || onboardingData.country || '',
+                    industry: settings.industry || onboardingData.industry || '',
+                    tin: settings.tin || onboardingData.tin || '',
+                    reportingCycle: settings.reportingCycle || onboardingData.reportingCycle || '',
+                    startMonth: settings.startMonth || onboardingData.startMonth || '',
+                    currency: settings.currency || onboardingData.currency || 'NGN',
+                    language: settings.language || onboardingData.language || 'English',
+                    businessReg: settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg || '',
+                    address1: settings.address1 || '',
+                    address2: settings.address2 || '',
+                    city: settings.city || '',
+                    postalCode: settings.postalCode || '',
+                    addressCountry: settings.addressCountry || settings.country || onboardingData.country || '',
+                  })
+                  setIsEditingProfile(false)
+                }}
+                className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveProfileChanges}
+                disabled={isSavingProfile}
+                className="h-10 px-4 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-60"
+              >
+                {isSavingProfile ? 'Saving...' : 'Save Changes'}
+              </button>
             </div>
-          ))}
+          )}
         </div>
+
+        {isEditingProfile ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Primary Contact</label>
+              <input value={profileDraft.primaryContact} onChange={(event) => setProfileDraft((prev) => ({ ...prev, primaryContact: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Name</label>
+              <input value={profileDraft.businessName} onChange={(event) => setProfileDraft((prev) => ({ ...prev, businessName: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Work Email</label>
+              <input value={safeClient.email || ''} disabled className="w-full h-10 px-3 border border-border rounded-md text-sm bg-background text-text-muted" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Phone</label>
+              <input value={profileDraft.phone} onChange={(event) => setProfileDraft((prev) => ({ ...prev, phone: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Role in Company</label>
+              <input value={profileDraft.roleInCompany} onChange={(event) => setProfileDraft((prev) => ({ ...prev, roleInCompany: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Country</label>
+              <input value={profileDraft.country} onChange={(event) => setProfileDraft((prev) => ({ ...prev, country: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Industry</label>
+              <input value={profileDraft.industry} onChange={(event) => setProfileDraft((prev) => ({ ...prev, industry: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">TIN</label>
+              <input value={profileDraft.tin} onChange={(event) => setProfileDraft((prev) => ({ ...prev, tin: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Reg / CAC</label>
+              <input value={profileDraft.businessReg} onChange={(event) => setProfileDraft((prev) => ({ ...prev, businessReg: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Reporting Cycle</label>
+              <input value={profileDraft.reportingCycle} onChange={(event) => setProfileDraft((prev) => ({ ...prev, reportingCycle: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Start Month</label>
+              <input value={profileDraft.startMonth} onChange={(event) => setProfileDraft((prev) => ({ ...prev, startMonth: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Currency</label>
+              <input value={profileDraft.currency} onChange={(event) => setProfileDraft((prev) => ({ ...prev, currency: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Language</label>
+              <input value={profileDraft.language} onChange={(event) => setProfileDraft((prev) => ({ ...prev, language: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Address Line 1</label>
+              <input value={profileDraft.address1} onChange={(event) => setProfileDraft((prev) => ({ ...prev, address1: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Address Line 2</label>
+              <input value={profileDraft.address2} onChange={(event) => setProfileDraft((prev) => ({ ...prev, address2: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">City</label>
+              <input value={profileDraft.city} onChange={(event) => setProfileDraft((prev) => ({ ...prev, city: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Postal Code</label>
+              <input value={profileDraft.postalCode} onChange={(event) => setProfileDraft((prev) => ({ ...prev, postalCode: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+            <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Address Country</label>
+              <input value={profileDraft.addressCountry} onChange={(event) => setProfileDraft((prev) => ({ ...prev, addressCountry: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
+            {profileFields.map(([label, value]) => (
+              <div key={label} className="rounded-md border border-border-light bg-background px-3 py-2.5">
+                <p className="text-[11px] uppercase tracking-wide text-text-muted">{label}</p>
+                <p className="text-sm text-text-primary mt-1">{value || '--'}</p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light p-6 mb-6">
