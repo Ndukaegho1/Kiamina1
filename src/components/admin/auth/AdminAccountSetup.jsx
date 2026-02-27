@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ShieldCheck, Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react'
 import {
   ADMIN_LEVELS,
   ADMIN_PERMISSION_DEFINITIONS,
@@ -7,6 +7,7 @@ import {
   isAdminInvitePending,
 } from '../adminIdentity'
 import AdminOtpModal from './AdminOtpModal'
+import KiaminaLogo from '../../common/KiaminaLogo'
 
 function AdminAccountSetup({
   invite,
@@ -64,9 +65,7 @@ function AdminAccountSetup({
       >
         <div className="w-full max-w-lg bg-white border border-border-light rounded-xl shadow-card p-8">
           <div className="flex items-center justify-center mb-6">
-            <div className="w-11 h-11 bg-primary rounded-md flex items-center justify-center">
-              <ShieldCheck className="w-6 h-6 text-white" />
-            </div>
+            <KiaminaLogo className="h-12 w-auto" />
           </div>
 
           <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Account Setup</h1>
@@ -94,9 +93,7 @@ function AdminAccountSetup({
     >
       <div className="w-full max-w-2xl bg-white border border-border-light rounded-xl shadow-card p-8">
         <div className="flex items-center justify-center mb-6">
-          <div className="w-11 h-11 bg-primary rounded-md flex items-center justify-center">
-            <ShieldCheck className="w-6 h-6 text-white" />
-          </div>
+          <KiaminaLogo className="h-12 w-auto" />
         </div>
 
         <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Account Setup</h1>

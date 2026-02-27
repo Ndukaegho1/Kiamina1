@@ -52,6 +52,7 @@ import {
   bankStatementDocumentSeed,
   uploadHistoryData,
 } from '../../data/client/mockData'
+import KiaminaLogo from '../common/KiaminaLogo'
 
 // Mock admin data
 const mockAdmin = {
@@ -63,12 +64,12 @@ const mockAdmin = {
 
 // Mock documents for document review
 const mockDocuments = [
-  { id: 'DOC-001', filename: 'Expense_Report_Feb2026.pdf', category: 'Expense', user: 'John Doe', businessName: 'Acme Corporation', date: 'Feb 24, 2026 10:30 AM', status: 'Pending', priority: 'Normal', confidentiality: 'Internal', notes: '' },
+  { id: 'DOC-001', filename: 'Expense_Report_Feb2026.pdf', category: 'Expense', user: 'John Doe', businessName: 'Acme Corporation', date: 'Feb 24, 2026 10:30 AM', status: 'Pending Review', priority: 'Normal', confidentiality: 'Internal', notes: '' },
   { id: 'DOC-002', filename: 'Sales_Data_Jan2026.xlsx', category: 'Sales', user: 'Sarah Smith', businessName: 'Delta Ventures', date: 'Feb 23, 2026 2:15 PM', status: 'Approved', priority: 'High', confidentiality: 'Confidential', notes: '' },
-  { id: 'DOC-003', filename: 'Bank_Statement_GTB_Feb2026.pdf', category: 'Bank Statement', user: 'Mike Johnson', businessName: 'Prime Logistics', date: 'Feb 22, 2026 9:45 AM', status: 'Pending', priority: 'Normal', confidentiality: 'Internal', notes: '' },
+  { id: 'DOC-003', filename: 'Bank_Statement_GTB_Feb2026.pdf', category: 'Bank Statement', user: 'Mike Johnson', businessName: 'Prime Logistics', date: 'Feb 22, 2026 9:45 AM', status: 'Pending Review', priority: 'Normal', confidentiality: 'Internal', notes: '' },
   { id: 'DOC-004', filename: 'Transactions_Export.csv', category: 'Bank Statement', user: 'John Doe', businessName: 'Acme Corporation', date: 'Feb 21, 2026 4:20 PM', status: 'Rejected', priority: 'Low', confidentiality: 'Internal', notes: 'Missing required signatures' },
   { id: 'DOC-005', filename: 'Invoice_Template.docx', category: 'Sales', user: 'Sarah Smith', businessName: 'Delta Ventures', date: 'Feb 20, 2026 11:00 AM', status: 'Approved', priority: 'Normal', confidentiality: 'Public', notes: '' },
-  { id: 'DOC-006', filename: 'Receipt_Scanned_0042.pdf', category: 'Expense', user: 'Mike Johnson', businessName: 'Prime Logistics', date: 'Feb 19, 2026 3:30 PM', status: 'Pending', priority: 'High', confidentiality: 'Internal', notes: '' },
+  { id: 'DOC-006', filename: 'Receipt_Scanned_0042.pdf', category: 'Expense', user: 'Mike Johnson', businessName: 'Prime Logistics', date: 'Feb 19, 2026 3:30 PM', status: 'Pending Review', priority: 'High', confidentiality: 'Internal', notes: '' },
 ]
 
 // Mock document comments
@@ -142,6 +143,26 @@ const CATEGORY_BUCKET_CONFIG = {
   expenses: { bundleKey: 'expenses', label: 'Expense' },
   sales: { bundleKey: 'sales', label: 'Sales' },
   'bank-statements': { bundleKey: 'bankStatements', label: 'Bank Statement' },
+}
+
+const DOCUMENT_REVIEW_STATUS = {
+  PENDING_REVIEW: 'Pending Review',
+  APPROVED: 'Approved',
+  REJECTED: 'Rejected',
+  INFO_REQUESTED: 'Info Requested',
+  DELETED: 'Deleted',
+}
+
+const normalizeDocumentReviewStatus = (value, fallback = DOCUMENT_REVIEW_STATUS.PENDING_REVIEW) => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return fallback
+  if (normalized === 'pending' || normalized === 'pending review') return DOCUMENT_REVIEW_STATUS.PENDING_REVIEW
+  if (normalized === 'approved') return DOCUMENT_REVIEW_STATUS.APPROVED
+  if (normalized === 'rejected') return DOCUMENT_REVIEW_STATUS.REJECTED
+  if (normalized === 'info requested' || normalized === 'needs clarification') return DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+  if (normalized === 'draft') return DOCUMENT_REVIEW_STATUS.PENDING_REVIEW
+  if (normalized === 'deleted') return DOCUMENT_REVIEW_STATUS.DELETED
+  return fallback
 }
 
 const safeParseJson = (rawValue, fallback) => {
@@ -355,7 +376,7 @@ const readClientDocumentBundle = (client) => {
       category: item.category || 'Expense',
       date: item.date || '--',
       user: item.user || client?.primaryContact || 'Client User',
-      status: item.status || 'Pending',
+      status: normalizeDocumentReviewStatus(item.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW),
       businessName: client?.businessName || '--',
     }))
 
@@ -413,6 +434,32 @@ const normalizeDocumentType = (row = {}) => (
   (row.extension || row.type || row.filename?.split('.').pop() || 'FILE').toUpperCase()
 )
 
+const flattenDocumentRows = (rows = []) => {
+  const safeRows = Array.isArray(rows) ? rows : []
+  return safeRows.flatMap((row, rowIndex) => {
+    if (!row?.isFolder) {
+      return [{ ...row, __rowIndex: rowIndex }]
+    }
+    const files = Array.isArray(row.files) ? row.files : []
+    return files.map((file, fileIndex) => ({
+      ...file,
+      folderId: file.folderId || row.id,
+      folderName: file.folderName || row.folderName || '',
+      __rowIndex: `${rowIndex}-${fileIndex}`,
+    }))
+  })
+}
+
+const buildReviewFileSnapshot = (row = {}, nextStatus = DOCUMENT_REVIEW_STATUS.PENDING_REVIEW) => ({
+  filename: row.filename || 'Document',
+  extension: normalizeDocumentType(row),
+  status: normalizeDocumentReviewStatus(nextStatus),
+  class: row.class || row.expenseClass || row.salesClass || '',
+  folderId: row.folderId || '',
+  folderName: row.folderName || '',
+  previewUrl: row.previewUrl || null,
+})
+
 const normalizeReviewDocumentRow = (client, bucketKey, row, index) => ({
   id: `${client.email || 'client'}:${bucketKey}:${row.id || row.fileId || index}`,
   filename: row.filename || 'Document',
@@ -420,16 +467,23 @@ const normalizeReviewDocumentRow = (client, bucketKey, row, index) => ({
   user: row.user || client.primaryContact || 'Client User',
   businessName: client.businessName || '--',
   date: row.date || '--',
-  status: row.status || 'Pending',
-  priority: row.priority || 'Normal',
-  confidentiality: row.confidentiality || 'Internal',
-  notes: row.notes || '',
+  status: normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW),
+  priority: row.priority || row.processingPriority || 'Normal',
+  confidentiality: row.confidentiality || row.confidentialityLevel || 'Internal',
+  notes: row.notes || row.internalNotes || '',
+  isLocked: Boolean(row.isLocked) || normalizeDocumentReviewStatus(row.status) === DOCUMENT_REVIEW_STATUS.APPROVED,
+  approvedBy: row.approvedBy || '',
+  approvedAtIso: row.approvedAtIso || null,
+  rejectedBy: row.rejectedBy || '',
+  rejectedAtIso: row.rejectedAtIso || null,
+  rejectionReason: row.rejectionReason || '',
   extension: normalizeDocumentType(row),
   source: {
     clientEmail: client.email,
     bucketKey,
     rowId: row.id,
     fileId: row.fileId || '',
+    folderId: row.folderId || '',
     filename: row.filename || '',
     date: row.date || '',
     category: row.category || '',
@@ -447,7 +501,7 @@ const readAllDocumentsForReview = () => {
       ['bankStatements', bundle.bankStatements || []],
     ]
     bucketRows.forEach(([bucketKey, rows]) => {
-      rows.forEach((row, index) => {
+      flattenDocumentRows(rows).forEach((row, index) => {
         documents.push(normalizeReviewDocumentRow(client, bucketKey, row, index))
       })
     })
@@ -455,6 +509,7 @@ const readAllDocumentsForReview = () => {
   if (documents.length > 0) return documents
   return mockDocuments.map((row, index) => ({
     ...row,
+    status: normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW),
     source: null,
     extension: normalizeDocumentType(row),
     id: row.id || `MOCK-${index + 1}`,
@@ -474,10 +529,15 @@ const matchDocumentRow = (row, source = {}) => (
   )
 )
 
-const updateClientDocumentReviewStatus = (document, nextStatus, notes = '') => {
+const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', options = {}) => {
   if (!document?.source?.clientEmail || !document?.source?.bucketKey) return null
   const clientEmail = document.source.clientEmail.trim().toLowerCase()
   if (!clientEmail) return null
+
+  const normalizedNextStatus = normalizeDocumentReviewStatus(nextStatus, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+  const performedBy = toTrimmedValue(options?.performedBy) || 'Admin User'
+  const unlockReason = toTrimmedValue(options?.unlockReason)
+  const timestampIso = new Date().toISOString()
 
   const key = `${CLIENT_DOCUMENTS_STORAGE_KEY}:${clientEmail}`
   const client = readClientRows().find((item) => item.email === clientEmail)
@@ -486,24 +546,122 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '') => {
   const targetRows = Array.isArray(bundle[targetBucket]) ? bundle[targetBucket] : []
 
   let updatedTarget = false
-  const nextTargetRows = targetRows.map((row) => {
+  const applyStatusToFile = (row = {}) => {
     if (!matchDocumentRow(row, document.source)) return row
+    const previousStatus = normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+    const isUnlockingApproved = (
+      previousStatus === DOCUMENT_REVIEW_STATUS.APPROVED
+      && normalizedNextStatus === DOCUMENT_REVIEW_STATUS.PENDING_REVIEW
+    )
+    if (isUnlockingApproved && !unlockReason) return row
+
     updatedTarget = true
+    let nextNotes = notes || row.notes || ''
+    let versionAction = `Status changed to ${normalizedNextStatus}`
+    let activityType = 'status-change'
+    let activityDescription = `${row.filename || document.filename || 'Document'} status changed to ${normalizedNextStatus}.`
+    const nextPatch = {
+      status: normalizedNextStatus,
+      notes: nextNotes,
+      updatedAtIso: timestampIso,
+    }
+
+    if (normalizedNextStatus === DOCUMENT_REVIEW_STATUS.APPROVED) {
+      versionAction = 'Approved'
+      activityDescription = `File approved by ${performedBy}.`
+      nextPatch.isLocked = true
+      nextPatch.lockedAtIso = timestampIso
+      nextPatch.approvedBy = performedBy
+      nextPatch.approvedAtIso = timestampIso
+      nextPatch.unlockedBy = ''
+      nextPatch.unlockedAtIso = null
+      nextPatch.unlockReason = ''
+    } else if (normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED) {
+      versionAction = 'Rejected'
+      activityDescription = `File rejected by ${performedBy}${nextNotes ? ` - Reason: ${nextNotes}.` : '.'}`
+      nextPatch.isLocked = false
+      nextPatch.lockedAtIso = null
+      nextPatch.rejectedBy = performedBy
+      nextPatch.rejectedAtIso = timestampIso
+      nextPatch.rejectionReason = nextNotes || row.rejectionReason || ''
+    } else if (normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED) {
+      versionAction = 'Info Requested'
+      activityDescription = `Information requested by ${performedBy}${nextNotes ? ` - ${nextNotes}.` : '.'}`
+      nextPatch.isLocked = false
+      nextPatch.lockedAtIso = null
+      nextPatch.requiredAction = nextNotes || row.requiredAction || ''
+      nextPatch.infoRequestDetails = nextNotes || row.infoRequestDetails || ''
+      nextPatch.adminComment = nextNotes || row.adminComment || ''
+      nextPatch.adminNotes = nextNotes || row.adminNotes || ''
+    } else if (normalizedNextStatus === DOCUMENT_REVIEW_STATUS.PENDING_REVIEW) {
+      nextPatch.isLocked = false
+      nextPatch.lockedAtIso = null
+      if (isUnlockingApproved) {
+        versionAction = 'Unlocked'
+        activityType = 'unlock'
+        activityDescription = `File unlocked by ${performedBy} - Reason: ${unlockReason}.`
+        nextPatch.unlockedBy = performedBy
+        nextPatch.unlockedAtIso = timestampIso
+        nextPatch.unlockReason = unlockReason
+      }
+    }
+
+    const nextRow = {
+      ...row,
+      ...nextPatch,
+    }
+    const previousVersions = Array.isArray(nextRow.versions) ? nextRow.versions : []
+    const previousActivityLog = Array.isArray(nextRow.activityLog) ? nextRow.activityLog : []
+    const versionNumber = previousVersions.length + 1
+    const versionEntry = {
+      versionNumber,
+      action: versionAction,
+      performedBy,
+      timestamp: timestampIso,
+      notes: nextNotes || '',
+      fileSnapshot: buildReviewFileSnapshot(nextRow, normalizedNextStatus),
+    }
+    const activityEntry = {
+      id: `FACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      actionType: activityType,
+      description: activityDescription,
+      performedBy,
+      timestamp: timestampIso,
+    }
+    return {
+      ...nextRow,
+      versions: [...previousVersions, versionEntry],
+      activityLog: [...previousActivityLog, activityEntry],
+      uploadInfo: {
+        ...(nextRow.uploadInfo || {}),
+        lastModifiedAtIso: timestampIso,
+        totalVersions: versionNumber,
+      },
+    }
+  }
+
+  const nextTargetRows = targetRows.map((row) => {
+    if (!row?.isFolder) return applyStatusToFile(row)
+    const sourceFiles = Array.isArray(row.files) ? row.files : []
     return {
       ...row,
-      status: nextStatus,
-      notes: notes || row.notes || '',
+      files: sourceFiles.map((file) => applyStatusToFile(file)),
     }
   })
 
   if (!updatedTarget) return null
 
   const nextUploadHistory = (Array.isArray(bundle.uploadHistory) ? bundle.uploadHistory : []).map((row) => {
+    const matchesFileId = (
+      document.source.fileId
+      && row.fileId
+      && String(row.fileId) === String(document.source.fileId)
+    )
     const matchesFileName = String(row.filename || '').toLowerCase() === String(document.source.filename || '').toLowerCase()
-    if (!matchesFileName) return row
+    if (!matchesFileId && !matchesFileName) return row
     return {
       ...row,
-      status: nextStatus,
+      status: normalizedNextStatus,
     }
   })
 
@@ -514,11 +672,21 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '') => {
   }
   localStorage.setItem(key, JSON.stringify(nextBundle))
 
+  const activityAction = normalizedNextStatus === DOCUMENT_REVIEW_STATUS.APPROVED
+    ? 'File approved by Admin.'
+    : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED
+      ? `File rejected by Admin${notes ? ` - Reason: ${notes}.` : '.'}`
+      : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+        ? `Info requested by Admin${notes ? ` - ${notes}.` : '.'}`
+        : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.PENDING_REVIEW && unlockReason
+          ? `File unlocked by Super Admin - Reason: ${unlockReason}.`
+          : `Document review updated to ${normalizedNextStatus}.`
+
   appendScopedClientActivityLog(clientEmail, {
-    actorName: 'Admin User',
+    actorName: performedBy,
     actorRole: 'admin',
-    action: `Document review updated to ${nextStatus}`,
-    details: `${document.filename || 'Document'} status changed to ${nextStatus}.`,
+    action: activityAction,
+    details: `${document.filename || 'Document'} status changed to ${normalizedNextStatus}.`,
   })
 
   return nextBundle
@@ -636,15 +804,8 @@ function AdminSidebar({ activePage, setActivePage, onLogout, currentAdminAccount
   return (
     <aside className="w-64 bg-white border-r border-border fixed left-0 top-0 h-screen flex flex-col z-50">
       <div className="p-4 border-b border-border-light">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[#7A1F1F] rounded-md flex items-center justify-center">
-            <ShieldCheck className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <div className="font-semibold text-text-primary">Kiamina</div>
-            <div className="text-[11px] text-text-muted uppercase tracking-wide">Admin Control</div>
-          </div>
-        </div>
+        <KiaminaLogo className="h-11 w-auto" />
+        <div className="text-[11px] text-text-muted uppercase tracking-wide mt-2">Admin Control</div>
       </div>
 
       <div className="p-4 border-b border-border-light">
@@ -1915,7 +2076,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   )
 }
 
-function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminActionLog }) {
+function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminActionLog, currentAdminAccount }) {
   const [activeCategory, setActiveCategory] = useState('expenses')
   const [searchTerm, setSearchTerm] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
@@ -1945,11 +2106,13 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
     )
   }
 
+  const canUnlockApproved = currentAdminAccount?.adminLevel === 'senior'
+  const adminActorName = currentAdminAccount?.fullName || 'Admin User'
   const documents = documentBundle
   const recordsByCategory = {
-    expenses: documents.expenses || [],
-    sales: documents.sales || [],
-    'bank-statements': documents.bankStatements || [],
+    expenses: flattenDocumentRows(documents.expenses || []),
+    sales: flattenDocumentRows(documents.sales || []),
+    'bank-statements': flattenDocumentRows(documents.bankStatements || []),
   }
   const activeRows = recordsByCategory[activeCategory] || []
 
@@ -1960,7 +2123,7 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       const user = row.user || ''
       const extension = (row.extension || row.type || filename.split('.').pop() || '').toUpperCase()
       const matchesSearch = [filename, fileId, user].join(' ').toLowerCase().includes(searchTerm.trim().toLowerCase())
-      const matchesStatus = !filterStatus || row.status === filterStatus
+      const matchesStatus = !filterStatus || normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW) === filterStatus
       const matchesType = !filterType || extension === filterType
       return matchesSearch && matchesStatus && matchesType
     })
@@ -1978,7 +2141,12 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
     { id: 'sales', label: 'Sales', count: recordsByCategory.sales.length },
     { id: 'bank-statements', label: 'Bank Statements', count: recordsByCategory['bank-statements'].length },
   ]
-  const statusOptions = [...new Set(activeRows.map((row) => row.status).filter(Boolean))]
+  const statusOptions = [
+    DOCUMENT_REVIEW_STATUS.PENDING_REVIEW,
+    DOCUMENT_REVIEW_STATUS.APPROVED,
+    DOCUMENT_REVIEW_STATUS.REJECTED,
+    DOCUMENT_REVIEW_STATUS.INFO_REQUESTED,
+  ]
   const typeOptions = [...new Set(activeRows.map((row) => (row.extension || row.type || row.filename?.split('.').pop() || '').toUpperCase()).filter(Boolean))]
 
   const clearFilters = () => {
@@ -1988,12 +2156,30 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
   }
 
   const handleDocumentStatusChange = (row, nextStatus) => {
-    const currentStatus = row.status || 'Pending'
-    if (nextStatus === currentStatus) return
+    const currentStatus = normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+    const normalizedNextStatus = normalizeDocumentReviewStatus(nextStatus, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+    if (normalizedNextStatus === currentStatus) return
 
     let notes = row.notes || ''
-    if (nextStatus === 'Rejected' || nextStatus === 'Info Requested') {
-      const promptMessage = nextStatus === 'Rejected'
+    let unlockReason = ''
+    if (
+      currentStatus === DOCUMENT_REVIEW_STATUS.APPROVED
+      && normalizedNextStatus === DOCUMENT_REVIEW_STATUS.PENDING_REVIEW
+    ) {
+      if (!canUnlockApproved) {
+        showToast?.('error', 'Only a senior admin can unlock an approved file.')
+        return
+      }
+      const input = window.prompt('Provide unlock reason (required)', '')
+      if (input === null) return
+      if (!input.trim()) {
+        showToast?.('error', 'Unlock reason is required.')
+        return
+      }
+      unlockReason = input.trim()
+    }
+    if (normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED || normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED) {
+      const promptMessage = normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED
         ? 'Provide rejection reason'
         : 'Provide information request message'
       const input = window.prompt(promptMessage, notes || '')
@@ -2007,7 +2193,10 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
 
     const bucket = CATEGORY_BUCKET_CONFIG[activeCategory]?.bundleKey || 'expenses'
     const reviewDocument = normalizeReviewDocumentRow(safeClient, bucket, row, 0)
-    const updatedBundle = updateClientDocumentReviewStatus(reviewDocument, nextStatus, notes)
+    const updatedBundle = updateClientDocumentReviewStatus(reviewDocument, normalizedNextStatus, notes, {
+      performedBy: adminActorName,
+      unlockReason,
+    })
     if (!updatedBundle) {
       showToast?.('error', 'Unable to update document status.')
       return
@@ -2017,9 +2206,9 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
     onAdminActionLog?.({
       action: 'Reviewed client document',
       affectedUser: safeClient.businessName,
-      details: `${row.filename} set to ${nextStatus}.`,
+      details: `${row.filename} set to ${normalizedNextStatus}.${unlockReason ? ` Unlock reason: ${unlockReason}.` : ''}`,
     })
-    showToast?.('success', `Document status updated to ${nextStatus}.`)
+    showToast?.('success', `Document status updated to ${normalizedNextStatus}.`)
   }
 
   return (
@@ -2126,7 +2315,9 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
                 </td>
               </tr>
             )}
-            {filteredRows.map((row) => (
+            {filteredRows.map((row) => {
+              const normalizedStatus = normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+              return (
               <tr key={row.id} className="border-t border-border-light hover:bg-[#F9FAFB]">
                 <td className="px-4 py-3.5 text-sm text-text-primary font-medium">{row.filename || '--'}</td>
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{row.fileId || '--'}</td>
@@ -2135,29 +2326,32 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{row.date || '--'}</td>
                 <td className="px-4 py-3.5 text-sm">
                   <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${
-                    row.status === 'Approved'
+                    normalizedStatus === DOCUMENT_REVIEW_STATUS.APPROVED
                       ? 'bg-success-bg text-success'
-                      : row.status === 'Rejected'
+                      : normalizedStatus === DOCUMENT_REVIEW_STATUS.REJECTED
                         ? 'bg-error-bg text-error'
+                        : normalizedStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+                          ? 'bg-info-bg text-primary'
                         : 'bg-warning-bg text-warning'
                   }`}>
-                    {row.status || 'Pending'}
+                    {normalizedStatus}
                   </span>
                 </td>
                 <td className="px-4 py-3.5 text-sm">
                   <select
-                    value={row.status || 'Pending'}
+                    value={normalizedStatus}
                     onChange={(event) => handleDocumentStatusChange(row, event.target.value)}
                     className="h-8 px-2.5 border border-border rounded-md text-xs focus:outline-none focus:border-primary"
                   >
-                    <option value="Pending">Pending</option>
-                    <option value="Approved">Approved</option>
-                    <option value="Rejected">Rejected</option>
-                    <option value="Info Requested">Info Requested</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.PENDING_REVIEW}>Pending Review</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.APPROVED}>Approved</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.REJECTED}>Rejected</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.INFO_REQUESTED}>Info Requested</option>
                   </select>
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -2312,7 +2506,9 @@ function AdminClientUploadHistoryPage({ client, setActivePage }) {
                 </td>
               </tr>
             )}
-            {filteredRows.map((row) => (
+            {filteredRows.map((row) => {
+              const normalizedStatus = normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+              return (
               <tr key={row.id} className="border-t border-border-light hover:bg-[#F9FAFB]">
                 <td className="px-4 py-3.5 text-sm text-text-primary font-medium">{row.filename || '--'}</td>
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{(row.type || row.extension || row.filename?.split('.').pop() || '--').toUpperCase()}</td>
@@ -2321,17 +2517,20 @@ function AdminClientUploadHistoryPage({ client, setActivePage }) {
                 <td className="px-4 py-3.5 text-sm text-text-primary">{row.user || '--'}</td>
                 <td className="px-4 py-3.5 text-sm">
                   <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${
-                    row.status === 'Approved'
+                    normalizedStatus === DOCUMENT_REVIEW_STATUS.APPROVED
                       ? 'bg-success-bg text-success'
-                      : row.status === 'Rejected'
+                      : normalizedStatus === DOCUMENT_REVIEW_STATUS.REJECTED
                         ? 'bg-error-bg text-error'
+                        : normalizedStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+                          ? 'bg-info-bg text-primary'
                         : 'bg-warning-bg text-warning'
                   }`}>
-                    {row.status || 'Pending'}
+                    {normalizedStatus}
                   </span>
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -2340,7 +2539,7 @@ function AdminClientUploadHistoryPage({ client, setActivePage }) {
 }
 
 // Document Review Center with Preview Panel
-function AdminDocumentReviewCenter({ showToast }) {
+function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
   const [documents, setDocuments] = useState(() => readAllDocumentsForReview())
   const [selectedDocument, setSelectedDocument] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
@@ -2356,6 +2555,8 @@ function AdminDocumentReviewCenter({ showToast }) {
   const [editedCommentText, setEditedCommentText] = useState('')
   const [rejectionReason, setRejectionReason] = useState('')
   const [showRejectionModal, setShowRejectionModal] = useState(false)
+  const canUnlockApproved = currentAdminAccount?.adminLevel === 'senior'
+  const adminActorName = currentAdminAccount?.fullName || 'Admin User'
 
   useEffect(() => {
     const syncFromStorage = () => {
@@ -2380,7 +2581,8 @@ function AdminDocumentReviewCenter({ showToast }) {
       const matchesSearch = (doc.filename || '').toLowerCase().includes(searchTerm.toLowerCase())
         || (doc.user || '').toLowerCase().includes(searchTerm.toLowerCase())
         || (doc.businessName || '').toLowerCase().includes(searchTerm.toLowerCase())
-      const matchesStatus = filterStatus === 'All' || doc.status === filterStatus
+      const matchesStatus = filterStatus === 'All'
+        || normalizeDocumentReviewStatus(doc.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW) === filterStatus
       const matchesCategory = filterCategory === 'All' || doc.category === filterCategory
       return matchesSearch && matchesStatus && matchesCategory
     })
@@ -2465,12 +2667,21 @@ function AdminDocumentReviewCenter({ showToast }) {
     }
   }
 
-  const applyReviewStatus = (nextStatus, notes = '') => {
+  const applyReviewStatus = (nextStatus, notes = '', options = {}) => {
     if (!selectedDocument) return
+    const normalizedNextStatus = normalizeDocumentReviewStatus(nextStatus, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
     const updatedNote = notes || selectedDocument.notes || ''
+    const unlockReason = toTrimmedValue(options?.unlockReason)
 
     if (selectedDocument.source) {
-      updateClientDocumentReviewStatus(selectedDocument, nextStatus, updatedNote)
+      const updatedBundle = updateClientDocumentReviewStatus(selectedDocument, normalizedNextStatus, updatedNote, {
+        performedBy: adminActorName,
+        unlockReason,
+      })
+      if (!updatedBundle) {
+        showToast('error', 'Unable to update document status.')
+        return
+      }
       const nextRows = readAllDocumentsForReview()
       setDocuments(nextRows)
       const nextSelected = nextRows.find((row) => row.id === selectedDocument.id)
@@ -2479,26 +2690,41 @@ function AdminDocumentReviewCenter({ showToast }) {
     }
 
     setDocuments((prev) => prev.map((row) => (
-      row.id === selectedDocument.id ? { ...row, status: nextStatus, notes: updatedNote } : row
+      row.id === selectedDocument.id ? { ...row, status: normalizedNextStatus, notes: updatedNote } : row
     )))
-    setSelectedDocument((prev) => (prev ? { ...prev, status: nextStatus, notes: updatedNote } : prev))
+    setSelectedDocument((prev) => (prev ? { ...prev, status: normalizedNextStatus, notes: updatedNote } : prev))
   }
 
   const handleApprove = () => {
     if (!selectedDocument) return
-    applyReviewStatus('Approved')
+    applyReviewStatus(DOCUMENT_REVIEW_STATUS.APPROVED)
     showToast('success', 'Document approved successfully.')
   }
 
   const handleMarkPending = () => {
     if (!selectedDocument) return
-    applyReviewStatus('Pending')
-    showToast('success', 'Document moved back to pending.')
+    const currentStatus = normalizeDocumentReviewStatus(selectedDocument.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+    let unlockReason = ''
+    if (currentStatus === DOCUMENT_REVIEW_STATUS.APPROVED) {
+      if (!canUnlockApproved) {
+        showToast('error', 'Only a senior admin can unlock an approved file.')
+        return
+      }
+      const input = window.prompt('Provide unlock reason (required)', '')
+      if (input === null) return
+      if (!input.trim()) {
+        showToast('error', 'Unlock reason is required.')
+        return
+      }
+      unlockReason = input.trim()
+    }
+    applyReviewStatus(DOCUMENT_REVIEW_STATUS.PENDING_REVIEW, selectedDocument.notes || '', { unlockReason })
+    showToast('success', 'Document moved to pending review.')
   }
 
   const handleReject = () => {
     if (!selectedDocument || !rejectionReason.trim()) return
-    applyReviewStatus('Rejected', rejectionReason.trim())
+    applyReviewStatus(DOCUMENT_REVIEW_STATUS.REJECTED, rejectionReason.trim())
     setShowRejectionModal(false)
     setRejectionReason('')
     showToast('success', 'Document rejected. User has been notified.')
@@ -2512,7 +2738,7 @@ function AdminDocumentReviewCenter({ showToast }) {
       showToast('error', 'Please provide a message for information request.')
       return
     }
-    applyReviewStatus('Info Requested', message.trim())
+    applyReviewStatus(DOCUMENT_REVIEW_STATUS.INFO_REQUESTED, message.trim())
     showToast('success', 'Information request sent to user.')
   }
 
@@ -2520,11 +2746,11 @@ function AdminDocumentReviewCenter({ showToast }) {
   const handleZoomOut = () => setZoom(prev => Math.max(prev - 25, 50))
 
   const getStatusStyle = (status) => {
-    switch (status) {
-      case 'Approved': return 'bg-success-bg text-success'
-      case 'Pending': return 'bg-warning-bg text-warning'
-      case 'Rejected': return 'bg-error-bg text-error'
-      case 'Info Requested': return 'bg-info-bg text-primary'
+    switch (normalizeDocumentReviewStatus(status, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)) {
+      case DOCUMENT_REVIEW_STATUS.APPROVED: return 'bg-success-bg text-success'
+      case DOCUMENT_REVIEW_STATUS.PENDING_REVIEW: return 'bg-warning-bg text-warning'
+      case DOCUMENT_REVIEW_STATUS.REJECTED: return 'bg-error-bg text-error'
+      case DOCUMENT_REVIEW_STATUS.INFO_REQUESTED: return 'bg-info-bg text-primary'
       default: return 'bg-border text-text-secondary'
     }
   }
@@ -2564,10 +2790,10 @@ function AdminDocumentReviewCenter({ showToast }) {
               className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             >
               <option value="All">All Status</option>
-              <option value="Pending">Pending</option>
-              <option value="Approved">Approved</option>
-              <option value="Rejected">Rejected</option>
-              <option value="Info Requested">Info Requested</option>
+              <option value={DOCUMENT_REVIEW_STATUS.PENDING_REVIEW}>Pending Review</option>
+              <option value={DOCUMENT_REVIEW_STATUS.APPROVED}>Approved</option>
+              <option value={DOCUMENT_REVIEW_STATUS.REJECTED}>Rejected</option>
+              <option value={DOCUMENT_REVIEW_STATUS.INFO_REQUESTED}>Info Requested</option>
             </select>
             <select
               value={filterCategory}
@@ -2635,7 +2861,7 @@ function AdminDocumentReviewCenter({ showToast }) {
                 <td className="px-4 py-3.5 text-sm font-medium">{doc.priority}</td>
                 <td className="px-4 py-3.5 text-sm">
                   <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getStatusStyle(doc.status)}`}>
-                    {doc.status}
+                    {normalizeDocumentReviewStatus(doc.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)}
                   </span>
                 </td>
               </tr>
@@ -2708,7 +2934,7 @@ function AdminDocumentReviewCenter({ showToast }) {
                     <label className="text-xs text-text-muted uppercase tracking-wide">Status</label>
                     <p className="text-sm mt-1">
                       <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getStatusStyle(selectedDocument.status)}`}>
-                        {selectedDocument.status}
+                        {normalizeDocumentReviewStatus(selectedDocument.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)}
                       </span>
                     </p>
                   </div>
@@ -2768,7 +2994,7 @@ function AdminDocumentReviewCenter({ showToast }) {
                       className="h-9 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors flex items-center justify-center gap-1"
                     >
                       <Clock className="w-4 h-4" />
-                      Mark Pending
+                      Pending Review
                     </button>
                   </div>
                 </div>

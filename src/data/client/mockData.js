@@ -33,32 +33,32 @@ export const bankData = [
 export const uploadHistoryData = [
   { id: 1, filename: 'Expense_Report_Feb2026.pdf', type: 'PDF', category: 'Expense', date: 'Feb 24, 2026 10:30 AM', user: 'John Doe', status: 'Approved' },
   { id: 2, filename: 'Sales_Data_Jan2026.xlsx', type: 'XLSX', category: 'Sales', date: 'Feb 23, 2026 2:15 PM', user: 'Sarah Smith', status: 'Approved' },
-  { id: 3, filename: 'Bank_Statement_GTB_Feb2026.pdf', type: 'PDF', category: 'Bank Statement', date: 'Feb 22, 2026 9:45 AM', user: 'Mike Johnson', status: 'Pending' },
+  { id: 3, filename: 'Bank_Statement_GTB_Feb2026.pdf', type: 'PDF', category: 'Bank Statement', date: 'Feb 22, 2026 9:45 AM', user: 'Mike Johnson', status: 'Pending Review' },
   { id: 4, filename: 'Transactions_Export.csv', type: 'CSV', category: 'Bank Statement', date: 'Feb 21, 2026 4:20 PM', user: 'John Doe', status: 'Approved' },
   { id: 5, filename: 'Invoice_Template.docx', type: 'DOCX', category: 'Sales', date: 'Feb 20, 2026 11:00 AM', user: 'Sarah Smith', status: 'Rejected' },
   { id: 6, filename: 'Receipt_Scanned_0042.pdf', type: 'PDF', category: 'Expense', date: 'Feb 19, 2026 3:30 PM', user: 'Mike Johnson', status: 'Approved' },
-  { id: 7, filename: 'Budget_Analysis_2026.xlsx', type: 'XLSX', category: 'Sales', date: 'Feb 18, 2026 8:15 AM', user: 'John Doe', status: 'Pending' },
+  { id: 7, filename: 'Budget_Analysis_2026.xlsx', type: 'XLSX', category: 'Sales', date: 'Feb 18, 2026 8:15 AM', user: 'John Doe', status: 'Pending Review' },
 ]
 
 export const expenseDocumentSeed = [
   { id: 1, fileId: 'EXP-001', filename: 'Expense_Report_Jan2026.pdf', user: 'John Doe', date: 'Feb 24, 2026 10:30 AM', status: 'Approved' },
-  { id: 2, fileId: 'EXP-002', filename: 'Fuel_Receipts.pdf', user: 'Sarah Smith', date: 'Feb 23, 2026 2:15 PM', status: 'Pending' },
+  { id: 2, fileId: 'EXP-002', filename: 'Fuel_Receipts.pdf', user: 'Sarah Smith', date: 'Feb 23, 2026 2:15 PM', status: 'Pending Review' },
   { id: 3, fileId: 'EXP-003', filename: 'Office_Supplies.xlsx', user: 'Mike Johnson', date: 'Feb 22, 2026 9:45 AM', status: 'Approved' },
   { id: 4, fileId: 'EXP-004', filename: 'Travel_Expenses.pdf', user: 'John Doe', date: 'Feb 21, 2026 4:20 PM', status: 'Rejected' },
-  { id: 5, fileId: 'EXP-005', filename: 'Utilities_Bill.pdf', user: 'Sarah Smith', date: 'Feb 20, 2026 11:00 AM', status: 'Pending' },
+  { id: 5, fileId: 'EXP-005', filename: 'Utilities_Bill.pdf', user: 'Sarah Smith', date: 'Feb 20, 2026 11:00 AM', status: 'Pending Review' },
 ]
 
 export const salesDocumentSeed = [
   { id: 1, fileId: 'SAL-001', filename: 'Sales_Report_Jan2026.xlsx', user: 'John Doe', date: 'Feb 24, 2026 10:30 AM', status: 'Approved' },
-  { id: 2, fileId: 'SAL-002', filename: 'Invoice_001.pdf', user: 'Sarah Smith', date: 'Feb 23, 2026 2:15 PM', status: 'Pending' },
+  { id: 2, fileId: 'SAL-002', filename: 'Invoice_001.pdf', user: 'Sarah Smith', date: 'Feb 23, 2026 2:15 PM', status: 'Pending Review' },
   { id: 3, fileId: 'SAL-003', filename: 'Revenue_Data.xlsx', user: 'Mike Johnson', date: 'Feb 22, 2026 9:45 AM', status: 'Approved' },
   { id: 4, fileId: 'SAL-004', filename: 'Client_Payments.pdf', user: 'John Doe', date: 'Feb 21, 2026 4:20 PM', status: 'Rejected' },
-  { id: 5, fileId: 'SAL-005', filename: 'Sales_Analysis.xlsx', user: 'Sarah Smith', date: 'Feb 20, 2026 11:00 AM', status: 'Pending' },
+  { id: 5, fileId: 'SAL-005', filename: 'Sales_Analysis.xlsx', user: 'Sarah Smith', date: 'Feb 20, 2026 11:00 AM', status: 'Pending Review' },
 ]
 
 export const bankStatementDocumentSeed = [
   { id: 1, fileId: 'BNK-001', filename: 'GTBank_Statement_Jan2026.pdf', user: 'John Doe', date: 'Feb 24, 2026 10:30 AM', status: 'Approved' },
-  { id: 2, fileId: 'BNK-002', filename: 'Zenith_Statement_Feb2026.pdf', user: 'Sarah Smith', date: 'Feb 23, 2026 2:15 PM', status: 'Pending' },
+  { id: 2, fileId: 'BNK-002', filename: 'Zenith_Statement_Feb2026.pdf', user: 'Sarah Smith', date: 'Feb 23, 2026 2:15 PM', status: 'Pending Review' },
   { id: 3, fileId: 'BNK-003', filename: 'Access_Statement_Q1.pdf', user: 'Mike Johnson', date: 'Feb 22, 2026 9:45 AM', status: 'Approved' },
   { id: 4, fileId: 'BNK-004', filename: 'UBA_Statement_2026-02.pdf', user: 'John Doe', date: 'Feb 21, 2026 4:20 PM', status: 'Rejected' },
 ]

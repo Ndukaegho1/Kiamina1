@@ -32,6 +32,7 @@ import {
   Lock
 } from 'lucide-react'
 import { INDUSTRY_OPTIONS } from '../../../data/client/mockData'
+import KiaminaLogo from '../../common/KiaminaLogo'
 function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSkip, onComplete, showToast }) {
   const [errors, setErrors] = useState({})
 
@@ -105,6 +106,10 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
   return (
     <div className="min-h-screen bg-background px-4 py-8" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
       <div className="max-w-4xl mx-auto bg-white border border-border-light rounded-xl shadow-card p-8">
+        <div className="flex items-center justify-center mb-6">
+          <KiaminaLogo className="h-12 w-auto" />
+        </div>
+
         <div className="flex items-center justify-between mb-4">
           <div>
             <div className="text-xs font-medium text-text-muted uppercase tracking-wide">Step {currentStep} of 5</div>

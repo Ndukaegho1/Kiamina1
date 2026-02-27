@@ -31,6 +31,7 @@ import {
   Building,
   Lock
 } from 'lucide-react'
+import KiaminaLogo from '../common/KiaminaLogo'
 function AppleBrandIcon() {
   return (
     <svg viewBox="0 0 24 24" className="w-5 h-5" aria-hidden="true">
@@ -84,9 +85,7 @@ function LegacyAuthExperience({ mode, setMode, onLogin, onSignup, onSocialLogin,
     <div className="min-h-screen bg-background flex items-center justify-center px-4 py-10" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
       <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-8">
         <div className="flex items-center justify-center mb-6">
-          <div className="w-10 h-10 bg-primary rounded-md flex items-center justify-center">
-            <TrendingUp className="w-6 h-6 text-white" />
-          </div>
+          <KiaminaLogo className="h-12 w-auto" />
         </div>
 
         {mode === 'login' ? (
@@ -699,9 +698,7 @@ function AuthExperience({
     <div className="min-h-screen bg-background flex items-center justify-center px-4 py-10" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
       <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-8">
         <div className="flex items-center justify-center mb-6">
-          <div className="w-10 h-10 bg-primary rounded-md flex items-center justify-center">
-            <TrendingUp className="w-6 h-6 text-white" />
-          </div>
+          <KiaminaLogo className="h-12 w-auto" />
         </div>
 
         {mode === 'login' && (

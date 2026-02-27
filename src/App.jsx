@@ -1,16 +1,19 @@
-﻿import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { CheckCircle, AlertCircle, X, Loader2, ShieldAlert, ArrowLeftRight } from 'lucide-react'
 import {
   Sidebar as ClientSidebar,
   TopBar as ClientTopBar,
   DashboardPage as ClientDashboardPage,
-  ExpensesPage as ClientExpensesPage,
   HomePage,
-  SalesPage as ClientSalesPage,
-  BankStatementsPage as ClientBankStatementsPage,
   UploadHistoryPage as ClientUploadHistoryPage,
+  RecentActivitiesPage as ClientRecentActivitiesPage,
+  SupportPage as ClientSupportPage,
   ClientSupportWidget,
 } from './components/client/dashboard/ClientDashboardViews'
+import {
+  DocumentFoldersPage as ClientDocumentFoldersPage,
+  FolderFilesPage as ClientFolderFilesPage,
+} from './components/client/dashboard/ClientDocumentsWorkspace'
 import ClientSettingsPage from './components/client/settings/ClientSettingsPage'
 import ClientAddDocumentModal from './components/client/documents/ClientAddDocumentModal'
 import AuthExperience from './components/auth/AuthExperience'
@@ -35,7 +38,7 @@ import {
 } from './data/client/mockData'
 import { getScopedStorageKey } from './utils/storage'
 
-const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'settings']
+const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
@@ -44,6 +47,7 @@ const IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaImpersonationSession'
 const OTP_PREVIEW_STORAGE_KEY = 'kiaminaOtpPreview'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
+const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
 const IMPERSONATION_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_DEV_ADMIN_ACCOUNT = {
   fullName: 'Senior Admin',
@@ -161,6 +165,364 @@ const cloneDocumentRows = (rows = []) => (
   Array.isArray(rows) ? rows.map((row) => ({ ...row })) : []
 )
 
+const formatClientDocumentTimestamp = (value) => {
+  const parsed = Date.parse(value || '')
+  const sourceDate = Number.isFinite(parsed) ? new Date(parsed) : new Date()
+  return sourceDate.toLocaleString('en-US', {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  })
+}
+
+const toIsoDate = (value) => {
+  const parsed = Date.parse(value || '')
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString()
+}
+
+const buildFileSnapshot = (file = {}) => ({
+  filename: file.filename || 'Document',
+  extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
+  status: file.status || 'Pending Review',
+  class: file.class || file.expenseClass || file.salesClass || '',
+  folderId: file.folderId || '',
+  folderName: file.folderName || '',
+  previewUrl: file.previewUrl || null,
+})
+
+const normalizeDocumentWorkflowStatus = (value, fallback = 'Pending Review') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return fallback
+  if (normalized === 'pending' || normalized === 'pending review') return 'Pending Review'
+  if (normalized === 'approved') return 'Approved'
+  if (normalized === 'rejected') return 'Rejected'
+  if (normalized === 'info requested' || normalized === 'needs clarification') return 'Info Requested'
+  if (normalized === 'draft') return 'Pending Review'
+  if (normalized === 'deleted') return 'Deleted'
+  return fallback
+}
+
+const readScopedClientStatusControl = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return {}
+  const scopedKey = getScopedStorageKey(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail)
+  try {
+    const scopedValue = JSON.parse(localStorage.getItem(scopedKey) || 'null')
+    if (scopedValue && typeof scopedValue === 'object') return scopedValue
+  } catch {
+    // ignore malformed scoped status control payload
+  }
+  try {
+    const fallbackValue = JSON.parse(localStorage.getItem(CLIENT_STATUS_CONTROL_STORAGE_KEY) || 'null')
+    return fallbackValue && typeof fallbackValue === 'object' ? fallbackValue : {}
+  } catch {
+    return {}
+  }
+}
+
+const resolveClientVerificationState = ({
+  email = '',
+  verificationPending = true,
+  accountStatus = '',
+} = {}) => {
+  const normalizedAccountStatus = String(accountStatus || '').trim().toLowerCase()
+  if (normalizedAccountStatus === 'suspended') return 'suspended'
+
+  const statusControl = readScopedClientStatusControl(email)
+  const normalizedCompliance = String(statusControl?.verificationStatus || '').trim().toLowerCase()
+
+  if (
+    normalizedCompliance === 'suspended'
+    || normalizedCompliance.includes('suspended')
+  ) {
+    return 'suspended'
+  }
+
+  if (
+    normalizedCompliance.includes('fully compliant')
+    || normalizedCompliance === 'verified'
+    || normalizedCompliance === 'approved'
+    || normalizedCompliance === 'compliant'
+  ) {
+    return 'verified'
+  }
+
+  if (
+    normalizedCompliance.includes('action required')
+    || normalizedCompliance === 'rejected'
+    || normalizedCompliance.includes('clarification')
+    || normalizedCompliance.includes('info requested')
+  ) {
+    return 'rejected'
+  }
+
+  if (
+    normalizedCompliance.includes('verification pending')
+    || normalizedCompliance === 'pending'
+    || normalizedCompliance.includes('awaiting')
+  ) {
+    return 'pending'
+  }
+
+  return verificationPending ? 'pending' : 'verified'
+}
+
+const createVersionEntry = ({
+  versionNumber = 1,
+  action = 'Uploaded',
+  performedBy = 'Client User',
+  timestamp,
+  notes = '',
+  fileSnapshot = {},
+}) => ({
+  versionNumber,
+  action,
+  performedBy,
+  timestamp,
+  notes,
+  fileSnapshot: buildFileSnapshot(fileSnapshot),
+})
+
+const createFileActivityEntry = ({
+  actionType = 'upload',
+  description = 'File activity',
+  performedBy = 'Client User',
+  timestamp,
+}) => ({
+  id: `FACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+  actionType,
+  description,
+  performedBy,
+  timestamp,
+})
+
+const ensureFolderStructuredRecords = (rows = [], categoryKey = 'expenses') => {
+  const safeRows = Array.isArray(rows) ? rows.filter((row) => row && typeof row === 'object') : []
+  const categoryPrefix = categoryKey === 'sales'
+    ? 'SAL'
+    : categoryKey === 'bankStatements'
+      ? 'BNK'
+      : 'EXP'
+  const categoryLabel = categoryKey === 'sales'
+    ? 'Sales'
+    : categoryKey === 'bankStatements'
+      ? 'Bank Statements'
+      : 'Expenses'
+
+  const createFileId = (folderId, index) => {
+    const serialPart = String(index + 1).padStart(3, '0')
+    const token = folderId.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-8)
+    return `${categoryPrefix}-${token}-${serialPart}`
+  }
+
+  const normalizeFile = (sourceFile = {}, folderId, index, folderName = 'Folder') => {
+    const file = sourceFile && typeof sourceFile === 'object' ? sourceFile : {}
+    const className = file.class || file.expenseClass || file.salesClass || ''
+    const timestamp = file.date || formatClientDocumentTimestamp()
+    const timestampIso = file.updatedAtIso || file.createdAtIso || toIsoDate(file.date)
+    const fileId = file.fileId || createFileId(folderId, index)
+    const normalizePreviewUrl = (value = '') => {
+      const normalized = String(value || '').trim()
+      if (!normalized) return ''
+      return normalized.toLowerCase().startsWith('blob:') ? '' : normalized
+    }
+    const normalizedPreviewUrl = normalizePreviewUrl(file.previewUrl || '')
+    const actorName = file.user || 'Client User'
+    const normalizedIsDeleted = Boolean(file.isDeleted || file.status === 'Deleted')
+    const normalizedStatus = normalizedIsDeleted
+      ? 'Deleted'
+      : normalizeDocumentWorkflowStatus(file.status || 'Pending Review')
+    const normalizedIsLocked = normalizedStatus === 'Approved' || Boolean(file.isLocked)
+    const rawVersions = Array.isArray(file.versions) ? file.versions : []
+    const normalizedVersions = rawVersions.length > 0
+      ? rawVersions.map((entry, entryIndex) => ({
+        versionNumber: entry.versionNumber || entry.version || entryIndex + 1,
+        action: entry.action || 'Updated',
+        performedBy: entry.performedBy || actorName,
+        timestamp: entry.timestamp || toIsoDate(entry.date || timestamp),
+        notes: entry.notes || '',
+        fileSnapshot: buildFileSnapshot(entry.fileSnapshot || {
+          ...file,
+          filename: entry.filename || file.filename,
+          extension: file.extension,
+          previewUrl: normalizePreviewUrl(entry.previewUrl || file.previewUrl || ''),
+          folderId,
+          folderName,
+        }),
+      }))
+      : [createVersionEntry({
+        versionNumber: 1,
+        action: 'Uploaded',
+        performedBy: actorName,
+        timestamp: timestampIso,
+        notes: 'Initial upload.',
+        fileSnapshot: {
+          ...file,
+          folderId,
+          folderName,
+          status: normalizedStatus,
+          class: className,
+        },
+      })]
+    const rawActivityLog = Array.isArray(file.activityLog) ? file.activityLog : []
+    const normalizedActivityLog = rawActivityLog.length > 0
+      ? rawActivityLog.map((entry) => ({
+        id: entry.id || `FACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        actionType: entry.actionType || 'info',
+        description: entry.description || entry.action || 'File activity',
+        performedBy: entry.performedBy || actorName,
+        timestamp: entry.timestamp || timestampIso,
+      }))
+      : [createFileActivityEntry({
+        actionType: 'upload',
+        description: 'File uploaded.',
+        performedBy: actorName,
+        timestamp: timestampIso,
+      })]
+    const rawUploadInfo = file.uploadInfo || {}
+    const normalizedUploadInfo = {
+      originalUploadedAtIso: rawUploadInfo.originalUploadedAtIso || file.createdAtIso || timestampIso,
+      originalUploadSource: rawUploadInfo.originalUploadSource || file.uploadSource || 'browse-file',
+      originalUploadedBy: rawUploadInfo.originalUploadedBy || actorName,
+      device: rawUploadInfo.device || 'Web Browser',
+      ipAddress: rawUploadInfo.ipAddress || '--',
+      lastModifiedAtIso: rawUploadInfo.lastModifiedAtIso || file.updatedAtIso || timestampIso,
+      replacements: Array.isArray(rawUploadInfo.replacements) ? rawUploadInfo.replacements : [],
+      totalVersions: rawUploadInfo.totalVersions || normalizedVersions.length,
+    }
+    return {
+      ...file,
+      id: file.id || `${folderId}-FILE-${String(index + 1).padStart(3, '0')}`,
+      folderId,
+      fileId,
+      filename: file.filename || `Document ${index + 1}`,
+      extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
+      previewUrl: normalizedPreviewUrl,
+      status: normalizedStatus,
+      isLocked: normalizedIsLocked,
+      lockedAtIso: file.lockedAtIso || (normalizedIsLocked ? timestampIso : null),
+      approvedBy: file.approvedBy || '',
+      approvedAtIso: file.approvedAtIso || null,
+      rejectedBy: file.rejectedBy || '',
+      rejectedAtIso: file.rejectedAtIso || null,
+      rejectionReason: file.rejectionReason || '',
+      unlockedBy: file.unlockedBy || '',
+      unlockedAtIso: file.unlockedAtIso || null,
+      unlockReason: file.unlockReason || '',
+      user: file.user || 'Client User',
+      date: timestamp,
+      createdAtIso: file.createdAtIso || timestampIso,
+      updatedAtIso: file.updatedAtIso || timestampIso,
+      deletedAtIso: file.deletedAtIso || null,
+      isDeleted: normalizedIsDeleted,
+      class: className,
+      expenseClass: file.expenseClass || className,
+      salesClass: file.salesClass || className,
+      vendorName: file.vendorName || '',
+      confidentialityLevel: file.confidentialityLevel || 'Standard',
+      processingPriority: file.processingPriority || 'Normal',
+      internalNotes: file.internalNotes || '',
+      folderName,
+      versions: normalizedVersions,
+      activityLog: normalizedActivityLog,
+      uploadInfo: normalizedUploadInfo,
+    }
+  }
+
+  const normalizeFolder = (sourceFolder = {}, folderIndex = 0) => {
+    const folder = sourceFolder && typeof sourceFolder === 'object' ? sourceFolder : {}
+    const folderId = folder.id || `F-${Date.now().toString(36).toUpperCase()}-${String(folderIndex + 1).padStart(2, '0')}`
+    const folderName = folder.folderName || `${categoryLabel} Folder ${folderIndex + 1}`
+    const createdAtIso = folder.createdAtIso || toIsoDate(folder.createdAtDisplay || folder.date)
+    const sourceFiles = Array.isArray(folder.files) ? folder.files : []
+    return {
+      id: folderId,
+      isFolder: true,
+      folderName,
+      category: folder.category || categoryLabel,
+      user: folder.user || 'Client User',
+      createdAtIso,
+      createdAtDisplay: folder.createdAtDisplay || formatClientDocumentTimestamp(createdAtIso),
+      date: folder.date || formatClientDocumentTimestamp(createdAtIso),
+      files: sourceFiles.map((file, fileIndex) => normalizeFile(file, folderId, fileIndex, folderName)),
+    }
+  }
+
+  const folderRows = safeRows.filter((row) => row?.isFolder).map((folder, index) => normalizeFolder(folder, index))
+  const legacyRows = safeRows.filter((row) => !row?.isFolder)
+
+  if (legacyRows.length === 0) return folderRows
+
+  const migrationFolderId = `F-MIG-${categoryPrefix}-${Date.now().toString(36).toUpperCase()}`
+  const migrationCreatedAt = new Date().toISOString()
+  const migrationFolderName = `Migrated ${categoryLabel} Files`
+  const migrationFolder = {
+    id: migrationFolderId,
+    isFolder: true,
+    folderName: migrationFolderName,
+    category: categoryLabel,
+    user: legacyRows[0]?.user || 'Client User',
+    createdAtIso: migrationCreatedAt,
+    createdAtDisplay: formatClientDocumentTimestamp(migrationCreatedAt),
+    date: formatClientDocumentTimestamp(migrationCreatedAt),
+    files: legacyRows.map((row, index) => normalizeFile(row, migrationFolderId, index, migrationFolderName)),
+  }
+
+  return [migrationFolder, ...folderRows]
+}
+
+const flattenFolderFilesForDashboard = (records = [], categoryId = 'expenses') => {
+  const categoryLabel = categoryId === 'sales'
+    ? 'Sales'
+    : categoryId === 'bank-statements'
+      ? 'Bank Statement'
+      : 'Expense'
+
+  const safeRecords = Array.isArray(records) ? records : []
+  return safeRecords.flatMap((record) => {
+    if (record?.isFolder) {
+      if (record.archived) return []
+      return (record.files || [])
+        .filter((file) => !file?.isDeleted)
+        .map((file) => ({
+        ...file,
+        categoryId,
+        category: categoryLabel,
+      }))
+    }
+    if (record?.isDeleted) return []
+    return [{
+      ...record,
+      categoryId,
+      category: record?.category || categoryLabel,
+    }]
+  })
+}
+
+const updateFirstPendingFileStatus = (records = [], nextStatus = 'Approved') => {
+  let updated = false
+  const nextRecords = records.map((record) => {
+    if (updated || !record?.isFolder) return record
+    const files = Array.isArray(record.files) ? record.files : []
+    const pendingIndex = files.findIndex((file) => (
+      !file?.isDeleted
+      && normalizeDocumentWorkflowStatus(file.status || 'Pending Review') === 'Pending Review'
+    ))
+    if (pendingIndex === -1) return record
+    const nextFiles = [...files]
+    nextFiles[pendingIndex] = { ...nextFiles[pendingIndex], status: nextStatus }
+    updated = true
+    return {
+      ...record,
+      files: nextFiles,
+    }
+  })
+  return { updated, records: nextRecords }
+}
+
 const createDefaultClientDocuments = (ownerName = '') => {
   const normalizedOwner = ownerName?.trim() || 'Client User'
   return {
@@ -170,6 +532,13 @@ const createDefaultClientDocuments = (ownerName = '') => {
     uploadHistory: uploadHistoryData.map((item) => ({ ...item, user: normalizedOwner })),
   }
 }
+
+const normalizeUploadHistoryRows = (rows = []) => (
+  (Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    status: normalizeDocumentWorkflowStatus(row?.status || 'Pending Review'),
+  }))
+)
 
 const readClientDocuments = (email, ownerName = '') => {
   const fallback = createDefaultClientDocuments(ownerName)
@@ -188,7 +557,9 @@ const readClientDocuments = (email, ownerName = '') => {
       expenses: Array.isArray(parsed.expenses) ? cloneDocumentRows(parsed.expenses) : fallback.expenses,
       sales: Array.isArray(parsed.sales) ? cloneDocumentRows(parsed.sales) : fallback.sales,
       bankStatements: Array.isArray(parsed.bankStatements) ? cloneDocumentRows(parsed.bankStatements) : fallback.bankStatements,
-      uploadHistory: Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
+      uploadHistory: normalizeUploadHistoryRows(
+        Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
+      ),
     }
   } catch {
     return fallback
@@ -197,8 +568,54 @@ const readClientDocuments = (email, ownerName = '') => {
 
 const persistClientDocuments = (email, documents) => {
   if (!email || !documents) return
+  const sanitizePreviewUrl = (value = '') => {
+    const normalized = String(value || '').trim()
+    if (!normalized) return ''
+    return normalized.toLowerCase().startsWith('blob:') ? '' : normalized
+  }
+  const sanitizeFile = (file = {}) => {
+    const safeVersions = Array.isArray(file.versions)
+      ? file.versions.map((version = {}, index) => {
+        const safeSnapshot = version.fileSnapshot && typeof version.fileSnapshot === 'object'
+          ? {
+            ...version.fileSnapshot,
+            previewUrl: sanitizePreviewUrl(version.fileSnapshot.previewUrl || ''),
+          }
+          : version.fileSnapshot
+        return {
+          ...version,
+          versionNumber: version.versionNumber || version.version || index + 1,
+          previewUrl: sanitizePreviewUrl(version.previewUrl || ''),
+          fileSnapshot: safeSnapshot,
+        }
+      })
+      : file.versions
+    const nextFile = {
+      ...file,
+      previewUrl: sanitizePreviewUrl(file.previewUrl || ''),
+      versions: safeVersions,
+    }
+    if ('rawFile' in nextFile) {
+      delete nextFile.rawFile
+    }
+    return nextFile
+  }
+  const sanitizeCategoryRows = (rows = []) => (
+    (Array.isArray(rows) ? rows : []).map((row) => {
+      if (!row?.isFolder) return sanitizeFile(row)
+      return {
+        ...row,
+        files: (Array.isArray(row.files) ? row.files : []).map((file) => sanitizeFile(file)),
+      }
+    })
+  )
   const scopedKey = getScopedStorageKey(CLIENT_DOCUMENTS_STORAGE_KEY, email)
-  localStorage.setItem(scopedKey, JSON.stringify(documents))
+  localStorage.setItem(scopedKey, JSON.stringify({
+    ...documents,
+    expenses: sanitizeCategoryRows(documents.expenses),
+    sales: sanitizeCategoryRows(documents.sales),
+    bankStatements: sanitizeCategoryRows(documents.bankStatements),
+  }))
 }
 
 const appendClientActivityLog = (email, entry = {}) => {
@@ -225,6 +642,18 @@ const appendClientActivityLog = (email, entry = {}) => {
   }
   localStorage.setItem(key, JSON.stringify([logEntry, ...existing]))
   return logEntry
+}
+
+const readClientActivityLogEntries = (email) => {
+  const normalizedEmail = email?.trim()?.toLowerCase()
+  if (!normalizedEmail) return []
+  const key = getScopedStorageKey(CLIENT_ACTIVITY_STORAGE_KEY, normalizedEmail)
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
 }
 
 function App() {
@@ -404,6 +833,7 @@ function App() {
     || initialAuthUser?.fullName
     || 'Client User'
   const initialClientDocuments = readClientDocuments(initialScopedClientEmail, initialDocumentOwner)
+  const initialClientActivityRecords = readClientActivityLogEntries(initialScopedClientEmail)
   const [authMode, setAuthMode] = useState('login')
   const [authUser, setAuthUser] = useState(initialAuthUser)
   const [isAuthenticated, setIsAuthenticated] = useState(Boolean(initialAuthUser))
@@ -417,16 +847,18 @@ function App() {
   const [otpChallenge, setOtpChallenge] = useState(null)
   const [passwordResetEmail, setPasswordResetEmail] = useState('')
   const [activePage, setActivePage] = useState(() => getDefaultPageForRole(initialAuthUser?.role))
+  const [activeFolderRoute, setActiveFolderRoute] = useState(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [modalInitialCategory, setModalInitialCategory] = useState('expenses')
-  const [expenseDocuments, setExpenseDocuments] = useState(initialClientDocuments.expenses)
-  const [salesDocuments, setSalesDocuments] = useState(initialClientDocuments.sales)
-  const [bankStatementDocuments, setBankStatementDocuments] = useState(initialClientDocuments.bankStatements)
+  const [expenseDocuments, setExpenseDocuments] = useState(() => ensureFolderStructuredRecords(initialClientDocuments.expenses, 'expenses'))
+  const [salesDocuments, setSalesDocuments] = useState(() => ensureFolderStructuredRecords(initialClientDocuments.sales, 'sales'))
+  const [bankStatementDocuments, setBankStatementDocuments] = useState(() => ensureFolderStructuredRecords(initialClientDocuments.bankStatements, 'bankStatements'))
   const [expenseClassOptions, setExpenseClassOptions] = useState([])
   const [salesClassOptions, setSalesClassOptions] = useState([])
   const [uploadHistoryRecords, setUploadHistoryRecords] = useState(initialClientDocuments.uploadHistory)
+  const [clientActivityRecords, setClientActivityRecords] = useState(initialClientActivityRecords)
   const [toast, setToast] = useState(null)
   const [profilePhoto, setProfilePhoto] = useState(() => getSavedProfilePhoto(initialScopedClientEmail))
   const [companyLogo, setCompanyLogo] = useState(() => getSavedCompanyLogo(initialScopedClientEmail))
@@ -438,17 +870,17 @@ function App() {
     return getSavedClientFirstName(initialScopedClientEmail, fallbackName)
   })
   
-  // Mock user notifications
-  const [userNotifications, setUserNotifications] = useState([
-    { id: 'NOT-001', type: 'comment', message: 'Admin commented on your Expense document.', timestamp: 'Feb 24, 2026 11:00 AM', read: false, documentId: 'DOC-001' },
-    { id: 'NOT-002', type: 'approved', message: 'Your Bank Statement was approved.', timestamp: 'Feb 23, 2026 3:30 PM', read: false, documentId: 'DOC-002' },
-    { id: 'NOT-003', type: 'info', message: 'Additional information requested for Sales invoice.', timestamp: 'Feb 22, 2026 9:45 AM', read: true, documentId: 'DOC-003' },
-    { id: 'NOT-004', type: 'rejected', message: 'Your Expense document was rejected. Reason: Missing required signatures.', timestamp: 'Feb 21, 2026 4:30 PM', read: true, documentId: 'DOC-004' },
-    { id: 'NOT-005', type: 'critical', message: 'Important: Complete your business verification by March 1st.', timestamp: 'Feb 20, 2026 10:00 AM', read: false, priority: 'critical' },
-  ])
+  const [userNotifications, setUserNotifications] = useState([])
   
   const currentUserRole = normalizeRole(authUser?.role, authUser?.email || '')
   const isAdminView = currentUserRole === 'admin'
+  const dashboardRecords = useMemo(() => ([
+    ...flattenFolderFilesForDashboard(expenseDocuments, 'expenses'),
+    ...flattenFolderFilesForDashboard(salesDocuments, 'sales'),
+    ...flattenFolderFilesForDashboard(bankStatementDocuments, 'bank-statements'),
+  ]), [expenseDocuments, salesDocuments, bankStatementDocuments])
+  const previousDashboardFilesRef = useRef(null)
+
   const isImpersonatingClient = Boolean(
     isAuthenticated
       && isAdminView
@@ -458,6 +890,142 @@ function App() {
   const scopedClientEmail = isImpersonatingClient
     ? impersonationSession.clientEmail
     : authUser?.email
+  const normalizedScopedClientEmail = (scopedClientEmail || '').trim().toLowerCase()
+  const scopedClientAccountStatus = normalizedScopedClientEmail
+    ? (
+      getSavedAccounts().find((account) => (
+        account.email?.trim()?.toLowerCase() === normalizedScopedClientEmail
+      ))?.status || ''
+    )
+    : ''
+  const dashboardVerificationState = resolveClientVerificationState({
+    email: normalizedScopedClientEmail,
+    verificationPending: Boolean(onboardingState.verificationPending),
+    accountStatus: isImpersonatingClient
+      ? scopedClientAccountStatus
+      : (authUser?.status || scopedClientAccountStatus),
+  })
+
+  const getNotificationPageFromRecord = (record = {}) => {
+    if (record.categoryId) return record.categoryId
+    const normalizedCategory = (record.category || '').toLowerCase()
+    if (normalizedCategory.includes('sales')) return 'sales'
+    if (normalizedCategory.includes('bank')) return 'bank-statements'
+    return 'expenses'
+  }
+
+  useEffect(() => {
+    if (!isAuthenticated || isAdminView) {
+      previousDashboardFilesRef.current = null
+      return
+    }
+
+    const buildRecordKey = (record = {}) => record.fileId || record.id || `${record.folderId || ''}-${record.filename || ''}`
+    const currentMap = new Map(dashboardRecords.map((record) => [buildRecordKey(record), record]))
+    const previousMap = previousDashboardFilesRef.current
+    if (!previousMap) {
+      previousDashboardFilesRef.current = currentMap
+      return
+    }
+
+    const timestamp = new Date().toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+    const nextNotifications = []
+
+    currentMap.forEach((record, key) => {
+      const previous = previousMap.get(key)
+      if (!previous) return
+
+      const linkPage = getNotificationPageFromRecord(record)
+      const fileName = record.filename || 'document'
+      const currentStatus = normalizeDocumentWorkflowStatus(record.status || 'Pending Review')
+      const previousStatus = normalizeDocumentWorkflowStatus(previous.status || 'Pending Review')
+
+      if (currentStatus !== previousStatus) {
+        const statusType = currentStatus === 'Approved'
+          ? 'approved'
+          : currentStatus === 'Rejected'
+            ? 'rejected'
+            : currentStatus === 'Info Requested' || currentStatus === 'Needs Clarification'
+              ? 'info'
+              : 'comment'
+        const priority = currentStatus === 'Rejected'
+          ? 'critical'
+          : currentStatus === 'Info Requested' || currentStatus === 'Needs Clarification'
+            ? 'important'
+            : 'info'
+        const statusMessage = currentStatus === 'Approved'
+          ? `Admin approved ${fileName}.`
+          : currentStatus === 'Rejected'
+            ? `Admin rejected ${fileName}.`
+            : currentStatus === 'Info Requested' || currentStatus === 'Needs Clarification'
+              ? `Admin requested more information for ${fileName}.`
+              : `Status updated for ${fileName}: ${currentStatus}.`
+        nextNotifications.push({
+          id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: statusType,
+          message: statusMessage,
+          timestamp,
+          read: false,
+          priority,
+          linkPage,
+          fileId: record.fileId || record.id,
+        })
+      }
+
+      const currentComment = (record.adminComment || '').trim()
+      const previousComment = (previous.adminComment || '').trim()
+      if (currentComment && currentComment !== previousComment) {
+        nextNotifications.push({
+          id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: 'comment',
+          message: `Admin comment on ${fileName}: ${currentComment}`,
+          timestamp,
+          read: false,
+          priority: 'important',
+          linkPage,
+          fileId: record.fileId || record.id,
+        })
+      }
+
+      const currentRequestDetails = (
+        record.requiredAction
+        || record.infoRequestDetails
+        || record.adminNotes
+        || ''
+      ).trim()
+      const previousRequestDetails = (
+        previous.requiredAction
+        || previous.infoRequestDetails
+        || previous.adminNotes
+        || ''
+      ).trim()
+      if (currentRequestDetails && currentRequestDetails !== previousRequestDetails) {
+        nextNotifications.push({
+          id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          type: 'info',
+          message: `Admin request details for ${fileName}: ${currentRequestDetails}`,
+          timestamp,
+          read: false,
+          priority: 'important',
+          linkPage,
+          fileId: record.fileId || record.id,
+        })
+      }
+    })
+
+    if (nextNotifications.length > 0) {
+      setUserNotifications((prev) => [...nextNotifications, ...prev].slice(0, 80))
+    }
+
+    previousDashboardFilesRef.current = currentMap
+  }, [dashboardRecords, isAuthenticated, isAdminView])
 
   const getResolvedCurrentAdminAccount = () => {
     if (!isAuthenticated || !isAdminView || !authUser?.email) return null
@@ -483,8 +1051,7 @@ function App() {
     ),
   )
 
-  // Navigation helpers: keep `activePage` and URL in sync without adding a router
-  const handleSetActivePage = (page, { replace = false } = {}) => {
+  const touchImpersonationActivity = () => {
     if (isImpersonatingClient) {
       setImpersonationSession((prev) => {
         if (!prev) return prev
@@ -493,8 +1060,29 @@ function App() {
         return next
       })
     }
+  }
+
+  // Navigation helpers: keep `activePage` and URL in sync without adding a router
+  const handleSetActivePage = (page, { replace = false } = {}) => {
+    touchImpersonationActivity()
     setActivePage(page)
+    setActiveFolderRoute(null)
     const path = page === 'dashboard' ? '/dashboard' : `/${page}`
+    try {
+      if (replace) history.replaceState({}, '', path)
+      else history.pushState({}, '', path)
+    } catch {
+      // ignore
+    }
+  }
+
+  const handleOpenFolderRoute = (category, folderId, { replace = false } = {}) => {
+    if (!category || !folderId) return
+    touchImpersonationActivity()
+    setActivePage(category)
+    setActiveFolderRoute({ category, folderId })
+    const encodedId = encodeURIComponent(folderId)
+    const path = `/${category}/folder/${encodedId}`
     try {
       if (replace) history.replaceState({}, '', path)
       else history.pushState({}, '', path)
@@ -537,6 +1125,7 @@ function App() {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken('')
+        setActiveFolderRoute(null)
         setActivePage(getDefaultPageForRole(initialAuthUser?.role))
         return
       }
@@ -544,6 +1133,7 @@ function App() {
         setShowAuth(true)
         setShowAdminLogin(false)
         setAdminSetupToken('')
+        setActiveFolderRoute(null)
         setAuthMode(path === '/signup' ? 'signup' : 'login')
         return
       }
@@ -551,6 +1141,7 @@ function App() {
         setShowAuth(false)
         setShowAdminLogin(true)
         setAdminSetupToken('')
+        setActiveFolderRoute(null)
         setAuthMode('login')
         return
       }
@@ -559,20 +1150,42 @@ function App() {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken(inviteToken)
+        setActiveFolderRoute(null)
         setAuthMode('login')
         return
       }
+      const folderRouteMatch = path.match(/^\/(expenses|sales|bank-statements)\/folder\/([^/]+)$/)
+      if (folderRouteMatch) {
+        const folderCategory = folderRouteMatch[1]
+        const folderId = decodeURIComponent(folderRouteMatch[2] || '')
+        setShowAuth(false)
+        setShowAdminLogin(false)
+        setAdminSetupToken('')
+        setActivePage(folderCategory)
+        setActiveFolderRoute({ category: folderCategory, folderId })
+        return
+      }
       const candidate = path.replace(/^\//, '')
+      if (candidate === 'chat') {
+        setShowAuth(false)
+        setShowAdminLogin(false)
+        setAdminSetupToken('')
+        setActiveFolderRoute(null)
+        setActivePage('support')
+        return
+      }
       if (APP_PAGE_IDS.includes(candidate)) {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken('')
+        setActiveFolderRoute(null)
         setActivePage(candidate)
         return
       }
       setShowAuth(false)
       setShowAdminLogin(false)
       setAdminSetupToken('')
+      setActiveFolderRoute(null)
       setActivePage(getDefaultPageForRole(initialAuthUser?.role))
     }
 
@@ -591,7 +1204,10 @@ function App() {
   }, [isAuthenticated, isAdminView, impersonationSession])
 
   useEffect(() => {
-    if (!scopedClientEmail) return
+    if (!scopedClientEmail) {
+      setClientActivityRecords([])
+      return
+    }
     setOnboardingState(getSavedOnboardingState(scopedClientEmail))
     const fallbackCompanyName = impersonationSession?.businessName || 'Acme Corporation'
     const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
@@ -603,10 +1219,11 @@ function App() {
     setCompanyLogo(getSavedCompanyLogo(scopedClientEmail))
     const fallbackOwnerName = impersonationSession?.clientName || authUser?.fullName || fallbackFirstName
     const scopedDocuments = readClientDocuments(scopedClientEmail, fallbackOwnerName)
-    setExpenseDocuments(scopedDocuments.expenses)
-    setSalesDocuments(scopedDocuments.sales)
-    setBankStatementDocuments(scopedDocuments.bankStatements)
+    setExpenseDocuments(ensureFolderStructuredRecords(scopedDocuments.expenses, 'expenses'))
+    setSalesDocuments(ensureFolderStructuredRecords(scopedDocuments.sales, 'sales'))
+    setBankStatementDocuments(ensureFolderStructuredRecords(scopedDocuments.bankStatements, 'bankStatements'))
     setUploadHistoryRecords(scopedDocuments.uploadHistory)
+    setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
   }, [scopedClientEmail, impersonationSession?.businessName, impersonationSession?.clientName, authUser?.fullName])
 
   useEffect(() => {
@@ -624,6 +1241,7 @@ function App() {
       persistImpersonationSession(null)
       setPendingImpersonationClient(null)
       setActivePage(ADMIN_DEFAULT_PAGE)
+      setActiveFolderRoute(null)
       try {
         history.replaceState({}, '', `/${ADMIN_DEFAULT_PAGE}`)
       } catch {
@@ -663,6 +1281,20 @@ function App() {
       uploadHistory: uploadHistoryRecords,
     })
   }, [scopedClientEmail, expenseDocuments, salesDocuments, bankStatementDocuments, uploadHistoryRecords])
+
+  useEffect(() => {
+    const extractClasses = (records = []) => (
+      records.flatMap((record) => (
+        record?.isFolder
+          ? (record.files || []).map((file) => (file.class || file.expenseClass || file.salesClass || '').trim())
+          : [(record.class || record.expenseClass || record.salesClass || '').trim()]
+      ))
+        .filter(Boolean)
+    )
+
+    setExpenseClassOptions(Array.from(new Set(extractClasses(expenseDocuments))))
+    setSalesClassOptions(Array.from(new Set(extractClasses(salesDocuments))))
+  }, [expenseDocuments, salesDocuments])
 
   const persistOnboardingState = (nextState, emailOverride) => {
     const targetEmail = emailOverride ?? scopedClientEmail
@@ -744,12 +1376,15 @@ function App() {
       ? (impersonationSession?.adminName || authUser?.fullName || 'Admin User')
       : (authUser?.fullName || clientFirstName || 'Client User')
     const actorRole = isImpersonatingClient ? 'admin' : 'client'
-    appendClientActivityLog(scopedClientEmail, {
+    const logEntry = appendClientActivityLog(scopedClientEmail, {
       actorName,
       actorRole,
       action,
       details,
     })
+    if (logEntry) {
+      setClientActivityRecords((prev) => [logEntry, ...prev])
+    }
   }
 
   const showToast = (type, message) => {
@@ -782,6 +1417,7 @@ function App() {
 
     const defaultPage = getDefaultPageForRole(normalizedUser.role)
     setActivePage(defaultPage)
+    setActiveFolderRoute(null)
     try {
       history.replaceState({}, '', defaultPage === 'dashboard' ? '/dashboard' : `/${defaultPage}`)
     } catch {
@@ -999,6 +1635,7 @@ function App() {
     persistImpersonationSession(null)
     setAuthMode('login')
     setActivePage(getDefaultPageForRole('client'))
+    setActiveFolderRoute(null)
     sessionStorage.removeItem('kiaminaAuthUser')
     localStorage.removeItem('kiaminaAuthUser')
     setIsLoggingOut(false)
@@ -1329,6 +1966,7 @@ function App() {
     setCompanyName(getSavedCompanyName(nextSession.clientEmail, nextSession.businessName))
     setClientFirstName(getSavedClientFirstName(nextSession.clientEmail, nextSession.clientName))
     setActivePage('dashboard')
+    setActiveFolderRoute(null)
     try {
       history.replaceState({}, '', '/dashboard')
     } catch {
@@ -1358,6 +1996,7 @@ function App() {
     persistImpersonationSession(null)
     setPendingImpersonationClient(null)
     setActivePage(ADMIN_DEFAULT_PAGE)
+    setActiveFolderRoute(null)
     try {
       history.replaceState({}, '', `/${ADMIN_DEFAULT_PAGE}`)
     } catch {
@@ -1421,33 +2060,24 @@ function App() {
     let updated = false
     setExpenseDocuments((prev) => {
       if (updated) return prev
-      const targetIndex = prev.findIndex((item) => item.status === 'Pending')
-      if (targetIndex === -1) return prev
-      updated = true
-      const next = [...prev]
-      next[targetIndex] = { ...next[targetIndex], status: 'Approved' }
-      return next
+      const result = updateFirstPendingFileStatus(prev, 'Approved')
+      updated = result.updated
+      return result.records
     })
     if (!updated) {
       setSalesDocuments((prev) => {
         if (updated) return prev
-        const targetIndex = prev.findIndex((item) => item.status === 'Pending')
-        if (targetIndex === -1) return prev
-        updated = true
-        const next = [...prev]
-        next[targetIndex] = { ...next[targetIndex], status: 'Approved' }
-        return next
+        const result = updateFirstPendingFileStatus(prev, 'Approved')
+        updated = result.updated
+        return result.records
       })
     }
     if (!updated) {
       setBankStatementDocuments((prev) => {
         if (updated) return prev
-        const targetIndex = prev.findIndex((item) => item.status === 'Pending')
-        if (targetIndex === -1) return prev
-        updated = true
-        const next = [...prev]
-        next[targetIndex] = { ...next[targetIndex], status: 'Approved' }
-        return next
+        const result = updateFirstPendingFileStatus(prev, 'Approved')
+        updated = result.updated
+        return result.records
       })
     }
 
@@ -1596,93 +2226,187 @@ function App() {
     setIsModalOpen(true)
   }
 
-  const handleUpload = async ({ category, formData, uploadedItems }) => {
+  const handleUpload = async ({
+    category,
+    folderName,
+    documentOwner,
+    uploadedItems,
+    metadataMode = 'single',
+    sharedDetails = {},
+    individualDetails = {},
+  }) => {
     if (!category) return { ok: false, message: 'Please select a document category.' }
-    if (!Array.isArray(uploadedItems) || uploadedItems.length === 0) return { ok: false, message: 'Please complete all required fields.' }
+    if (!folderName?.trim()) return { ok: false, message: 'Please provide a folder name.' }
+    if (!Array.isArray(uploadedItems) || uploadedItems.length === 0) {
+      return { ok: false, message: 'Please upload at least one file.' }
+    }
 
-    const ownerName = formData?.documentOwner
-      || (isImpersonatingClient ? (impersonationSession?.clientName || clientFirstName || 'Client') : authUser?.fullName)
-      || 'Admin User'
-    const timestamp = new Date().toLocaleString('en-US', {
-      month: 'short',
-      day: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true,
-    })
     const categoryConfig = {
-      expenses: { prefix: 'EXP', label: 'Expense', records: expenseDocuments, setter: setExpenseDocuments },
-      sales: { prefix: 'SAL', label: 'Sales', records: salesDocuments, setter: setSalesDocuments },
-      'bank-statements': { prefix: 'BNK', label: 'Bank Statement', records: bankStatementDocuments, setter: setBankStatementDocuments },
+      expenses: { prefix: 'EXP', label: 'Expense', setter: setExpenseDocuments },
+      sales: { prefix: 'SAL', label: 'Sales', setter: setSalesDocuments },
+      'bank-statements': { prefix: 'BNK', label: 'Bank Statement', setter: setBankStatementDocuments },
     }
 
     const selectedConfig = categoryConfig[category]
     if (!selectedConfig) return { ok: false, message: 'Please select a document category.' }
 
-    const createDocumentReferenceId = (prefix, index) => {
-      const timePart = (Date.now() + index).toString(36).toUpperCase()
-      const randomPart = Math.random().toString(36).slice(2, 6).toUpperCase()
-      return `${prefix}-${timePart}-${randomPart}`
+    const resolveFileDetails = (item) => {
+      if (metadataMode === 'individual') return individualDetails?.[item.key] || {}
+      return sharedDetails || {}
     }
 
-    const trimmedExpenseClass = formData?.expenseClass?.trim()
-    const trimmedSalesClass = formData?.salesClass?.trim()
-    if (category === 'expenses' && trimmedExpenseClass) {
-      setExpenseClassOptions((prev) => (prev.includes(trimmedExpenseClass) ? prev : [...prev, trimmedExpenseClass]))
+    const missingClass = uploadedItems.some((item) => !(resolveFileDetails(item)?.class || '').trim())
+    if (missingClass) return { ok: false, message: 'Class is required for each uploaded file.' }
+
+    const ownerName = documentOwner?.trim()
+      || (isImpersonatingClient ? (impersonationSession?.clientName || clientFirstName || 'Client') : authUser?.fullName)
+      || 'Client User'
+
+    const createdAtIso = new Date().toISOString()
+    const createdAtDisplay = formatClientDocumentTimestamp(createdAtIso)
+    const folderId = `F-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+    const folderToken = folderId.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-8)
+    const buildFileReference = (index) => `${selectedConfig.prefix}-${folderToken}-${String(index + 1).padStart(3, '0')}`
+
+    const files = uploadedItems.map((item, index) => {
+      const metadata = resolveFileDetails(item)
+      const classValue = (metadata?.class || '').trim()
+      const confidentialityLevel = metadata?.confidentialityLevel || 'Standard'
+      const processingPriority = metadata?.processingPriority || 'Normal'
+      const internalNotes = (metadata?.internalNotes || '').trim()
+      const vendorName = (metadata?.vendorName || '').trim()
+      const fileCreatedAtIso = new Date().toISOString()
+      const previewUrl = item.previewUrl || (item.rawFile ? URL.createObjectURL(item.rawFile) : null)
+      const uploadSource = item.uploadSource || 'browse-file'
+      const uploadSourceLabel = uploadSource === 'drag-drop'
+        ? 'Drag & Drop'
+        : uploadSource === 'browse-folder'
+          ? 'Browse Folder'
+          : 'Browse Files'
+      const baseFile = {
+        folderId,
+        folderName: folderName.trim(),
+        filename: item.name,
+        extension: item.extension || (item.name?.split('.').pop()?.toUpperCase() || 'FILE'),
+        status: 'Pending Review',
+        class: classValue,
+        expenseClass: category === 'expenses' ? classValue : '',
+        salesClass: category === 'sales' ? classValue : '',
+        previewUrl,
+      }
+
+      return {
+        id: `${folderId}-FILE-${String(index + 1).padStart(3, '0')}`,
+        folderId,
+        folderName: folderName.trim(),
+        fileId: buildFileReference(index),
+        filename: item.name,
+        extension: baseFile.extension,
+        status: 'Pending Review',
+        user: ownerName,
+        date: createdAtDisplay,
+        createdAtIso: fileCreatedAtIso,
+        updatedAtIso: fileCreatedAtIso,
+        deletedAtIso: null,
+        isDeleted: false,
+        isLocked: false,
+        lockedAtIso: null,
+        approvedBy: '',
+        approvedAtIso: null,
+        rejectedBy: '',
+        rejectedAtIso: null,
+        rejectionReason: '',
+        unlockedBy: '',
+        unlockedAtIso: null,
+        unlockReason: '',
+        class: classValue,
+        expenseClass: category === 'expenses' ? classValue : '',
+        salesClass: category === 'sales' ? classValue : '',
+        vendorName,
+        confidentialityLevel,
+        processingPriority,
+        internalNotes,
+        previewUrl,
+        rawFile: item.rawFile || null,
+        uploadSource,
+        uploadInfo: {
+          originalUploadedAtIso: fileCreatedAtIso,
+          originalUploadSource: uploadSource,
+          originalUploadedBy: ownerName,
+          device: 'Web Browser',
+          ipAddress: '--',
+          lastModifiedAtIso: fileCreatedAtIso,
+          replacements: [],
+          totalVersions: 1,
+        },
+        versions: [
+          createVersionEntry({
+            versionNumber: 1,
+            action: 'Uploaded',
+            performedBy: ownerName,
+            timestamp: fileCreatedAtIso,
+            notes: `Initial upload via ${uploadSourceLabel}.`,
+            fileSnapshot: baseFile,
+          }),
+        ],
+        activityLog: [
+          createFileActivityEntry({
+            actionType: 'upload',
+            description: `File uploaded via ${uploadSourceLabel}.`,
+            performedBy: ownerName,
+            timestamp: fileCreatedAtIso,
+          }),
+        ],
+      }
+    })
+
+    if (category === 'expenses') {
+      const classValues = files.map((file) => file.class).filter(Boolean)
+      if (classValues.length > 0) {
+        setExpenseClassOptions((prev) => Array.from(new Set([...prev, ...classValues])))
+      }
     }
-    if (category === 'sales' && trimmedSalesClass) {
-      setSalesClassOptions((prev) => (prev.includes(trimmedSalesClass) ? prev : [...prev, trimmedSalesClass]))
+    if (category === 'sales') {
+      const classValues = files.map((file) => file.class).filter(Boolean)
+      if (classValues.length > 0) {
+        setSalesClassOptions((prev) => Array.from(new Set([...prev, ...classValues])))
+      }
     }
 
-    const nextRows = uploadedItems.map((item, index) => ({
-      id: Date.now() + index,
-      fileId: createDocumentReferenceId(selectedConfig.prefix, index),
-      filename: item.name,
-      extension: item.extension,
-      user: ownerName,
-      date: timestamp,
-      status: 'Pending',
-      previewUrl: item.previewUrl || (item.rawFile ? URL.createObjectURL(item.rawFile) : null),
-      rawFile: item.rawFile || null,
-      // include full metadata from formData depending on category
-      ...(category === 'expenses' ? {
-        vendorName: formData.vendorName,
-        expenseClass: formData.expenseClass,
-        expenseDate: formData.expenseDate,
-        paymentMethod: formData.paymentMethod,
-        description: formData.description,
-      } : {}),
-      ...(category === 'sales' ? {
-        customerName: formData.customerName,
-        invoiceNumber: formData.invoiceNumber,
-        salesClass: formData.salesClass,
-        invoiceDate: formData.invoiceDate,
-        paymentStatus: formData.paymentStatus,
-        description: formData.description,
-      } : {}),
-      ...(category === 'bank-statements' ? {
-        bankName: formData.bankName,
-        accountName: formData.accountName,
-        accountLast4: formData.accountLast4,
-        statementStartDate: formData.statementStartDate,
-        statementEndDate: formData.statementEndDate,
-      } : {}),
-    }))
-    selectedConfig.setter((prev) => [...nextRows, ...prev])
-
-    const historyRows = uploadedItems.map((item, index) => ({
-      id: Date.now() + uploadedItems.length + index,
-      filename: item.name,
-      type: item.type === 'Folder' ? 'Folder' : (item.extension || 'FILE'),
+    const folderRecord = {
+      id: folderId,
+      isFolder: true,
+      folderName: folderName.trim(),
       category: selectedConfig.label,
-      date: timestamp,
       user: ownerName,
-      status: 'Pending',
-      previewUrl: item.previewUrl || (item.rawFile ? URL.createObjectURL(item.rawFile) : null),
-      rawFile: item.rawFile || null,
-    }))
-    setUploadHistoryRecords((prev) => [...historyRows, ...prev])
+      createdAtIso,
+      createdAtDisplay,
+      date: createdAtDisplay,
+      files,
+    }
+
+    selectedConfig.setter((prev) => [folderRecord, ...prev])
+    setUploadHistoryRecords((prev) => [
+      ...files.map((file, index) => ({
+        id: `UP-${Date.now()}-${index}-${Math.floor(Math.random() * 1000)}`,
+        filename: file.filename,
+        type: file.extension || 'FILE',
+        category: selectedConfig.label,
+        date: file.date || createdAtDisplay,
+        user: ownerName,
+        status: file.status || 'Pending Review',
+        isFolder: false,
+        folderId: folderRecord.id,
+        fileId: file.fileId,
+        uploadSource: file.uploadSource || 'browse-file',
+      })),
+      ...prev,
+    ])
+
+    appendScopedClientLog(
+      'Uploaded files',
+      `[${selectedConfig.label}] Uploaded ${files.length} file(s) to folder "${folderRecord.folderName}" (${folderRecord.id}).`,
+    )
 
     setIsModalOpen(false)
     showClientToast('success', 'Documents uploaded successfully.')
@@ -1690,25 +2414,120 @@ function App() {
   }
 
   const renderClientPage = () => {
+    const logDocumentWorkspaceActivity = (categoryId, action, details) => {
+      const categoryLabel = categoryId === 'sales'
+        ? 'Sales'
+        : categoryId === 'bank-statements'
+          ? 'Bank Statements'
+          : 'Expenses'
+      appendScopedClientLog(action, `[${categoryLabel}] ${details}`)
+    }
+
+    const renderDocumentWorkspace = ({ categoryId, title, records, setRecords }) => {
+      const impersonationBusinessName = impersonationSession?.businessName || companyName || 'Client Account'
+      const appendFileUploadHistory = ({
+        filename,
+        extension,
+        fileId,
+        folderId,
+        uploadedBy,
+        uploadSource,
+        timestampIso,
+        status = 'Pending Review',
+      } = {}) => {
+        const timestamp = timestampIso || new Date().toISOString()
+        setUploadHistoryRecords((prev) => [{
+          id: `UP-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          filename: filename || '--',
+          type: extension || 'FILE',
+          category: title,
+          date: formatClientDocumentTimestamp(timestamp),
+          user: uploadedBy || authUser?.fullName || clientFirstName || 'Client User',
+          status,
+          isFolder: false,
+          folderId: folderId || '',
+          fileId: fileId || '',
+          uploadSource: uploadSource || 'browse-file',
+        }, ...prev])
+      }
+      const isFolderRoute = activeFolderRoute?.category === categoryId && Boolean(activeFolderRoute?.folderId)
+      if (isFolderRoute) {
+        const folder = records.find((row) => row?.isFolder && row.id === activeFolderRoute.folderId) || null
+        return (
+          <ClientFolderFilesPage
+            categoryId={categoryId}
+            categoryTitle={title}
+            records={records}
+            folder={folder}
+            setRecords={setRecords}
+            onLogActivity={(action, details) => logDocumentWorkspaceActivity(categoryId, action, details)}
+            onBack={() => handleSetActivePage(categoryId, { replace: true })}
+            onOpenFolder={(folderId) => handleOpenFolderRoute(categoryId, folderId)}
+            onNavigateDashboard={() => handleSetActivePage('dashboard')}
+            isImpersonatingClient={isImpersonatingClient}
+            impersonationBusinessName={impersonationBusinessName}
+            showToast={showClientToast}
+            onRecordUploadHistory={appendFileUploadHistory}
+          />
+        )
+      }
+
+      return (
+        <ClientDocumentFoldersPage
+          categoryId={categoryId}
+          title={title}
+          records={records}
+          setRecords={setRecords}
+          onLogActivity={(action, details) => logDocumentWorkspaceActivity(categoryId, action, details)}
+          onAddDocument={handleAddDocument}
+          onOpenFolder={(folderId) => handleOpenFolderRoute(categoryId, folderId)}
+          onNavigateDashboard={() => handleSetActivePage('dashboard')}
+          isImpersonatingClient={isImpersonatingClient}
+          impersonationBusinessName={impersonationBusinessName}
+          showToast={showClientToast}
+        />
+      )
+    }
+
     switch (activePage) {
       case 'dashboard':
         return (
           <ClientDashboardPage
             onAddDocument={handleAddDocument}
             setActivePage={handleSetActivePage}
-            profilePhoto={profilePhoto}
             clientFirstName={clientFirstName}
-            verificationPending={onboardingState.verificationPending}
+            verificationState={dashboardVerificationState}
+            records={dashboardRecords}
+            activityLogs={clientActivityRecords}
           />
         )
       case 'expenses':
-        return <ClientExpensesPage onAddDocument={handleAddDocument} records={expenseDocuments} setRecords={setExpenseDocuments} setActivePage={handleSetActivePage} />
+        return renderDocumentWorkspace({
+          categoryId: 'expenses',
+          title: 'Expenses',
+          records: expenseDocuments,
+          setRecords: setExpenseDocuments,
+        })
       case 'sales':
-        return <ClientSalesPage onAddDocument={handleAddDocument} records={salesDocuments} setRecords={setSalesDocuments} setActivePage={handleSetActivePage} />
+        return renderDocumentWorkspace({
+          categoryId: 'sales',
+          title: 'Sales',
+          records: salesDocuments,
+          setRecords: setSalesDocuments,
+        })
       case 'bank-statements':
-        return <ClientBankStatementsPage onAddDocument={handleAddDocument} records={bankStatementDocuments} setRecords={setBankStatementDocuments} setActivePage={handleSetActivePage} />
+        return renderDocumentWorkspace({
+          categoryId: 'bank-statements',
+          title: 'Bank Statements',
+          records: bankStatementDocuments,
+          setRecords: setBankStatementDocuments,
+        })
       case 'upload-history':
         return <ClientUploadHistoryPage records={uploadHistoryRecords} />
+      case 'recent-activities':
+        return <ClientRecentActivitiesPage records={dashboardRecords} activityLogs={clientActivityRecords} />
+      case 'support':
+        return <ClientSupportPage />
       case 'settings':
         return (
           <ClientSettingsPage
@@ -1728,7 +2547,9 @@ function App() {
             onAddDocument={handleAddDocument}
             setActivePage={handleSetActivePage}
             clientFirstName={clientFirstName}
-            verificationPending={onboardingState.verificationPending}
+            verificationState={dashboardVerificationState}
+            records={dashboardRecords}
+            activityLogs={clientActivityRecords}
           />
         )
     }
@@ -1956,8 +2777,16 @@ function App() {
                 profilePhoto={isImpersonatingClient ? null : profilePhoto}
                 clientFirstName={clientFirstName}
                 notifications={userNotifications}
+                onOpenProfile={() => handleSetActivePage('settings')}
                 onNotificationClick={(notification) => {
-                  if (notification.documentId) {
+                  setUserNotifications((prev) => prev.map((item) => (
+                    item.id === notification.id ? { ...item, read: true } : item
+                  )))
+                  if (notification.linkPage) {
+                    handleSetActivePage(notification.linkPage, { replace: true })
+                    return
+                  }
+                  if (notification.documentId || notification.fileId) {
                     handleSetActivePage('upload-history', { replace: true })
                   }
                 }}
@@ -1972,9 +2801,7 @@ function App() {
                 {renderClientPage()}
               </main>
             </div>
-
-            {!isImpersonatingClient && <ClientSupportWidget />}
-
+            {!isImpersonatingClient && activePage !== 'support' && <ClientSupportWidget />}
             {isModalOpen && <ClientAddDocumentModal
               isOpen={isModalOpen}
               onClose={() => setIsModalOpen(false)}
@@ -1992,4 +2819,5 @@ function App() {
 }
 
 export default App
+
 

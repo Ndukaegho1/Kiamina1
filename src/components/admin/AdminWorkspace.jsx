@@ -102,12 +102,13 @@ function AdminWorkspace({
             setActivePage={setActivePage}
             showToast={showToast}
             onAdminActionLog={onAdminActionLog}
+            currentAdminAccount={currentAdminAccount}
           />
         )
       case 'admin-client-upload-history':
         return <AdminClientUploadHistoryPage client={selectedClientContext} setActivePage={setActivePage} showToast={showToast} />
       case 'admin-documents':
-        return <AdminDocumentReviewCenter showToast={showToast} />
+        return <AdminDocumentReviewCenter showToast={showToast} currentAdminAccount={currentAdminAccount} />
       case 'admin-communications':
         return <AdminCommunicationsCenter showToast={showToast} />
       case 'admin-notifications':

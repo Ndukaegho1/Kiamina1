@@ -28,12 +28,15 @@ import {
   Loader2,
   UploadCloud,
   MapPin,
+  Folder,
   Building,
-  Lock,
   MessageCircle,
   XCircle,
   HelpCircle,
   Pin,
+  Sun,
+  Moon,
+  Sunrise,
 } from 'lucide-react'
 import {
   Chart as ChartJS,
@@ -48,6 +51,11 @@ import {
   Filler,
 } from 'chart.js'
 import { Line, Bar } from 'react-chartjs-2'
+import JSZip from 'jszip'
+import * as XLSX from 'xlsx'
+import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+import KiaminaLogo from '../../common/KiaminaLogo'
 
 ChartJS.register(
   CategoryScale,
@@ -60,18 +68,180 @@ ChartJS.register(
   Legend,
   Filler
 )
+
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl
+
+const toIsoDate = (date = new Date()) => {
+  const source = date instanceof Date ? date : new Date(date)
+  const year = source.getFullYear()
+  const month = String(source.getMonth() + 1).padStart(2, '0')
+  const day = String(source.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const clampFilterDateToToday = (value = '') => {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  const todayIso = toIsoDate(new Date())
+  return normalized > todayIso ? todayIso : normalized
+}
+
+const SPREADSHEET_PREVIEW_EXTENSIONS = new Set(['CSV', 'XLS', 'XLSX', 'XLSM', 'XLSB'])
+const TEXT_PREVIEW_EXTENSIONS = new Set(['TXT'])
+const WORD_PREVIEW_EXTENSIONS = new Set(['DOC', 'DOCX'])
+const PRESENTATION_PREVIEW_EXTENSIONS = new Set(['PPT', 'PPTX'])
+const OFFICE_EMBED_PREVIEW_EXTENSIONS = new Set(['DOC', 'DOCX', 'XLS', 'XLSX', 'XLSM', 'XLSB', 'PPT', 'PPTX'])
+const PDF_PREVIEW_EXTENSIONS = new Set(['PDF'])
+const IMAGE_PREVIEW_EXTENSIONS = new Set(['PNG', 'JPG', 'JPEG', 'GIF', 'WEBP', 'BMP'])
+const MIME_EXTENSION_MAP = {
+  'application/pdf': 'PDF',
+  'text/plain': 'TXT',
+  'text/csv': 'CSV',
+  'application/csv': 'CSV',
+  'application/vnd.ms-excel': 'XLS',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+  'application/vnd.ms-excel.sheet.macroenabled.12': 'XLSM',
+  'application/vnd.ms-excel.sheet.binary.macroenabled.12': 'XLSB',
+  'application/msword': 'DOC',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+  'application/vnd.ms-powerpoint': 'PPT',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
+  'image/png': 'PNG',
+  'image/jpeg': 'JPG',
+  'image/jpg': 'JPG',
+  'image/gif': 'GIF',
+  'image/webp': 'WEBP',
+  'image/bmp': 'BMP',
+}
+
+const normalizeFileExtension = (value = '') => String(value || '').trim().replace(/^\./, '').toUpperCase()
+
+const getFileNameExtension = (name = '') => {
+  const safeName = String(name || '').trim()
+  const dotIndex = safeName.lastIndexOf('.')
+  if (dotIndex < 0 || dotIndex === safeName.length - 1) return ''
+  return normalizeFileExtension(safeName.slice(dotIndex + 1))
+}
+
+const resolveMimeTypeToExtension = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized) return ''
+  return MIME_EXTENSION_MAP[normalized] || ''
+}
+
+const resolveTypeToExtension = (value = '') => {
+  const normalized = normalizeFileExtension(value)
+  if (normalized && /^[A-Z0-9]{2,6}$/.test(normalized)) return normalized
+  return resolveMimeTypeToExtension(value)
+}
+
+const getDataUrlMimeType = (value = '') => {
+  const source = String(value || '').trim()
+  if (!source.toLowerCase().startsWith('data:')) return ''
+  const header = source.slice(5, source.indexOf(',') > -1 ? source.indexOf(',') : undefined)
+  return String(header.split(';')[0] || '').trim().toLowerCase()
+}
+
+const resolvePreviewExtension = (target = {}, fallback = {}) => (
+  normalizeFileExtension(target?.extension)
+  || normalizeFileExtension(fallback?.extension)
+  || resolveTypeToExtension(target?.type)
+  || resolveTypeToExtension(fallback?.type)
+  || resolveMimeTypeToExtension(target?.mimeType)
+  || resolveMimeTypeToExtension(fallback?.mimeType)
+  || resolveMimeTypeToExtension(target?.rawFile?.type)
+  || resolveMimeTypeToExtension(fallback?.rawFile?.type)
+  || resolveMimeTypeToExtension(getDataUrlMimeType(target?.previewUrl || target?.url || target?.fileUrl || target?.documentUrl || ''))
+  || resolveMimeTypeToExtension(getDataUrlMimeType(fallback?.previewUrl || fallback?.url || fallback?.fileUrl || fallback?.documentUrl || ''))
+  || getFileNameExtension(target?.filename)
+  || getFileNameExtension(fallback?.filename)
+  || getFileNameExtension(target?.name)
+  || getFileNameExtension(fallback?.name)
+  || getFileNameExtension(target?.rawFile?.name)
+  || getFileNameExtension(fallback?.rawFile?.name)
+)
+
+const isHttpUrl = (value = '') => /^https?:\/\//i.test(String(value || '').trim())
+const toOfficeEmbedUrl = (value = '') => (
+  isHttpUrl(value) ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(String(value || ''))}` : ''
+)
+
+const runtimeObjectUrlCache = new WeakMap()
+
+const getRuntimeObjectUrl = (file) => {
+  if (!(file instanceof File)) return ''
+  if (!runtimeObjectUrlCache.has(file)) {
+    runtimeObjectUrlCache.set(file, URL.createObjectURL(file))
+  }
+  return runtimeObjectUrlCache.get(file) || ''
+}
+
+const normalizeRuntimePreviewUrl = (value = '', { allowBlob = false } = {}) => {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  if (!allowBlob && /^blob:/i.test(normalized)) return ''
+  return normalized
+}
+
+const readBlobAsText = (blob) => new Promise((resolve, reject) => {
+  if (!blob) {
+    resolve('')
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => resolve(String(reader.result || ''))
+  reader.onerror = () => reject(new Error('Unable to read text content'))
+  reader.readAsText(blob)
+})
+
+const readBlobAsArrayBuffer = (blob) => new Promise((resolve, reject) => {
+  if (!blob) {
+    resolve(new ArrayBuffer(0))
+    return
+  }
+  const reader = new FileReader()
+  reader.onload = () => resolve(reader.result instanceof ArrayBuffer ? reader.result : new ArrayBuffer(0))
+  reader.onerror = () => reject(new Error('Unable to read binary content'))
+  reader.readAsArrayBuffer(blob)
+})
+
+const decodeXmlEntities = (value = '') => (
+  String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+)
+
+const extractReadableXmlText = (xmlContent = '') => {
+  const xml = String(xmlContent || '')
+  if (!xml) return ''
+  try {
+    const parser = new DOMParser()
+    const parsed = parser.parseFromString(xml, 'application/xml')
+    const textNodes = Array.from(parsed.getElementsByTagNameNS('*', 't'))
+    const value = textNodes.map((node) => (node.textContent || '').trim()).filter(Boolean).join('\n').trim()
+    if (value) return value
+  } catch {
+    // fallback to regex extraction
+  }
+  const regexMatches = Array.from(xml.matchAll(/<[^:>]+:t[^>]*>([\s\S]*?)<\/[^:>]+:t>/gi))
+  const extracted = regexMatches.map((match) => decodeXmlEntities(match[1] || '').trim()).filter(Boolean).join('\n').trim()
+  return extracted
+}
+
 function StatusBadge({ status }) {
   const styles = {
     'Approved': 'bg-success-bg text-success',
-    'Pending': 'bg-warning-bg text-warning',
     'Pending Review': 'bg-warning-bg text-warning',
     'Rejected': 'bg-error-bg text-error',
-    'Needs Clarification': 'bg-warning-bg text-warning',
     'Info Requested': 'bg-info-bg text-primary',
+    'Needs Clarification': 'bg-info-bg text-primary',
   }
   
   return (
-    <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${styles[status] || styles['Pending']}`}>
+    <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${styles[status] || styles['Pending Review']}`}>
       {status}
     </span>
   )
@@ -126,6 +296,44 @@ function ErrorBanner({ message, onRetry }) {
   )
 }
 
+const updateRecordsForFile = (records = [], updated = {}) => (
+  records.map((record) => {
+    if (record?.isFolder && updated?.folderId && record.id === updated.folderId) {
+      return {
+        ...record,
+        files: (record.files || []).map((file) => (
+          file.fileId === updated.fileId ? { ...file, ...updated } : file
+        )),
+      }
+    }
+    if (!record?.isFolder && updated?.id !== undefined && record.id === updated.id) {
+      return { ...record, ...updated }
+    }
+    return record
+  })
+)
+
+const removeFileFromRecords = (records = [], target = {}) => {
+  if (target?.folderId && target?.fileId) {
+    return records
+      .map((record) => {
+        if (!record?.isFolder || record.id !== target.folderId) return record
+        const nextFiles = (record.files || []).filter((file) => file.fileId !== target.fileId)
+        return { ...record, files: nextFiles }
+      })
+      .filter((record) => {
+        if (!record?.isFolder || record.id !== target.folderId) return true
+        return (record.files || []).length > 0
+      })
+  }
+
+  if (target?.id !== undefined) {
+    return records.filter((record) => record.id !== target.id)
+  }
+
+  return records
+}
+
 // Sidebar Component
 function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout }) {
   const navItems = [
@@ -137,6 +345,8 @@ function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout
 
   const footerNavItems = [
     { id: 'upload-history', label: 'Upload History', icon: Upload },
+    { id: 'recent-activities', label: 'Recent Activities', icon: Clock },
+    { id: 'support', label: 'Support', icon: MessageCircle },
     { id: 'settings', label: 'Settings', icon: Settings },
   ]
 
@@ -144,25 +354,24 @@ function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout
     <aside className="w-64 bg-white border-r border-border fixed left-0 top-0 h-screen flex flex-col z-50">
       {/* Logo */}
       <div className="p-4 border-b border-border-light">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-primary rounded-md flex items-center justify-center">
-            <TrendingUp className="w-6 h-6 text-white" />
-          </div>
-          <div>
-            <div className="font-semibold text-text-primary">Kiamina</div>
-            <div className="text-[11px] text-text-muted uppercase tracking-wide">Accounting Services</div>
-          </div>
-        </div>
+        <button
+          type="button"
+          onClick={() => setActivePage('dashboard')}
+          className="inline-flex items-center"
+          title="Go to Dashboard Overview"
+        >
+          <KiaminaLogo className="h-11 w-auto" />
+        </button>
       </div>
 
       {/* Client Info */}
       <div className="p-4 border-b border-border-light">
         <div className="flex items-center gap-3">
-          {companyLogo && (
-            <div className="w-8 h-8 rounded overflow-hidden flex-shrink-0">
-              <img src={companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
-            </div>
-          )}
+          <div className="w-8 h-8 rounded overflow-hidden flex-shrink-0 bg-white border border-border-light flex items-center justify-center">
+            {companyLogo
+              ? <img src={companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
+              : <KiaminaLogo className="h-6 w-auto" alt="Kiamina logo" />}
+          </div>
           <div className="text-sm font-medium text-text-primary">{companyName || 'Acme Corporation'}</div>
         </div>
         <button className="flex items-center gap-2 w-full px-3 py-2 bg-background rounded-md text-sm text-text-secondary hover:bg-border-light transition-colors mt-2">
@@ -226,6 +435,7 @@ function TopBar({
   notifications = [],
   onNotificationClick,
   onMarkAllRead,
+  onOpenProfile,
   isImpersonationMode = false,
   roleLabel = 'Client',
   forceClientIcon = false,
@@ -253,27 +463,6 @@ function TopBar({
     setShowNotifications(false)
   }
 
-  const getNotificationIcon = (type) => {
-    switch (type) {
-      case 'comment': return <MessageCircle className="w-4 h-4 text-primary" />
-      case 'approved': return <CheckCircle className="w-4 h-4 text-success" />
-      case 'rejected': return <XCircle className="w-4 h-4 text-error" />
-      case 'info': return <HelpCircle className="w-4 h-4 text-warning" />
-      case 'critical': return <AlertCircle className="w-4 h-4 text-error" />
-      default: return <Bell className="w-4 h-4 text-text-muted" />
-    }
-  }
-
-  const getPriorityStyle = (priority) => {
-    if (priority === 'critical') {
-      return 'border-l-4 border-error'
-    }
-    if (priority === 'important') {
-      return 'border-l-4 border-warning'
-    }
-    return ''
-  }
-
   return (
     <header className="h-14 bg-white border-b border-border flex items-center justify-between px-6 sticky top-0 z-40">
       <div className="flex items-center gap-4">
@@ -289,61 +478,43 @@ function TopBar({
       
       <div className="flex items-center gap-3">
         <div className="relative" ref={notificationRef}>
-          <button 
-            onClick={() => setShowNotifications(!showNotifications)}
-            className="relative w-9 h-9 rounded-full flex items-center justify-center text-text-secondary hover:bg-background transition-colors"
+          <button
+            onClick={() => setShowNotifications((value) => !value)}
+            className="relative w-10 h-9 rounded-md flex items-center justify-center text-text-secondary hover:bg-background"
           >
             <Bell className="w-5 h-5" />
             {unreadCount > 0 && (
-              <span className="absolute top-2 right-2 w-4 h-4 bg-error rounded-full border-2 border-white text-[10px] text-white flex items-center justify-center">{unreadCount}</span>
+              <span className="absolute -top-1 -right-1 w-5 h-5 bg-error text-white rounded-full text-[10px] flex items-center justify-center">{unreadCount}</span>
             )}
           </button>
-          
+
           {showNotifications && (
-            <div className="absolute right-0 top-12 w-80 bg-white border border-border rounded-lg shadow-card z-50">
+            <div className="absolute right-0 mt-2 w-96 bg-white border border-border rounded-lg shadow-card z-50">
               <div className="p-3 border-b border-border-light flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-text-primary">Notifications</h3>
-                {unreadCount > 0 && (
-                  <button 
-                    onClick={onMarkAllRead}
-                    className="text-xs text-primary hover:underline"
-                  >
-                    Mark all as read
-                  </button>
-                )}
+                <h3 className="text-sm font-semibold">Notifications</h3>
+                <button onClick={() => onMarkAllRead?.()} className="text-xs text-primary hover:underline">Mark all read</button>
               </div>
-              <div className="max-h-96 overflow-y-auto">
+              <div className="max-h-72 overflow-y-auto">
                 {notifications.length === 0 ? (
-                  <div className="p-4 text-center text-text-muted text-sm">
-                    <Bell className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                    <p>No notifications</p>
-                  </div>
+                  <div className="p-4 text-sm text-text-muted">No notifications</div>
                 ) : (
-                  notifications.map(notification => (
-                    <div 
-                      key={notification.id} 
-                      className={`p-3 border-b border-border-light hover:bg-background cursor-pointer ${!notification.read ? 'bg-primary-tint' : ''} ${getPriorityStyle(notification.priority)}`}
+                  notifications.map((notification) => (
+                    <div
+                      key={notification.id}
+                      className={`p-3 border-b border-border-light hover:bg-background cursor-pointer ${!notification.read ? 'bg-primary-tint' : ''}`}
                       onClick={() => handleNotificationClick(notification)}
                     >
                       <div className="flex items-start gap-3">
                         <div className="flex-shrink-0 mt-0.5">
-                          {getNotificationIcon(notification.type)}
+                          {notification.type === 'approved' ? <CheckCircle className="w-4 h-4 text-success" /> : notification.type === 'rejected' ? <XCircle className="w-4 h-4 text-error" /> : notification.type === 'info' ? <AlertCircle className="w-4 h-4 text-warning" /> : <UploadCloud className="w-4 h-4 text-primary" />}
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-text-primary">{notification.message}</p>
                           <div className="flex items-center gap-2 mt-1">
                             <Clock className="w-3 h-3 text-text-muted" />
                             <span className="text-xs text-text-muted">{notification.timestamp}</span>
-                            {notification.priority === 'critical' && (
-                              <span className="inline-flex items-center gap-1 text-xs text-error font-medium">
-                                <Pin className="w-3 h-3" /> Critical
-                              </span>
-                            )}
                           </div>
                         </div>
-                        {!notification.read && (
-                          <div className="w-2 h-2 bg-primary rounded-full flex-shrink-0 mt-2"></div>
-                        )}
                       </div>
                     </div>
                   ))
@@ -353,7 +524,12 @@ function TopBar({
           )}
         </div>
         
-        <div className="flex items-center gap-3 pl-3 border-l border-border">
+        <button
+          type="button"
+          onClick={() => onOpenProfile?.()}
+          className="flex items-center gap-3 pl-3 border-l border-border hover:opacity-90 transition-opacity"
+          title="Open Profile Settings"
+        >
           <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center text-white text-sm font-semibold overflow-hidden">
             {forceClientIcon ? (
               <User className="w-4 h-4" />
@@ -367,25 +543,67 @@ function TopBar({
             <span className="text-sm font-medium text-text-primary">{displayName}</span>
             <span className="text-[11px] text-text-muted">{roleLabel || 'Client'}</span>
           </div>
-        </div>
+        </button>
       </div>
     </header>
   )
 }
 
 // Dashboard Overview Page
-function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirstName, verificationPending, records = [] }) {
+function DashboardPage({
+  onAddDocument,
+  setActivePage,
+  clientFirstName,
+  verificationState = 'pending',
+  records = [],
+  activityLogs = [],
+}) {
   const displayName = clientFirstName?.trim() || 'Client'
-  // derive counts from records
-  const approvedCount = records.filter(r => r.status === 'Approved').length
-  const pendingCount = records.filter(r => r.status === 'Pending' || r.status === 'Pending Review').length
-  const rejectedCount = records.filter(r => r.status === 'Rejected').length
-  const needsClarificationCount = records.filter(r => r.status === 'Needs Clarification' || r.status === 'Info Requested').length
+  const hour = new Date().getHours()
+  const GreetingIcon = hour < 12 ? Sunrise : hour < 18 ? Sun : Moon
+  const verificationBadgeConfig = {
+    verified: {
+      label: 'Verified',
+      icon: CheckCircle,
+      className: 'bg-primary-tint text-primary border border-primary/30',
+    },
+    pending: {
+      label: 'Verification Pending',
+      icon: Clock,
+      className: 'bg-warning-bg text-warning border border-warning/30',
+    },
+    rejected: {
+      label: 'Verification Rejected',
+      icon: XCircle,
+      className: 'bg-error-bg text-error border border-error/30',
+    },
+    suspended: {
+      label: 'Account Suspended',
+      icon: Shield,
+      className: 'bg-error-bg text-error border border-error/30',
+    },
+  }
+  const activeVerificationBadge = verificationBadgeConfig[verificationState] || verificationBadgeConfig.pending
+  const parseDateValue = (value = '') => {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+  const sortedRecords = [...(Array.isArray(records) ? records : [])]
+    .sort((a, b) => parseDateValue(b.date) - parseDateValue(a.date))
+
+  // derive counts from files (not folders)
+  const approvedCount = sortedRecords.filter(r => r.status === 'Approved').length
+  const pendingCount = sortedRecords.filter(r => r.status === 'Pending Review').length
+  const rejectedCount = sortedRecords.filter(r => r.status === 'Rejected').length
+  const needsClarificationCount = sortedRecords.filter(r => r.status === 'Needs Clarification' || r.status === 'Info Requested').length
+  const totalExpenseFiles = sortedRecords.filter(r => r.categoryId === 'expenses' || r.category === 'Expense').length
+  const totalSalesFiles = sortedRecords.filter(r => r.categoryId === 'sales' || r.category === 'Sales').length
+  const totalBankFiles = sortedRecords.filter(r => r.categoryId === 'bank-statements' || r.category === 'Bank Statement' || r.category === 'Bank').length
 
   // Compliance Status - determines overall health from document statuses
   let complianceStatus = 'compliant'
-  if (rejectedCount > 0) complianceStatus = 'rejected'
-  else if (needsClarificationCount > 0 || pendingCount > 0 || verificationPending) complianceStatus = 'pending'
+  if (rejectedCount > 0 || verificationState === 'rejected' || verificationState === 'suspended') complianceStatus = 'rejected'
+  else if (needsClarificationCount > 0 || pendingCount > 0 || verificationState === 'pending') complianceStatus = 'pending'
 
   const getComplianceWidget = () => {
     const styles = {
@@ -413,7 +631,27 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
     )
   }
 
-  // Activity Timeline - recent activities (derived from records)
+  // Activity Timeline
+  const formatActivityTimestamp = (value = '') => {
+    const parsed = parseDateValue(value)
+    if (!parsed) return value || 'Just now'
+    return new Date(parsed).toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+  }
+
+  const resolveActivityType = (action = '', details = '') => {
+    const text = `${action} ${details}`.toLowerCase()
+    if (text.includes('approve')) return 'approval'
+    if (text.includes('reject') || text.includes('delete')) return 'rejection'
+    if (text.includes('info') || text.includes('clarification')) return 'verification'
+    return 'upload'
+  }
 
   const getActivityIcon = (type) => {
     switch (type) {
@@ -425,16 +663,39 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
     }
   }
 
-  // derive recent activities from records (newest first)
-  const derivedActivities = (records || []).slice().reverse().slice(0, 8).map((r, idx) => {
+  const logDrivenActivities = [...(Array.isArray(activityLogs) ? activityLogs : [])]
+    .sort((a, b) => parseDateValue(b.timestamp) - parseDateValue(a.timestamp))
+    .slice(0, 8)
+    .map((entry, idx) => {
+      const type = resolveActivityType(entry.action, entry.details)
+      return {
+        id: entry.id || `log-${idx}`,
+        type,
+        message: entry.action || 'Client activity',
+        details: entry.details || '',
+        timestamp: formatActivityTimestamp(entry.timestamp),
+        icon: type === 'approval' ? CheckCircle : type === 'rejection' ? AlertCircle : Upload,
+      }
+    })
+
+  // fallback derived activities from files when no explicit logs are available
+  const derivedActivities = sortedRecords.slice(0, 8).map((r, idx) => {
     let type = 'upload'
     let message = `You uploaded ${r.filename}`
     if (r.status === 'Approved') { type = 'approval'; message = `Admin approved ${r.filename}` }
     if (r.status === 'Rejected') { type = 'rejection'; message = `Admin rejected ${r.filename}` }
     if (r.status === 'Needs Clarification' || r.status === 'Info Requested') { type = 'rejection'; message = `Admin requested more info for ${r.filename}` }
     if (r.versions && r.versions.length > 0) { message = `You updated ${r.filename}` }
-    return { id: `${r.id}-${idx}`, type, message, timestamp: r.date || 'Just now', icon: type === 'approval' ? CheckCircle : type === 'rejection' ? AlertCircle : Upload }
+    return {
+      id: `${r.id}-${idx}`,
+      type,
+      message,
+      details: '',
+      timestamp: formatActivityTimestamp(r.date || 'Just now'),
+      icon: type === 'approval' ? CheckCircle : type === 'rejection' ? AlertCircle : Upload,
+    }
   })
+  const timelineActivities = logDrivenActivities.length > 0 ? logDrivenActivities : derivedActivities
 
   // Notifications state (persisted locally)
   const [notifications, setNotifications] = useState(() => {
@@ -565,51 +826,40 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
   }
 
   const stats = [
-    { label: 'Total Expenses', value: records.filter(r => r.category === 'Expense').length.toString(), icon: DollarSign, color: 'bg-error-bg text-error', trend: 'Documents uploaded', up: true },
-    { label: 'Total Sales', value: records.filter(r => r.category === 'Sales').length.toString(), icon: TrendingUp, color: 'bg-success-bg text-success', trend: 'Documents uploaded', up: true },
-    { label: 'Bank Statements', value: records.filter(r => r.category === 'Bank Statement' || r.category === 'Bank').length.toString(), icon: Building2, color: 'bg-info-bg text-primary', trend: 'Documents uploaded', up: true },
+    { label: 'Total Expenses', value: totalExpenseFiles.toString(), icon: DollarSign, color: 'bg-error-bg text-error', trend: 'Files uploaded', up: true },
+    { label: 'Total Sales', value: totalSalesFiles.toString(), icon: TrendingUp, color: 'bg-success-bg text-success', trend: 'Files uploaded', up: true },
+    { label: 'Bank Statements', value: totalBankFiles.toString(), icon: Building2, color: 'bg-info-bg text-primary', trend: 'Files uploaded', up: true },
     { label: 'Pending Review', value: pendingCount.toString(), icon: Clock, color: 'bg-warning-bg text-warning', trend: 'Awaiting review', up: false },
     { label: 'Approved Documents', value: approvedCount.toString(), icon: CheckCircle, color: 'bg-success-bg text-success', trend: 'Documents approved', up: true },
     { label: 'Rejected Documents', value: rejectedCount.toString(), icon: X, color: 'bg-error-bg text-error', trend: 'Documents rejected', up: false },
   ]
 
-  const recentExpenses = [
-    { id: 1, vendor: 'Shell Petroleum', category: 'Fuel', amount: '\u20A6245,000', date: 'Feb 24' },
-    { id: 2, vendor: 'Amazon Web Services', category: 'Software', amount: '\u20A6890,000', date: 'Feb 23' },
-    { id: 3, vendor: 'Lagos Electric', category: 'Utilities', amount: '\u20A6156,500', date: 'Feb 22' },
-  ]
+  const recentExpenses = sortedRecords
+    .filter((item) => item.categoryId === 'expenses' || item.category === 'Expense')
+    .slice(0, 4)
 
-  const recentSales = [
-    { id: 1, customer: 'Tech Solutions Ltd', invoice: 'INV-2026-0042', amount: '\u20A62,500,000', date: 'Feb 24' },
-    { id: 2, customer: 'Global Ventures', invoice: 'INV-2026-0041', amount: '\u20A6890,000', date: 'Feb 23' },
-    { id: 3, customer: 'Alpha Industries', invoice: 'INV-2026-0040', amount: '\u20A65,750,000', date: 'Feb 22' },
-  ]
+  const recentSales = sortedRecords
+    .filter((item) => item.categoryId === 'sales' || item.category === 'Sales')
+    .slice(0, 4)
 
-  const recentUploads = [
-    { id: 1, filename: 'Expense_Report_Feb2026.pdf', type: 'PDF', category: 'Expense', date: 'Feb 24, 2026', status: 'Pending' },
-    { id: 2, filename: 'Sales_Data_Jan2026.xlsx', type: 'XLSX', category: 'Sales', date: 'Feb 23, 2026', status: 'Approved' },
-    { id: 3, filename: 'Bank_Statement_GTB_Feb2026.pdf', type: 'PDF', category: 'Bank Statement', date: 'Feb 22, 2026', status: 'Needs Clarification' },
-  ]
+  const recentBankStatements = sortedRecords
+    .filter((item) => item.categoryId === 'bank-statements' || item.category === 'Bank Statement' || item.category === 'Bank')
+    .slice(0, 4)
 
   return (
     <div className="animate-fade-in">
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-text-primary">Dashboard Overview</h1>
-            {verificationPending && (
-              <div className="mt-1 inline-flex items-center h-6 px-2.5 rounded text-xs font-medium bg-warning-bg text-warning">
-                Verification Pending
-              </div>
-            )}
-            {profilePhoto && (
-              <div className="flex items-center gap-2 mt-1">
-                <div className="w-6 h-6 rounded-full overflow-hidden">
-                  <img src={profilePhoto} alt="Profile" className="w-full h-full object-cover" />
-                </div>
-                <span className="text-xs text-text-muted">{displayName}</span>
-              </div>
-            )}
+            <div className="inline-flex items-center gap-2 bg-primary text-white rounded-lg px-4 py-2">
+              <GreetingIcon className="w-5 h-5" />
+              <h1 className="text-lg font-semibold">{`Greetings! ${displayName}`}</h1>
+            </div>
+            <p className="text-sm text-text-secondary mt-1">Dashboard Overview</p>
+            <div className={`mt-2 inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs font-medium ${activeVerificationBadge.className}`}>
+              <activeVerificationBadge.icon className="w-3.5 h-3.5" />
+              {activeVerificationBadge.label}
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -695,12 +945,18 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
         <div className="bg-white rounded-lg shadow-card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
             <h3 className="text-base font-semibold text-text-primary">Recent Activity</h3>
+            <button
+              onClick={() => setActivePage('recent-activities')}
+              className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
+            >
+              See All <ChevronRight className="w-4 h-4" />
+            </button>
           </div>
           <div className="divide-y divide-border-light max-h-80 overflow-y-auto">
-            {(derivedActivities.length === 0) ? (
+            {(timelineActivities.length === 0) ? (
               <div className="p-4 text-sm text-text-muted">No recent activity</div>
             ) : (
-              derivedActivities.map((activity) => (
+              timelineActivities.map((activity) => (
                 <div key={activity.id} className="px-5 py-3 hover:bg-background transition-colors">
                   <div className="flex items-start gap-3">
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center ${getActivityIcon(activity.type)}`}>
@@ -708,6 +964,7 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-text-primary">{activity.message}</p>
+                      {activity.details && <p className="text-xs text-text-secondary mt-0.5">{activity.details}</p>}
                       <p className="text-xs text-text-muted mt-0.5">{activity.timestamp}</p>
                     </div>
                   </div>
@@ -728,17 +985,21 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
             </button>
           </div>
           <div className="divide-y divide-border-light">
-            {recentExpenses.map((item) => (
-              <div key={item.id} className="px-5 py-3 hover:bg-background transition-colors">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-medium text-text-primary">{item.vendor}</div>
-                    <div className="text-xs text-text-muted mt-0.5">{item.category} | {item.date}</div>
+            {recentExpenses.length === 0 ? (
+              <div className="px-5 py-4 text-sm text-text-muted">No expense files yet.</div>
+            ) : (
+              recentExpenses.map((item) => (
+                <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
+                      <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
+                    </div>
+                    <StatusBadge status={item.status || 'Pending Review'} />
                   </div>
-                  <div className="text-sm font-medium text-text-primary">{item.amount}</div>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
 
@@ -754,53 +1015,51 @@ function DashboardPage({ onAddDocument, setActivePage, profilePhoto, clientFirst
             </button>
           </div>
           <div className="divide-y divide-border-light">
-            {recentSales.map((item) => (
-              <div key={item.id} className="px-5 py-3 hover:bg-background transition-colors">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-medium text-text-primary">{item.customer}</div>
-                    <div className="text-xs text-text-muted mt-0.5">{item.invoice} | {item.date}</div>
+            {recentSales.length === 0 ? (
+              <div className="px-5 py-4 text-sm text-text-muted">No sales files yet.</div>
+            ) : (
+              recentSales.map((item) => (
+                <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
+                      <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
+                    </div>
+                    <StatusBadge status={item.status || 'Pending Review'} />
                   </div>
-                  <div className="text-sm font-medium text-success">{item.amount}</div>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
 
-        {/* Recent Uploads */}
+        {/* Recent Bank Statements */}
         <div className="bg-white rounded-lg shadow-card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
-            <h3 className="text-base font-semibold text-text-primary">Recent Uploads</h3>
+            <h3 className="text-base font-semibold text-text-primary">Recent Bank Statements</h3>
             <button 
-              onClick={() => setActivePage('upload-history')}
+              onClick={() => setActivePage('bank-statements')}
               className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
             >
               See All <ChevronRight className="w-4 h-4" />
             </button>
           </div>
           <div className="divide-y divide-border-light">
-            {recentUploads.map((item) => (
-              <div key={item.id} className="px-5 py-3 hover:bg-background transition-colors">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <FileTypeIcon type={item.type} />
-                    <div>
-                      <div className="text-sm font-medium text-text-primary truncate max-w-[160px]">{item.filename}</div>
-                      <div className="text-xs text-text-muted mt-0.5">{item.category} | {item.date}</div>
+            {recentBankStatements.length === 0 ? (
+              <div className="px-5 py-4 text-sm text-text-muted">No bank statement files yet.</div>
+            ) : (
+              recentBankStatements.map((item) => (
+                <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
+                      <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
                     </div>
+                    <StatusBadge status={item.status || 'Pending Review'} />
                   </div>
-                  <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${
-                    item.status === 'Approved' ? 'bg-success-bg text-success' :
-                    item.status === 'Rejected' ? 'bg-error-bg text-error' :
-                    item.status === 'Pending' ? 'bg-warning-bg text-warning' :
-                    'bg-info-bg text-primary'
-                  }`}>
-                    {item.status || 'Pending'}
-                  </span>
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </div>
@@ -814,14 +1073,35 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
   const [filterStatus, setFilterStatus] = useState('')
   const [viewingFile, setViewingFile] = useState(null)
   const [resubmitModal, setResubmitModal] = useState(null)
+  const [expandedFolders, setExpandedFolders] = useState({})
 
-  const filteredData = records.filter(item => {
-    const matchesSearch = item.filename.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                        item.fileId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                        item.user.toLowerCase().includes(searchTerm.toLowerCase())
-    const matchesStatus = !filterStatus || item.status === filterStatus
+  // Separate folders and regular files
+  const folders = records.filter(item => item.isFolder)
+  const regularFiles = records.filter(item => !item.isFolder)
+
+  const filteredFolders = folders.filter(folder => {
+    const matchesSearch = folder.folderName?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        folder.id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        folder.user?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        folder.class?.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesStatus = !filterStatus || folder.status === filterStatus
     return matchesSearch && matchesStatus
   })
+
+  const filteredFiles = regularFiles.filter(file => {
+    const matchesSearch = file.filename?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        file.fileId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        file.user?.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesStatus = !filterStatus || file.status === filterStatus
+    return matchesSearch && matchesStatus
+  })
+
+  const toggleFolder = (folderId) => {
+    setExpandedFolders(prev => ({
+      ...prev,
+      [folderId]: !prev[folderId]
+    }))
+  }
 
   const handleResubmit = (record) => {
     setResubmitModal(record)
@@ -830,18 +1110,28 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
   const getStatusStyle = (status) => {
     switch (status) {
       case 'Approved': return 'bg-success-bg text-success'
-      case 'Pending': return 'bg-warning-bg text-warning'
+      case 'Pending Review':
+        return 'bg-warning-bg text-warning'
       case 'Rejected': return 'bg-error-bg text-error'
       case 'Info Requested': return 'bg-info-bg text-primary'
-      case 'Needs Clarification': return 'bg-warning-bg text-warning'
+      case 'Needs Clarification': return 'bg-info-bg text-primary'
       default: return 'bg-border text-text-secondary'
     }
   }
 
   const handleDelete = (id) => {
-    if (confirm('Are you sure you want to delete this file?')) {
-      setRecords(records.filter(item => item.id !== id))
-    }
+    if (!confirm('Are you sure you want to delete this file?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { id }))
+  }
+
+  const handleDeleteFolder = (folderId) => {
+    if (!confirm('Are you sure you want to delete this folder and all its files?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { id: folderId }))
+  }
+
+  const handleDeleteFolderFile = (folderId, fileId, askConfirm = true) => {
+    if (askConfirm && !confirm('Are you sure you want to delete this file from the folder?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { folderId, fileId }))
   }
 
   return (
@@ -863,8 +1153,9 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
           <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary">
             <option value="">All Status</option>
             <option value="Approved">Approved</option>
-            <option value="Pending">Pending</option>
+            <option value="Pending Review">Pending Review</option>
             <option value="Rejected">Rejected</option>
+            <option value="Info Requested">Info Requested</option>
           </select>
         </div>
       </div>
@@ -875,8 +1166,9 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
             <thead>
               <tr className="bg-[#F9FAFB]">
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide w-16">SN</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File Name</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File ID</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Folder / File</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">ID</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Class</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Uploaded By</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date & Time</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
@@ -884,12 +1176,82 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
               </tr>
             </thead>
             <tbody>
-              {filteredData.length > 0 ? (
-                filteredData.map((row, index) => (
+              {/* Folders */}
+              {filteredFolders.length > 0 ? (
+                filteredFolders.map((folder, index) => (
+                  <>
+                    <tr key={folder.id} className="border-b border-border-light hover:bg-[#F9FAFB] transition-colors">
+                      <td className="px-4 py-3.5 text-sm">{index + 1}</td>
+                      <td className="px-4 py-3.5">
+                        <button 
+                          onClick={() => toggleFolder(folder.id)} 
+                          className="flex items-center gap-2 text-sm font-medium text-primary hover:text-primary-light"
+                        >
+                          {expandedFolders[folder.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          <Folder className="w-4 h-4 text-primary" />
+                          {folder.folderName}
+                          <span className="text-xs text-text-muted ml-1">({folder.files?.length || 0} files)</span>
+                        </button>
+                      </td>
+                      <td className="px-4 py-3.5 text-sm font-medium">{folder.id}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.class || '-'}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.user}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.date}</td>
+                      <td className="px-4 py-3.5">
+                        <StatusBadge status={folder.status} />
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => toggleFolder(folder.id)} className="w-8 h-8 border border-border rounded flex items-center justify-center text-text-secondary hover:border-primary hover:text-primary" title={expandedFolders[folder.id] ? 'Collapse' : 'Expand'}>
+                            {expandedFolders[folder.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          </button>
+                          <button onClick={() => handleDeleteFolder(folder.id)} className="w-8 h-8 border border-border rounded flex items-center justify-center text-text-secondary hover:border-error hover:text-error" title="Delete">
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expandedFolders[folder.id] && folder.files?.map((file) => (
+                      <tr key={`${folder.id}-${file.fileId}`} className="border-b border-border-light bg-gray-50">
+                        <td className="px-4 py-2 text-sm text-text-muted"></td>
+                        <td className="px-4 py-2 pl-8 text-sm">
+                          <div className="flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-text-muted" />
+                            {file.filename}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.fileId}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.class || folder.class || '-'}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.user || folder.user}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.date || folder.date}</td>
+                        <td className="px-4 py-2">
+                          <StatusBadge status={file.status || folder.status} />
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => setViewingFile({ ...file, folderId: folder.id, folderName: folder.folderName, class: file.class || folder.class || '' })} className="w-8 h-8 border border-border rounded flex items-center justify-center text-text-secondary hover:border-primary hover:text-primary" title="View"><Eye className="w-4 h-4" /></button>
+                            <button onClick={() => handleDeleteFolderFile(folder.id, file.fileId)} className="w-8 h-8 border border-border rounded flex items-center justify-center text-text-secondary hover:border-error hover:text-error" title="Delete"><X className="w-4 h-4" /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </>
+                ))
+              ) : null}
+              
+              {/* Regular files (not in folders) */}
+              {filteredFiles.length > 0 ? (
+                filteredFiles.map((row, index) => (
                   <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB] transition-colors">
-                    <td className="px-4 py-3.5 text-sm">{index + 1}</td>
-                    <td onClick={() => setViewingFile(row)} className="px-4 py-3.5 text-sm cursor-pointer">{row.filename}</td>
+                    <td className="px-4 py-3.5 text-sm">{filteredFolders.length + index + 1}</td>
+                    <td onClick={() => setViewingFile(row)} className="px-4 py-3.5 text-sm cursor-pointer">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-text-muted" />
+                        {row.filename}
+                      </div>
+                    </td>
                     <td className="px-4 py-3.5 text-sm font-medium">{row.fileId}</td>
+                    <td className="px-4 py-3.5 text-sm">{row.expenseClass || '-'}</td>
                     <td className="px-4 py-3.5 text-sm">{row.user}</td>
                     <td className="px-4 py-3.5 text-sm">{row.date}</td>
                     <td className="px-4 py-3.5">
@@ -906,8 +1268,10 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
                     </td>
                   </tr>
                 ))
-              ) : (
-                <tr><td colSpan={7}><EmptyState title="No records found" description="Try uploading your first expense or check filters." cta={<button onClick={() => onAddDocument('expenses')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Expense</button>} /></td></tr>
+              ) : null}
+
+              {filteredFolders.length === 0 && filteredFiles.length === 0 && (
+                <tr><td colSpan={8}><EmptyState title="No records found" description="Try uploading your first expense or check filters." cta={<button onClick={() => onAddDocument('expenses')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Expense</button>} /></td></tr>
               )}
             </tbody>
           </table>
@@ -919,12 +1283,17 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
           file={viewingFile}
           onClose={() => setViewingFile(null)}
           onSave={(updated) => {
-            setRecords((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)))
+            setRecords((prev) => updateRecordsForFile(prev, updated))
             setViewingFile(null)
           }}
-          onDelete={(id) => {
+          onDelete={(target) => {
             if (confirm('Are you sure you want to delete this file?')) {
-              setRecords((prev) => prev.filter((r) => r.id !== id))
+              if (viewingFile?.folderId && viewingFile?.fileId) {
+                setRecords((prev) => removeFileFromRecords(prev, { folderId: viewingFile.folderId, fileId: viewingFile.fileId }))
+              } else {
+                const targetId = typeof target === 'object' ? target?.id : target
+                setRecords((prev) => removeFileFromRecords(prev, { id: targetId }))
+              }
               setViewingFile(null)
             }
           }}
@@ -965,7 +1334,7 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
                       rawFile: newFile,
                       previewUrl: newPreview,
                       date: new Date().toLocaleString(),
-                      status: 'Pending',
+                      status: 'Pending Review',
                       adminComment: null,
                       requiredAction: null,
                       versions,
@@ -1020,19 +1389,49 @@ function SalesPage({ onAddDocument, records, setRecords }) {
   const [filterStatus, setFilterStatus] = useState('')
   const [viewingFile, setViewingFile] = useState(null)
   const [resubmitModal, setResubmitModal] = useState(null)
+  const [expandedFolders, setExpandedFolders] = useState({})
 
-  const filteredData = records.filter(item => {
-    const matchesSearch = item.filename.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                        item.fileId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                        item.user.toLowerCase().includes(searchTerm.toLowerCase())
-    const matchesStatus = !filterStatus || item.status === filterStatus
+  // Separate folders and regular files
+  const folders = records.filter(item => item.isFolder)
+  const regularFiles = records.filter(item => !item.isFolder)
+
+  const filteredFolders = folders.filter(folder => {
+    const matchesSearch = folder.folderName?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        folder.id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        folder.user?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        folder.class?.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesStatus = !filterStatus || folder.status === filterStatus
     return matchesSearch && matchesStatus
   })
 
+  const filteredFiles = regularFiles.filter(file => {
+    const matchesSearch = file.filename?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        file.fileId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        file.user?.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesStatus = !filterStatus || file.status === filterStatus
+    return matchesSearch && matchesStatus
+  })
+
+  const toggleFolder = (folderId) => {
+    setExpandedFolders(prev => ({
+      ...prev,
+      [folderId]: !prev[folderId]
+    }))
+  }
+
   const handleDelete = (id) => {
-    if (confirm('Are you sure you want to delete this file?')) {
-      setRecords(records.filter(item => item.id !== id))
-    }
+    if (!confirm('Are you sure you want to delete this file?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { id }))
+  }
+
+  const handleDeleteFolder = (folderId) => {
+    if (!confirm('Are you sure you want to delete this folder and all its files?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { id: folderId }))
+  }
+
+  const handleDeleteFolderFile = (folderId, fileId, askConfirm = true) => {
+    if (askConfirm && !confirm('Are you sure you want to delete this file from the folder?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { folderId, fileId }))
   }
 
   return (
@@ -1053,8 +1452,9 @@ function SalesPage({ onAddDocument, records, setRecords }) {
           <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 px-3 bg-background border border-border rounded-md text-sm">
             <option value="">All Status</option>
             <option value="Approved">Approved</option>
-            <option value="Pending">Pending</option>
+            <option value="Pending Review">Pending Review</option>
             <option value="Rejected">Rejected</option>
+            <option value="Info Requested">Info Requested</option>
           </select>
         </div>
       </div>
@@ -1065,8 +1465,9 @@ function SalesPage({ onAddDocument, records, setRecords }) {
             <thead>
               <tr className="bg-[#F9FAFB]">
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide w-16">SN</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File Name</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File ID</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Folder / File</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">ID</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Class</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Uploaded By</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date & Time</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
@@ -1074,12 +1475,80 @@ function SalesPage({ onAddDocument, records, setRecords }) {
               </tr>
             </thead>
             <tbody>
-              {filteredData.length > 0 ? (
-                filteredData.map((row, index) => (
+              {/* Folders */}
+              {filteredFolders.length > 0 ? (
+                filteredFolders.map((folder, index) => (
+                  <>
+                    <tr key={folder.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
+                      <td className="px-4 py-3.5 text-sm">{index + 1}</td>
+                      <td className="px-4 py-3.5">
+                        <button 
+                          onClick={() => toggleFolder(folder.id)} 
+                          className="flex items-center gap-2 text-sm font-medium text-primary hover:text-primary-light"
+                        >
+                          {expandedFolders[folder.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          <Folder className="w-4 h-4 text-primary" />
+                          {folder.folderName}
+                          <span className="text-xs text-text-muted ml-1">({folder.files?.length || 0} files)</span>
+                        </button>
+                      </td>
+                      <td className="px-4 py-3.5 text-sm font-medium">{folder.id}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.class || '-'}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.user}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.date}</td>
+                      <td className="px-4 py-3.5">
+                        <StatusBadge status={folder.status} />
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => toggleFolder(folder.id)} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-primary" title={expandedFolders[folder.id] ? 'Collapse' : 'Expand'}>
+                            {expandedFolders[folder.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          </button>
+                          <button onClick={() => handleDeleteFolder(folder.id)} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-error" title="Delete"><X className="w-4 h-4" /></button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expandedFolders[folder.id] && folder.files?.map((file) => (
+                      <tr key={`${folder.id}-${file.fileId}`} className="border-b border-border-light bg-gray-50">
+                        <td className="px-4 py-2 text-sm text-text-muted"></td>
+                        <td className="px-4 py-2 pl-8 text-sm">
+                          <div className="flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-text-muted" />
+                            {file.filename}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.fileId}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.class || folder.class || '-'}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.user || folder.user}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.date || folder.date}</td>
+                        <td className="px-4 py-2">
+                          <StatusBadge status={file.status || folder.status} />
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => setViewingFile({ ...file, folderId: folder.id, folderName: folder.folderName, class: file.class || folder.class || '' })} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-primary" title="View"><Eye className="w-4 h-4" /></button>
+                            <button onClick={() => handleDeleteFolderFile(folder.id, file.fileId)} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-error" title="Delete"><X className="w-4 h-4" /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </>
+                ))
+              ) : null}
+              
+              {/* Regular files */}
+              {filteredFiles.length > 0 ? (
+                filteredFiles.map((row, index) => (
                   <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
-                    <td className="px-4 py-3.5 text-sm">{index + 1}</td>
-                    <td onClick={() => setViewingFile(row)} className="px-4 py-3.5 text-sm cursor-pointer">{row.filename}</td>
+                    <td className="px-4 py-3.5 text-sm">{filteredFolders.length + index + 1}</td>
+                    <td onClick={() => setViewingFile(row)} className="px-4 py-3.5 text-sm cursor-pointer">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-text-muted" />
+                        {row.filename}
+                      </div>
+                    </td>
                     <td className="px-4 py-3.5 text-sm font-medium">{row.fileId}</td>
+                    <td className="px-4 py-3.5 text-sm">{row.salesClass || '-'}</td>
                     <td className="px-4 py-3.5 text-sm">{row.user}</td>
                     <td className="px-4 py-3.5 text-sm">{row.date}</td>
                     <td className="px-4 py-3.5">
@@ -1096,8 +1565,10 @@ function SalesPage({ onAddDocument, records, setRecords }) {
                     </td>
                   </tr>
                 ))
-              ) : (
-                <tr><td colSpan={7}><EmptyState title="No records found" description="No sales documents yet." cta={<button onClick={() => onAddDocument('sales')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Sales</button>} /></td></tr>
+              ) : null}
+
+              {filteredFolders.length === 0 && filteredFiles.length === 0 && (
+                <tr><td colSpan={8}><EmptyState title="No records found" description="No sales documents yet." cta={<button onClick={() => onAddDocument('sales')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Sales</button>} /></td></tr>
               )}
             </tbody>
           </table>
@@ -1109,12 +1580,17 @@ function SalesPage({ onAddDocument, records, setRecords }) {
           file={viewingFile}
           onClose={() => setViewingFile(null)}
           onSave={(updated) => {
-            setRecords((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)))
+            setRecords((prev) => updateRecordsForFile(prev, updated))
             setViewingFile(null)
           }}
-          onDelete={(id) => {
+          onDelete={(target) => {
             if (confirm('Are you sure you want to delete this file?')) {
-              setRecords((prev) => prev.filter((r) => r.id !== id))
+              if (viewingFile?.folderId && viewingFile?.fileId) {
+                setRecords((prev) => removeFileFromRecords(prev, { folderId: viewingFile.folderId, fileId: viewingFile.fileId }))
+              } else {
+                const targetId = typeof target === 'object' ? target?.id : target
+                setRecords((prev) => removeFileFromRecords(prev, { id: targetId }))
+              }
               setViewingFile(null)
             }
           }}
@@ -1154,7 +1630,7 @@ function SalesPage({ onAddDocument, records, setRecords }) {
                       rawFile: newFile,
                       previewUrl: newPreview,
                       date: new Date().toLocaleString(),
-                      status: 'Pending',
+                      status: 'Pending Review',
                       adminComment: null,
                       requiredAction: null,
                       versions,
@@ -1176,19 +1652,50 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
   const [searchTerm, setSearchTerm] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [viewingFile, setViewingFile] = useState(null)
+  const [resubmitModal, setResubmitModal] = useState(null)
+  const [expandedFolders, setExpandedFolders] = useState({})
 
-  const filteredData = records.filter(item => {
-    const matchesSearch = item.filename.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.fileId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.user.toLowerCase().includes(searchTerm.toLowerCase())
-    const matchesStatus = !filterStatus || item.status === filterStatus
+  // Separate folders and regular files
+  const folders = records.filter(item => item.isFolder)
+  const regularFiles = records.filter(item => !item.isFolder)
+
+  const filteredFolders = folders.filter(folder => {
+    const matchesSearch = folder.folderName?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        folder.id?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        folder.user?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        folder.class?.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesStatus = !filterStatus || folder.status === filterStatus
     return matchesSearch && matchesStatus
   })
 
+  const filteredFiles = regularFiles.filter(file => {
+    const matchesSearch = file.filename?.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                        file.fileId?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        file.user?.toLowerCase().includes(searchTerm.toLowerCase())
+    const matchesStatus = !filterStatus || file.status === filterStatus
+    return matchesSearch && matchesStatus
+  })
+
+  const toggleFolder = (folderId) => {
+    setExpandedFolders(prev => ({
+      ...prev,
+      [folderId]: !prev[folderId]
+    }))
+  }
+
   const handleDelete = (id) => {
-    if (confirm('Are you sure you want to delete this file?')) {
-      setRecords(records.filter(item => item.id !== id))
-    }
+    if (!confirm('Are you sure you want to delete this file?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { id }))
+  }
+
+  const handleDeleteFolder = (folderId) => {
+    if (!confirm('Are you sure you want to delete this folder and all its files?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { id: folderId }))
+  }
+
+  const handleDeleteFolderFile = (folderId, fileId, askConfirm = true) => {
+    if (askConfirm && !confirm('Are you sure you want to delete this file from the folder?')) return
+    setRecords((prev) => removeFileFromRecords(prev, { folderId, fileId }))
   }
 
   return (
@@ -1213,8 +1720,9 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
           <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary">
             <option value="">All Status</option>
             <option value="Approved">Approved</option>
-            <option value="Pending">Pending</option>
+            <option value="Pending Review">Pending Review</option>
             <option value="Rejected">Rejected</option>
+            <option value="Info Requested">Info Requested</option>
           </select>
         </div>
       </div>
@@ -1225,8 +1733,9 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
             <thead>
               <tr className="bg-[#F9FAFB]">
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide w-16">SN</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File Name</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File ID</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Folder / File</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">ID</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Class</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Uploaded By</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date & Time</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
@@ -1234,12 +1743,80 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
               </tr>
             </thead>
             <tbody>
-              {filteredData.length > 0 ? (
-                filteredData.map((row, index) => (
+              {/* Folders */}
+              {filteredFolders.length > 0 ? (
+                filteredFolders.map((folder, index) => (
+                  <>
+                    <tr key={folder.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
+                      <td className="px-4 py-3.5 text-sm">{index + 1}</td>
+                      <td className="px-4 py-3.5">
+                        <button 
+                          onClick={() => toggleFolder(folder.id)} 
+                          className="flex items-center gap-2 text-sm font-medium text-primary hover:text-primary-light"
+                        >
+                          {expandedFolders[folder.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          <Folder className="w-4 h-4 text-primary" />
+                          {folder.folderName}
+                          <span className="text-xs text-text-muted ml-1">({folder.files?.length || 0} files)</span>
+                        </button>
+                      </td>
+                      <td className="px-4 py-3.5 text-sm font-medium">{folder.id}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.class || '-'}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.user}</td>
+                      <td className="px-4 py-3.5 text-sm">{folder.date}</td>
+                      <td className="px-4 py-3.5">
+                        <StatusBadge status={folder.status} />
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => toggleFolder(folder.id)} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-primary" title={expandedFolders[folder.id] ? 'Collapse' : 'Expand'}>
+                            {expandedFolders[folder.id] ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                          </button>
+                          <button onClick={() => handleDeleteFolder(folder.id)} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-error" title="Delete"><X className="w-4 h-4" /></button>
+                        </div>
+                      </td>
+                    </tr>
+                    {expandedFolders[folder.id] && folder.files?.map((file) => (
+                      <tr key={`${folder.id}-${file.fileId}`} className="border-b border-border-light bg-gray-50">
+                        <td className="px-4 py-2 text-sm text-text-muted"></td>
+                        <td className="px-4 py-2 pl-8 text-sm">
+                          <div className="flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-text-muted" />
+                            {file.filename}
+                          </div>
+                        </td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.fileId}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.class || folder.class || '-'}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.user || folder.user}</td>
+                        <td className="px-4 py-2 text-sm text-text-muted">{file.date || folder.date}</td>
+                        <td className="px-4 py-2">
+                          <StatusBadge status={file.status || folder.status} />
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => setViewingFile({ ...file, folderId: folder.id, folderName: folder.folderName, class: file.class || folder.class || '' })} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-primary" title="View"><Eye className="w-4 h-4" /></button>
+                            <button onClick={() => handleDeleteFolderFile(folder.id, file.fileId)} className="w-8 h-8 border rounded flex items-center justify-center text-text-secondary hover:border-error" title="Delete"><X className="w-4 h-4" /></button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </>
+                ))
+              ) : null}
+              
+              {/* Regular files */}
+              {filteredFiles.length > 0 ? (
+                filteredFiles.map((row, index) => (
                   <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
-                    <td className="px-4 py-3.5 text-sm">{index + 1}</td>
-                    <td onClick={() => setViewingFile(row)} className="px-4 py-3.5 text-sm cursor-pointer">{row.filename}</td>
+                    <td className="px-4 py-3.5 text-sm">{filteredFolders.length + index + 1}</td>
+                    <td onClick={() => setViewingFile(row)} className="px-4 py-3.5 text-sm cursor-pointer">
+                      <div className="flex items-center gap-2">
+                        <FileText className="w-4 h-4 text-text-muted" />
+                        {row.filename}
+                      </div>
+                    </td>
                     <td className="px-4 py-3.5 text-sm font-medium">{row.fileId}</td>
+                    <td className="px-4 py-3.5 text-sm">-</td>
                     <td className="px-4 py-3.5 text-sm">{row.user}</td>
                     <td className="px-4 py-3.5 text-sm">{row.date}</td>
                     <td className="px-4 py-3.5">
@@ -1256,8 +1833,10 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
                     </td>
                   </tr>
                 ))
-              ) : (
-                <tr><td colSpan={7}><EmptyState title="No records found" description="No bank statements uploaded." cta={<button onClick={() => onAddDocument('bank-statements')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Statement</button>} /></td></tr>
+              ) : null}
+
+              {filteredFolders.length === 0 && filteredFiles.length === 0 && (
+                <tr><td colSpan={8}><EmptyState title="No records found" description="No bank statements uploaded." cta={<button onClick={() => onAddDocument('bank-statements')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Statement</button>} /></td></tr>
               )}
             </tbody>
           </table>
@@ -1269,12 +1848,17 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
           file={viewingFile}
           onClose={() => setViewingFile(null)}
           onSave={(updated) => {
-            setRecords((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } : r)))
+            setRecords((prev) => updateRecordsForFile(prev, updated))
             setViewingFile(null)
           }}
-          onDelete={(id) => {
+          onDelete={(target) => {
             if (confirm('Are you sure you want to delete this file?')) {
-              setRecords((prev) => prev.filter((r) => r.id !== id))
+              if (viewingFile?.folderId && viewingFile?.fileId) {
+                setRecords((prev) => removeFileFromRecords(prev, { folderId: viewingFile.folderId, fileId: viewingFile.fileId }))
+              } else {
+                const targetId = typeof target === 'object' ? target?.id : target
+                setRecords((prev) => removeFileFromRecords(prev, { id: targetId }))
+              }
               setViewingFile(null)
             }
           }}
@@ -1313,7 +1897,7 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
                       rawFile: newFile,
                       previewUrl: newPreview,
                       date: new Date().toLocaleString(),
-                      status: 'Pending',
+                      status: 'Pending Review',
                       adminComment: null,
                       requiredAction: null,
                       versions,
@@ -1333,20 +1917,37 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
 // Upload History Page
 function UploadHistoryPage({ records }) {
   const [searchTerm, setSearchTerm] = useState('')
-  const [filterDate, setFilterDate] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const maxFilterDate = toIsoDate(new Date())
   const [filterType, setFilterType] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
   const [sortBy, setSortBy] = useState('date')
   const [sortOrder, setSortOrder] = useState('desc')
+  const toDateMs = (value = '') => {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
+  const getEndOfDayMs = (value = '') => {
+    if (!value) return NaN
+    const parsed = Date.parse(`${value}T23:59:59.999`)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
 
   const filteredData = records
     .filter(item => {
       const matchesSearch = item.filename.toLowerCase().includes(searchTerm.toLowerCase()) || 
                           item.user.toLowerCase().includes(searchTerm.toLowerCase())
-      const matchesDate = !filterDate || item.date.includes(filterDate)
+      const itemDateMs = toDateMs(item.date)
+      const normalizedFrom = clampFilterDateToToday(dateFrom)
+      const normalizedTo = clampFilterDateToToday(dateTo)
+      const fromMs = toDateMs(normalizedFrom)
+      const toMs = getEndOfDayMs(normalizedTo)
+      const matchesDateFrom = !normalizedFrom || (!Number.isNaN(itemDateMs) && itemDateMs >= fromMs)
+      const matchesDateTo = !normalizedTo || (!Number.isNaN(itemDateMs) && itemDateMs <= toMs)
       const matchesType = !filterType || item.type === filterType
       const matchesCategory = !filterCategory || item.category === filterCategory
-      return matchesSearch && matchesDate && matchesType && matchesCategory
+      return matchesSearch && matchesDateFrom && matchesDateTo && matchesType && matchesCategory
     })
     .sort((a, b) => {
       if (sortBy === 'date') {
@@ -1359,7 +1960,8 @@ function UploadHistoryPage({ records }) {
 
   const clearFilters = () => {
     setSearchTerm('')
-    setFilterDate('')
+    setDateFrom('')
+    setDateTo('')
     setFilterType('')
     setFilterCategory('')
   }
@@ -1385,15 +1987,22 @@ function UploadHistoryPage({ records }) {
             />
           </div>
 
-          {/* Date Filter */}
-          <div className="flex items-center gap-2">
-            <input
-              type="date"
-              value={filterDate}
-              onChange={(e) => setFilterDate(e.target.value)}
-              className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-            />
-          </div>
+          <input
+            type="date"
+            value={dateFrom}
+            max={maxFilterDate}
+            onChange={(e) => setDateFrom(clampFilterDateToToday(e.target.value))}
+            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="From date"
+          />
+          <input
+            type="date"
+            value={dateTo}
+            max={maxFilterDate}
+            onChange={(e) => setDateTo(clampFilterDateToToday(e.target.value))}
+            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="To date"
+          />
 
           {/* Document Type Filter */}
           <select
@@ -1438,7 +2047,7 @@ function UploadHistoryPage({ records }) {
           </button>
 
           {/* Clear Filters */}
-          {(searchTerm || filterDate || filterType || filterCategory) && (
+          {(searchTerm || dateFrom || dateTo || filterType || filterCategory) && (
             <button
               onClick={clearFilters}
               className="h-9 px-3 text-sm text-error hover:bg-error-bg rounded-md"
@@ -1494,6 +2103,372 @@ function UploadHistoryPage({ records }) {
   )
 }
 
+function RecentActivitiesPage({ records = [], activityLogs = [] }) {
+  const [searchTerm, setSearchTerm] = useState('')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const maxFilterDate = toIsoDate(new Date())
+  const [activityType, setActivityType] = useState('')
+  const toDateMs = (value = '') => {
+    const parsed = Date.parse(value)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
+  const endOfDayMs = (value = '') => {
+    if (!value) return NaN
+    const parsed = Date.parse(`${value}T23:59:59.999`)
+    return Number.isFinite(parsed) ? parsed : NaN
+  }
+  const toDisplayDate = (value) => {
+    const parsed = Date.parse(value || '')
+    if (Number.isNaN(parsed)) return value || '--'
+    return new Date(parsed).toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+  }
+
+  const inferType = (action = '', details = '') => {
+    const text = `${action} ${details}`.toLowerCase()
+    if (text.includes('approve')) return 'approved'
+    if (text.includes('reject') || text.includes('delete')) return 'rejected'
+    if (text.includes('info') || text.includes('clarification')) return 'info'
+    return 'upload'
+  }
+
+  const sortedLogEntries = [...(Array.isArray(activityLogs) ? activityLogs : [])]
+    .sort((a, b) => (Date.parse(b.timestamp || '') || 0) - (Date.parse(a.timestamp || '') || 0))
+  const hasLogEntries = sortedLogEntries.length > 0
+
+  const activities = hasLogEntries
+    ? sortedLogEntries.map((entry, index) => ({
+      id: entry.id || `activity-${index}`,
+      type: inferType(entry.action, entry.details),
+      activity: entry.action || 'Activity',
+      details: entry.details || '--',
+      actorName: entry.actorName || 'Client User',
+      actorRole: entry.actorRole || 'client',
+      date: toDisplayDate(entry.timestamp),
+      timestampMs: Date.parse(entry.timestamp || '') || 0,
+    }))
+    : [...(Array.isArray(records) ? records : [])]
+      .sort((a, b) => (Date.parse(b.date || '') || 0) - (Date.parse(a.date || '') || 0))
+      .map((record, index) => {
+        let type = 'upload'
+        let activity = `Uploaded ${record.filename || 'document'}`
+        if (record.status === 'Approved') {
+          type = 'approved'
+          activity = `Approved ${record.filename || 'document'}`
+        }
+        if (record.status === 'Rejected') {
+          type = 'rejected'
+          activity = `Rejected ${record.filename || 'document'}`
+        }
+        if (record.status === 'Needs Clarification' || record.status === 'Info Requested') {
+          type = 'info'
+          activity = `Info requested for ${record.filename || 'document'}`
+        }
+        return {
+          id: `${record.fileId || record.id}-${index}`,
+          type,
+          activity,
+          details: `File: ${record.filename || '--'} | Category: ${record.category || '--'} | Status: ${record.status || 'Pending Review'}`,
+          actorName: 'System',
+          actorRole: 'derived',
+          date: toDisplayDate(record.date),
+          timestampMs: Date.parse(record.date || '') || 0,
+        }
+      })
+
+  const filteredActivities = activities.filter((item) => {
+    const query = searchTerm.trim().toLowerCase()
+    const normalizedFrom = clampFilterDateToToday(dateFrom)
+    const normalizedTo = clampFilterDateToToday(dateTo)
+    const fromMs = toDateMs(normalizedFrom)
+    const toMs = endOfDayMs(normalizedTo)
+    const matchesQuery = !query || (
+      item.activity.toLowerCase().includes(query)
+      || item.details.toLowerCase().includes(query)
+      || item.actorName.toLowerCase().includes(query)
+      || item.actorRole.toLowerCase().includes(query)
+      || item.date.toLowerCase().includes(query)
+    )
+    const matchesType = !activityType || item.type === activityType
+    const stamp = Number.isFinite(item.timestampMs) ? item.timestampMs : Date.parse(item.date || '')
+    const matchesFrom = !normalizedFrom || (Number.isFinite(stamp) && stamp >= fromMs)
+    const matchesTo = !normalizedTo || (Number.isFinite(stamp) && stamp <= toMs)
+    return matchesQuery && matchesType && matchesFrom && matchesTo
+  })
+
+  const renderTypeIcon = (type) => {
+    if (type === 'approved') return <CheckCircle className="w-4 h-4 text-success" />
+    if (type === 'rejected') return <XCircle className="w-4 h-4 text-error" />
+    if (type === 'info') return <AlertCircle className="w-4 h-4 text-warning" />
+    return <UploadCloud className="w-4 h-4 text-primary" />
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold text-text-primary">Recent Activities</h1>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card p-4 mb-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search activities..."
+              className="w-full h-9 pl-10 pr-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+          <select
+            value={activityType}
+            onChange={(event) => setActivityType(event.target.value)}
+            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="">All Types</option>
+            <option value="upload">Upload</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="info">Info Requested</option>
+          </select>
+          <input
+            type="date"
+            value={dateFrom}
+            max={maxFilterDate}
+            onChange={(event) => setDateFrom(clampFilterDateToToday(event.target.value))}
+            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="From date"
+          />
+          <input
+            type="date"
+            value={dateTo}
+            max={maxFilterDate}
+            onChange={(event) => setDateTo(clampFilterDateToToday(event.target.value))}
+            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="To date"
+          />
+          {(searchTerm || activityType || dateFrom || dateTo) && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchTerm('')
+                setActivityType('')
+                setDateFrom('')
+                setDateTo('')
+              }}
+              className="h-9 px-3 text-sm text-error hover:bg-error-bg rounded-md"
+            >
+              Clear Filters
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead>
+              <tr className="bg-[#F9FAFB]">
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Activity</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Details</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">By</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Role</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredActivities.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-4 py-10 text-center text-sm text-text-muted">No activity found.</td>
+                </tr>
+              ) : (
+                filteredActivities.map((row) => (
+                  <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
+                    <td className="px-4 py-3.5 text-sm text-text-primary">
+                      <div className="inline-flex items-center gap-2">
+                        {renderTypeIcon(row.type)}
+                        <span>{row.activity}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{row.details}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{row.actorName}</td>
+                    <td className="px-4 py-3.5">
+                      <span className="inline-flex h-6 items-center rounded px-2.5 text-xs font-medium bg-background text-text-secondary uppercase">
+                        {row.actorRole}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{row.date}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SupportPage() {
+  const [draftMessage, setDraftMessage] = useState('')
+  const [agentConnected, setAgentConnected] = useState(false)
+  const [isSending, setIsSending] = useState(false)
+  const [messages, setMessages] = useState([
+    {
+      id: 1,
+      sender: 'bot',
+      text: 'Hi. I am Kiamina Chat Bot. Ask about uploads, expenses, sales, or settings. Type \"agent\" for human support.',
+    },
+  ])
+
+  const appendMessage = (sender, text) => {
+    setMessages((prev) => [...prev, { id: Date.now() + Math.random(), sender, text }])
+  }
+
+  const getBotReply = (inputText) => {
+    const text = inputText.toLowerCase()
+    if (text.includes('upload')) return 'Upload guide: 1) Choose category. 2) Create folder name. 3) Upload files/folder. 4) Set Class for every file. 5) Submit.'
+    if (text.includes('expense')) return 'Expenses guide: 1) Open Expenses. 2) Upload into a folder. 3) Set Class, Vendor, Priority, Notes per file. 4) Track status in folder table.'
+    if (text.includes('sales')) return 'Sales guide: 1) Open Sales. 2) Upload into folder. 3) Set Class and metadata per file. 4) Review status updates in the folder table.'
+    if (text.includes('setting') || text.includes('profile')) return 'Settings guide: update profile photo, company logo, business info, tax profile, and verification documents.'
+    if (text.includes('verification')) return 'Verification path: Settings > Identity Verification. Upload required documents and submit for review.'
+    return 'I can help with uploads, dashboard navigation, settings, expenses, and sales. Ask a specific question or type \"agent\".'
+  }
+
+  const quickAsk = (prompt) => setDraftMessage(prompt)
+
+  const connectHumanAgent = () => {
+    if (agentConnected) {
+      appendMessage('agent', 'I am here. Please share your issue and I will assist now.')
+      return
+    }
+    appendMessage('bot', 'Connecting you to a human support agent...')
+    setAgentConnected(true)
+    setTimeout(() => {
+      appendMessage('agent', 'Hi, this is Kiamina Support. I have joined the chat. How can I help you today?')
+    }, 500)
+  }
+
+  const handleSend = () => {
+    const text = draftMessage.trim()
+    if (!text || isSending) return
+
+    appendMessage('user', text)
+    setDraftMessage('')
+
+    const asksForAgent = /(agent|human|person|representative|support team)/i.test(text)
+    if (asksForAgent) {
+      connectHumanAgent()
+      return
+    }
+
+    setIsSending(true)
+    setTimeout(() => {
+      if (agentConnected) appendMessage('agent', 'Thanks. I am reviewing this now and will help you resolve it.')
+      else appendMessage('bot', getBotReply(text))
+      setIsSending(false)
+    }, 350)
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold text-text-primary">Support</h1>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <h3 className="text-base font-semibold text-text-primary">Contact Section</h3>
+          <p className="text-sm text-text-secondary mt-2">Use chat for fast support. For escalations, contact the team directly.</p>
+          <div className="mt-4 space-y-3 text-sm">
+            <div className="rounded-md border border-border-light bg-background p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Email</p>
+              <p className="text-text-primary mt-1">support@kiamina.com</p>
+            </div>
+            <div className="rounded-md border border-border-light bg-background p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Phone</p>
+              <p className="text-text-primary mt-1">+234 700 KIAMINA</p>
+            </div>
+            <div className="rounded-md border border-border-light bg-background p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Hours</p>
+              <p className="text-text-primary mt-1">Mon-Fri, 8:00 AM - 6:00 PM</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-2 bg-white border border-border-light rounded-lg shadow-card overflow-hidden">
+          <div className="px-4 py-3 border-b border-border-light bg-background/60">
+            <h3 className="text-sm font-semibold text-text-primary">Support Chat</h3>
+            <p className="text-xs text-text-muted mt-0.5">
+              {agentConnected ? 'Human agent connected' : 'Bot available. Type \"agent\" for human support.'}
+            </p>
+          </div>
+
+          <div className="h-[420px] overflow-y-auto p-3 space-y-2 bg-white">
+            {messages.map((message) => {
+              const isUser = message.sender === 'user'
+              const roleLabel = message.sender === 'agent' ? 'AGENT' : message.sender === 'bot' ? 'BOT' : 'YOU'
+              return (
+                <div key={message.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-lg px-3 py-2 ${isUser ? 'bg-primary text-white' : 'bg-background border border-border-light text-text-primary'}`}>
+                    <div className={`text-[10px] font-semibold tracking-wide ${isUser ? 'text-white/80' : 'text-text-muted'}`}>{roleLabel}</div>
+                    <p className="text-sm mt-1 leading-snug">{message.text}</p>
+                  </div>
+                </div>
+              )
+            })}
+
+            {isSending && (
+              <div className="flex justify-start">
+                <div className="bg-background border border-border-light rounded-lg px-3 py-2 text-sm text-text-muted">
+                  Typing...
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="px-3 pt-3 pb-2 border-t border-border-light">
+            {!agentConnected && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                <button type="button" onClick={() => quickAsk('How do I upload documents?')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Upload help</button>
+                <button type="button" onClick={() => quickAsk('Show me expenses guidance')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Expenses help</button>
+                <button type="button" onClick={() => quickAsk('Connect me to an agent')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Talk to agent</button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={draftMessage}
+                onChange={(e) => setDraftMessage(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleSend() }}
+                placeholder={agentConnected ? 'Message the human support agent...' : 'Ask the support bot or type \"agent\"...'}
+                className="flex-1 h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              />
+              <button
+                type="button"
+                onClick={handleSend}
+                disabled={!draftMessage.trim() || isSending}
+                className="h-10 px-3 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1"
+              >
+                Send <ArrowUpRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ClientSupportWidget() {
   const [isOpen, setIsOpen] = useState(false)
   const [draftMessage, setDraftMessage] = useState('')
@@ -1513,11 +2488,11 @@ function ClientSupportWidget() {
 
   const getBotReply = (inputText) => {
     const text = inputText.toLowerCase()
-    if (text.includes('upload')) return 'Go to Add Document, choose category, then upload files or folders. I can guide you step by step.'
-    if (text.includes('expense')) return 'For expenses, open Expenses, click Add Document, and include vendor, class, payment method, and date.'
-    if (text.includes('sales')) return 'For sales, upload invoice files and fill customer, invoice number, and payment status.'
-    if (text.includes('setting') || text.includes('profile')) return 'Go to Settings to manage your profile, business details, and tax setup.'
-    if (text.includes('verification')) return 'Identity verification is in Settings > Identity Verification. Upload the required documents and submit.'
+    if (text.includes('upload')) return 'Upload guide: 1) Choose category. 2) Enter folder name. 3) Upload files or a folder. 4) Set Class for every file. 5) Submit.'
+    if (text.includes('expense')) return 'Expenses guide: open Expenses, upload into folder, set Class and Vendor per file, then monitor status in the folder table.'
+    if (text.includes('sales')) return 'Sales guide: open Sales, upload into folder, set Class and metadata per file, then track review status.'
+    if (text.includes('setting') || text.includes('profile')) return 'Settings guide: update profile photo, company logo, business profile, and tax details.'
+    if (text.includes('verification')) return 'Verification guide: Settings > Identity Verification, upload required documents, then submit for approval.'
     return 'I can help with uploads, dashboard navigation, settings, expenses, and sales. Ask me a specific question or type "agent".'
   }
 
@@ -1652,40 +2627,286 @@ function ClientSupportWidget() {
 }
 
 // Reusable file viewer modal used by pages
-function FileViewerModal({ file, onClose, onSave, onDelete }) {
+function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly = false }) {
   const [editData, setEditData] = useState(file)
   const [textPreview, setTextPreview] = useState(null)
+  const [tablePreview, setTablePreview] = useState(null)
+  const [pdfPreviewImageUrl, setPdfPreviewImageUrl] = useState('')
+  const [previewMessage, setPreviewMessage] = useState('')
+  const [externalPreviewUrl, setExternalPreviewUrl] = useState('')
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false)
   const [selectedVersion, setSelectedVersion] = useState(null)
+  const [isEditing, setIsEditing] = useState(false)
+  const [showLockedEditNotice, setShowLockedEditNotice] = useState(false)
+  const resubmitInputRef = useRef(null)
+  const resolvePreviewUrl = (target = {}) => {
+    if (target?.rawFile instanceof File) return getRuntimeObjectUrl(target.rawFile)
+
+    const directUrl = normalizeRuntimePreviewUrl(
+      target?.previewUrl || target?.url || target?.fileUrl || target?.documentUrl || '',
+      { allowBlob: false },
+    )
+    if (directUrl) return directUrl
+
+    const versionRows = Array.isArray(file?.versions) ? file.versions : []
+    for (let index = versionRows.length - 1; index >= 0; index -= 1) {
+      const version = versionRows[index] || {}
+      const snapshot = version.fileSnapshot || {}
+      const versionUrl = normalizeRuntimePreviewUrl((
+        snapshot.previewUrl
+        || version.previewUrl
+        || snapshot.url
+        || snapshot.fileUrl
+        || snapshot.documentUrl
+        || ''
+      ), { allowBlob: false })
+      if (versionUrl) return versionUrl
+    }
+
+    return normalizeRuntimePreviewUrl(
+      file?.previewUrl || file?.url || file?.fileUrl || file?.documentUrl || '',
+      { allowBlob: false },
+    )
+  }
 
   useEffect(() => {
     setEditData(file)
     setTextPreview(null)
+    setTablePreview(null)
+    setPdfPreviewImageUrl('')
+    setPreviewMessage('')
+    setExternalPreviewUrl('')
+    setIsPreviewLoading(false)
     setSelectedVersion(null)
-  }, [file])
+    setIsEditing(false)
+    setShowLockedEditNotice(false)
+  }, [file, readOnly])
 
   useEffect(() => {
-    // load text preview for TXT/CSV types
     const active = selectedVersion || editData || file
-    const ext = (active?.extension || file?.extension || (active?.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
-    if (!['TXT', 'CSV'].includes(ext)) {
+    const ext = resolvePreviewExtension(active, file)
+    const needsRichPreview = (
+      TEXT_PREVIEW_EXTENSIONS.has(ext)
+      || SPREADSHEET_PREVIEW_EXTENSIONS.has(ext)
+      || WORD_PREVIEW_EXTENSIONS.has(ext)
+      || PRESENTATION_PREVIEW_EXTENSIONS.has(ext)
+      || PDF_PREVIEW_EXTENSIONS.has(ext)
+    )
+    if (!needsRichPreview) {
       setTextPreview(null)
-      return
-    }
-    const url = active?.previewUrl || file?.previewUrl || (active?.rawFile ? URL.createObjectURL(active.rawFile) : null)
-    if (!url) {
-      setTextPreview('Preview not available for this file type.')
+      setTablePreview(null)
+      setPdfPreviewImageUrl('')
+      setPreviewMessage('')
+      setExternalPreviewUrl('')
+      setIsPreviewLoading(false)
       return
     }
 
+    const url = resolvePreviewUrl(active)
+    const sourceFile = active?.rawFile instanceof File ? active.rawFile : null
+
     let cancelled = false
-    fetch(url)
-      .then((response) => response.text())
-      .then((value) => {
-        if (!cancelled) setTextPreview(value)
+    const setIfActive = (callback) => {
+      if (cancelled) return
+      callback()
+    }
+
+    const readPreviewText = async () => {
+      if (sourceFile) return readBlobAsText(sourceFile)
+      if (!url) return ''
+      const response = await fetch(url)
+      if (!response.ok) throw new Error('Unable to fetch file text preview')
+      return response.text()
+    }
+
+    const readPreviewArrayBuffer = async () => {
+      if (sourceFile) return readBlobAsArrayBuffer(sourceFile)
+      if (!url) return new ArrayBuffer(0)
+      const response = await fetch(url)
+      if (!response.ok) throw new Error('Unable to fetch file binary preview')
+      return response.arrayBuffer()
+    }
+
+    const loadPreview = async () => {
+      setIfActive(() => {
+        setIsPreviewLoading(true)
+        setTextPreview(null)
+        setTablePreview(null)
+        setPdfPreviewImageUrl('')
+        setPreviewMessage('')
+        setExternalPreviewUrl('')
       })
-      .catch(() => {
-        if (!cancelled) setTextPreview('Unable to load preview.')
-      })
+
+      try {
+        if (!sourceFile && !url) {
+          setIfActive(() => setPreviewMessage('Preview is unavailable for this file. The saved preview link may have expired.'))
+          return
+        }
+
+        if (TEXT_PREVIEW_EXTENSIONS.has(ext)) {
+          const value = await readPreviewText()
+          setIfActive(() => setTextPreview((value || '').trim() || 'File is empty.'))
+          return
+        }
+
+        if (SPREADSHEET_PREVIEW_EXTENSIONS.has(ext)) {
+          const buffer = await readPreviewArrayBuffer()
+          const workbook = XLSX.read(buffer, { type: 'array' })
+          const firstSheetName = workbook?.SheetNames?.[0]
+          const firstSheet = firstSheetName ? workbook.Sheets[firstSheetName] : null
+          if (!firstSheet) {
+            setIfActive(() => setPreviewMessage('No preview data found in this spreadsheet.'))
+            return
+          }
+
+          const rawRows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: false, blankrows: false })
+          const rows = Array.isArray(rawRows) ? rawRows.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '')) : [])) : []
+          if (rows.length === 0) {
+            setIfActive(() => setPreviewMessage('Spreadsheet is empty.'))
+            return
+          }
+
+          const maxColumns = Math.max(1, ...rows.map((row) => row.length))
+          const visibleRowCount = 60
+          const visibleColumnCount = Math.min(16, maxColumns)
+          const visibleRows = rows
+            .slice(0, visibleRowCount)
+            .map((row) => Array.from({ length: visibleColumnCount }, (_, columnIndex) => row[columnIndex] || ''))
+
+          setIfActive(() => setTablePreview({
+            sheetName: firstSheetName || 'Sheet1',
+            rows: visibleRows,
+            totalRows: rows.length,
+            totalColumns: maxColumns,
+            truncatedRows: rows.length > visibleRowCount,
+            truncatedColumns: maxColumns > visibleColumnCount,
+          }))
+          return
+        }
+
+        if (ext === 'DOCX') {
+          const buffer = await readPreviewArrayBuffer()
+          const zip = await JSZip.loadAsync(buffer)
+          const documentEntry = zip.file('word/document.xml')
+          if (!documentEntry) {
+            setIfActive(() => setPreviewMessage('This Word document does not contain readable preview content.'))
+            return
+          }
+          const xml = await documentEntry.async('string')
+          const value = extractReadableXmlText(xml)
+          setIfActive(() => setTextPreview(value || 'No readable text found in this Word document.'))
+          return
+        }
+
+        if (ext === 'PPTX') {
+          const buffer = await readPreviewArrayBuffer()
+          const zip = await JSZip.loadAsync(buffer)
+          const slideNames = Object.keys(zip.files)
+            .filter((name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name))
+            .sort((left, right) => {
+              const leftIndex = Number((left.match(/slide(\d+)\.xml/i) || [])[1] || 0)
+              const rightIndex = Number((right.match(/slide(\d+)\.xml/i) || [])[1] || 0)
+              return leftIndex - rightIndex
+            })
+          if (slideNames.length === 0) {
+            setIfActive(() => setPreviewMessage('No readable slide content found in this presentation.'))
+            return
+          }
+
+          const slideText = []
+          for (let index = 0; index < slideNames.length; index += 1) {
+            const entryName = slideNames[index]
+            const entry = zip.file(entryName)
+            if (!entry) continue
+            const xml = await entry.async('string')
+            const extracted = extractReadableXmlText(xml)
+            if (!extracted) continue
+            slideText.push(`Slide ${index + 1}\n${extracted}`)
+          }
+
+          setIfActive(() => setTextPreview(slideText.join('\n\n') || 'No readable text found in this PowerPoint file.'))
+          return
+        }
+
+        if (ext === 'DOC' || ext === 'PPT') {
+          if (!sourceFile && isHttpUrl(url)) {
+            const embedUrl = toOfficeEmbedUrl(url)
+            if (embedUrl) {
+              setIfActive(() => {
+                setExternalPreviewUrl(embedUrl)
+                setPreviewMessage('')
+              })
+              return
+            }
+          }
+          setIfActive(() => setPreviewMessage(`Preview for legacy .${ext.toLowerCase()} files is limited. Please download to view fully.`))
+          return
+        }
+
+        if (PDF_PREVIEW_EXTENSIONS.has(ext)) {
+          const buffer = await readPreviewArrayBuffer()
+          if (!buffer || buffer.byteLength === 0) {
+            setIfActive(() => setPreviewMessage('PDF is empty or unavailable for preview.'))
+            return
+          }
+
+          const loadingTask = getDocument({ data: buffer })
+          const pdf = await loadingTask.promise
+          const page = await pdf.getPage(1)
+          const viewport = page.getViewport({ scale: 1.2 })
+          const canvas = document.createElement('canvas')
+          const context = canvas.getContext('2d')
+          if (!context) {
+            setIfActive(() => setPreviewMessage('Unable to render PDF preview.'))
+            return
+          }
+          canvas.width = Math.max(1, Math.floor(viewport.width))
+          canvas.height = Math.max(1, Math.floor(viewport.height))
+          await page.render({ canvasContext: context, viewport }).promise
+          const imageUrl = canvas.toDataURL('image/png')
+          const pages = Number(pdf.numPages || 0)
+          setIfActive(() => {
+            setPdfPreviewImageUrl(imageUrl)
+            if (pages > 1) {
+              setPreviewMessage(`Showing page 1 of ${pages}.`)
+            }
+          })
+          try {
+            await pdf.destroy()
+          } catch {
+            // ignore worker cleanup errors
+          }
+          return
+        }
+
+        setIfActive(() => setPreviewMessage('Preview not available for this file type.'))
+      } catch {
+        if (!sourceFile && isHttpUrl(url)) {
+          if (OFFICE_EMBED_PREVIEW_EXTENSIONS.has(ext)) {
+            const embedUrl = toOfficeEmbedUrl(url)
+            if (embedUrl) {
+              setIfActive(() => {
+                setExternalPreviewUrl(embedUrl)
+                setPreviewMessage('')
+              })
+              return
+            }
+          }
+          if (ext === 'CSV' || ext === 'TXT') {
+            setIfActive(() => {
+              setExternalPreviewUrl(url)
+              setPreviewMessage('')
+            })
+            return
+          }
+        }
+        setIfActive(() => setPreviewMessage('Unable to load preview for this file.'))
+      } finally {
+        setIfActive(() => setIsPreviewLoading(false))
+      }
+    }
+
+    loadPreview()
 
     return () => {
       cancelled = true
@@ -1694,25 +2915,184 @@ function FileViewerModal({ file, onClose, onSave, onDelete }) {
 
   const renderFilePreview = () => {
     const active = selectedVersion || editData || file
-    const ext = (active?.extension || file?.extension || (active?.rawFile?.name?.split('.')?.pop() || '')).toUpperCase()
-    const url = active?.previewUrl || file?.previewUrl || (active?.rawFile ? URL.createObjectURL(active.rawFile) : null)
+    const ext = resolvePreviewExtension(active, file)
+    const url = resolvePreviewUrl(active)
 
-    if (url && ext === 'PDF') {
-      return <iframe title="pdf-preview" src={url} className="w-full h-64" />
-    }
-    if (url && ['PNG', 'JPG', 'JPEG', 'GIF', 'WEBP', 'BMP'].includes(ext)) {
-      return <img src={url} alt={active?.filename || file?.filename || 'Preview'} className="w-full object-contain max-h-64" />
-    }
-    if (url && ['TXT', 'CSV'].includes(ext)) {
+    if (SPREADSHEET_PREVIEW_EXTENSIONS.has(ext)) {
+      if (isPreviewLoading && !tablePreview) {
+        return <div className="p-4 text-sm text-text-muted">Loading preview...</div>
+      }
+      if (externalPreviewUrl) {
+        return <iframe title="spreadsheet-preview" src={externalPreviewUrl} className="w-full h-64" />
+      }
+      if (tablePreview?.rows?.length > 0) {
+        return (
+          <div className="max-h-64 overflow-auto">
+            <div className="px-3 py-2 border-b border-border-light bg-[#F9FAFB] text-xs text-text-secondary">
+              Sheet: {tablePreview.sheetName}
+            </div>
+            <table className="w-full text-xs">
+              <tbody>
+                {tablePreview.rows.map((row, rowIndex) => (
+                  <tr key={`preview-row-${rowIndex}`} className="border-b border-border-light">
+                    {row.map((cell, columnIndex) => (
+                      <td
+                        key={`preview-cell-${rowIndex}-${columnIndex}`}
+                        className={`px-2 py-1.5 align-top ${rowIndex === 0 ? 'font-semibold bg-[#F9FAFB]' : 'text-text-primary'}`}
+                      >
+                        {cell || '-'}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {(tablePreview.truncatedRows || tablePreview.truncatedColumns) && (
+              <div className="px-3 py-2 text-xs text-text-muted border-t border-border-light bg-[#F9FAFB]">
+                Showing {Math.min(60, tablePreview.totalRows)} of {tablePreview.totalRows} rows
+                {tablePreview.truncatedColumns ? ` and first ${Math.min(16, tablePreview.totalColumns)} columns` : ''}.
+              </div>
+            )}
+          </div>
+        )
+      }
       return (
-        <div className="p-3 text-sm font-mono whitespace-pre-wrap max-h-64 overflow-auto">
-          {textPreview ?? 'Loading preview...'}
+        <div className="p-4 text-sm text-text-muted">
+          {previewMessage || 'Preview not available for this spreadsheet.'}
         </div>
       )
+    }
+
+    if (TEXT_PREVIEW_EXTENSIONS.has(ext) || WORD_PREVIEW_EXTENSIONS.has(ext) || PRESENTATION_PREVIEW_EXTENSIONS.has(ext)) {
+      if (isPreviewLoading && !textPreview) {
+        return <div className="p-4 text-sm text-text-muted">Loading preview...</div>
+      }
+      if (externalPreviewUrl) {
+        return <iframe title="document-preview" src={externalPreviewUrl} className="w-full h-64" />
+      }
+      if (textPreview) {
+        return (
+          <div className="p-3 text-sm font-mono whitespace-pre-wrap max-h-64 overflow-auto">
+            {textPreview}
+          </div>
+        )
+      }
+      return (
+        <div className="p-4 text-sm text-text-muted">
+          {previewMessage || 'Preview not available for this file type. You can download to view.'}
+        </div>
+      )
+    }
+
+    if (PDF_PREVIEW_EXTENSIONS.has(ext)) {
+      if (isPreviewLoading) {
+        return <div className="p-4 text-sm text-text-muted">Loading preview...</div>
+      }
+      if (pdfPreviewImageUrl) {
+        return (
+          <div>
+            <img src={pdfPreviewImageUrl} alt={active?.filename || file?.filename || 'PDF preview'} className="w-full object-contain max-h-64 bg-white" />
+            {previewMessage && (
+              <div className="px-3 py-2 text-xs text-text-muted border-t border-border-light bg-[#F9FAFB]">
+                {previewMessage}
+              </div>
+            )}
+          </div>
+        )
+      }
+      if (previewMessage) {
+        return <div className="p-4 text-sm text-text-muted">{previewMessage}</div>
+      }
+    }
+
+    if (url && PDF_PREVIEW_EXTENSIONS.has(ext)) {
+      return <iframe title="pdf-preview" src={url} className="w-full h-64" />
+    }
+    if (url && IMAGE_PREVIEW_EXTENSIONS.has(ext)) {
+      return <img src={url} alt={active?.filename || file?.filename || 'Preview'} className="w-full object-contain max-h-64" />
+    }
+    if (url && isHttpUrl(url) && !OFFICE_EMBED_PREVIEW_EXTENSIONS.has(ext)) {
+      return <iframe title="file-preview" src={url} className="w-full h-64" />
     }
     return (
       <div className="p-4 text-sm text-text-muted">Preview not available for this file type. You can download to view.</div>
     )
+  }
+
+  const displayStatus = editData.status || file.status || 'Pending Review'
+  const isDeletedFile = Boolean(editData.isDeleted || file.isDeleted || displayStatus === 'Deleted')
+  const isApprovedLocked = !isDeletedFile
+    && (Boolean(editData.isLocked || file.isLocked) || String(displayStatus).toLowerCase() === 'approved')
+  const effectiveReadOnly = readOnly || isDeletedFile || isApprovedLocked
+  const canResubmit = !effectiveReadOnly && ['Rejected', 'Info Requested', 'Needs Clarification'].includes(displayStatus)
+  const adminComment = (editData.adminComment || file.adminComment || '').trim()
+  const requiredAction = (editData.requiredAction || file.requiredAction || '').trim()
+  const adminNotes = (editData.adminNotes || file.adminNotes || '').trim()
+  const infoRequestDetails = (editData.infoRequestDetails || file.infoRequestDetails || '').trim()
+  const hasAdminFeedback = Boolean(adminComment || requiredAction || adminNotes || infoRequestDetails)
+  const paymentMethodOptions = ['Cash', 'Bank Transfer', 'Card', 'Cheque', 'Mobile Money', 'POS', 'Other']
+  const versions = Array.isArray(file.versions) ? file.versions : []
+  const currentDownloadUrl = resolvePreviewUrl(editData || file)
+  const uploadInfo = file.uploadInfo || {}
+  const sourceLabelMap = {
+    'drag-drop': 'Drag & Drop',
+    'browse-file': 'Browse Files',
+    'browse-folder': 'Browse Folder',
+    resubmission: 'Resubmission',
+  }
+  const formatTimestamp = (value) => {
+    const parsed = Date.parse(value || '')
+    if (Number.isNaN(parsed)) return '--'
+    return new Date(parsed).toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+  }
+  const formatDate = (value) => {
+    const parsed = Date.parse(value || '')
+    if (Number.isNaN(parsed)) return '--'
+    return new Date(parsed).toLocaleDateString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+    })
+  }
+  const formatTime = (value) => {
+    const parsed = Date.parse(value || '')
+    if (Number.isNaN(parsed)) return '--'
+    return new Date(parsed).toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+  }
+  const formatStampMeta = (value) => {
+    const parsed = Date.parse(value || '')
+    if (Number.isNaN(parsed)) return { date: '--', time: '--' }
+    const source = new Date(parsed)
+    return {
+      date: source.toLocaleDateString('en-GB'),
+      time: source.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
+    }
+  }
+  const approvedStampMeta = formatStampMeta(editData.approvedAtIso || file.approvedAtIso || '')
+  const rejectedStampMeta = formatStampMeta(editData.rejectedAtIso || file.rejectedAtIso || '')
+  const stampMode = displayStatus === 'Approved'
+    ? 'approved'
+    : displayStatus === 'Rejected'
+      ? 'rejected'
+      : ''
+
+  const handleResubmitSelection = (event) => {
+    const selectedFile = event.target.files?.[0]
+    event.target.value = ''
+    if (!selectedFile) return
+    if (!onResubmit) return
+    onResubmit(editData || file, selectedFile)
   }
 
   return (
@@ -1728,8 +3108,32 @@ function FileViewerModal({ file, onClose, onSave, onDelete }) {
         <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-5 max-h-[calc(90vh-72px)] overflow-y-auto">
           <div>
             <label className="block text-xs text-text-muted mb-2">Preview</label>
-            <div className="border border-border rounded-md overflow-hidden bg-background">
+            <div className="relative border border-border rounded-md overflow-hidden bg-background">
               {renderFilePreview()}
+              {stampMode && (
+                <div className="absolute inset-0 pointer-events-none select-none flex items-center justify-center">
+                  <div
+                    className={`w-[88%] border-4 rounded-xl px-8 py-5 text-center rotate-[-24deg] ${
+                      stampMode === 'approved'
+                        ? 'border-green-600/35 text-green-700/35'
+                        : 'border-red-700/35 text-red-700/35'
+                    }`}
+                  >
+                    <div className="text-5xl font-semibold tracking-[0.2em]">
+                      {stampMode === 'approved' ? 'APPROVED' : 'REJECTED'}
+                    </div>
+                    {stampMode === 'approved' ? (
+                      <div className="mt-2 text-xs tracking-wide font-medium">
+                        Approved by: {editData.approvedBy || file.approvedBy || 'Admin'} | Date: {approvedStampMeta.date} | Time: {approvedStampMeta.time}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-xs tracking-wide font-medium">
+                        Rejected by: {editData.rejectedBy || file.rejectedBy || 'Admin'} | Date: {rejectedStampMeta.date} | Reason: {(editData.rejectionReason || file.rejectionReason || adminComment || requiredAction || 'Not provided').slice(0, 80)}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1739,138 +3143,361 @@ function FileViewerModal({ file, onClose, onSave, onDelete }) {
           </div>
 
           <div>
-            <label className="block text-xs text-text-muted">Uploaded By</label>
-            <input value={editData.user} onChange={(e) => setEditData(prev => ({ ...prev, user: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-          </div>
-
-          <div>
             <label className="block text-xs text-text-muted">Date & Time</label>
             <div className="py-2">{file.date}</div>
           </div>
-
-          {/* Show category-specific metadata if present */}
-          {('vendorName' in editData || 'vendorName' in file) && (
+          <fieldset disabled={!isEditing || effectiveReadOnly} className="contents">
+            <div>
+              <label className="block text-xs text-text-muted">Uploaded By</label>
+              <input value={editData.user} onChange={(e) => setEditData(prev => ({ ...prev, user: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+            </div>
+            <div>
+              <label className="block text-xs text-text-muted">Class</label>
+              <input
+                value={editData.class || editData.expenseClass || editData.salesClass || ''}
+                onChange={(e) => {
+                  const nextClass = e.target.value
+                  setEditData(prev => ({
+                    ...prev,
+                    class: nextClass,
+                    expenseClass: nextClass,
+                    salesClass: nextClass,
+                  }))
+                }}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
+              />
+            </div>
             <div>
               <label className="block text-xs text-text-muted">Vendor</label>
-              <input value={editData.vendorName || ''} onChange={(e) => setEditData(prev => ({ ...prev, vendorName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
+              <input value={editData.vendorName || ''} onChange={(e) => setEditData(prev => ({ ...prev, vendorName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
             </div>
-          )}
-          {('expenseClass' in editData || 'expenseClass' in file) && (
             <div>
-              <label className="block text-xs text-text-muted">Class</label>
-              <input value={editData.expenseClass || ''} onChange={(e) => setEditData(prev => ({ ...prev, expenseClass: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
+              <label className="block text-xs text-text-muted">Confidentiality</label>
+              <select
+                value={editData.confidentialityLevel || 'Standard'}
+                onChange={(e) => setEditData(prev => ({ ...prev, confidentialityLevel: e.target.value }))}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
+              >
+                <option value="Standard">Standard</option>
+                <option value="Confidential">Confidential</option>
+                <option value="Highly Confidential">Highly Confidential</option>
+              </select>
             </div>
-          )}
-          {('expenseDate' in editData || 'expenseDate' in file) && (
             <div>
-              <label className="block text-xs text-text-muted">Expense Date</label>
-              <input type="date" value={editData.expenseDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, expenseDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
+              <label className="block text-xs text-text-muted">Priority</label>
+              <select
+                value={editData.processingPriority || 'Normal'}
+                onChange={(e) => setEditData(prev => ({ ...prev, processingPriority: e.target.value }))}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
+              >
+                <option value="Normal">Normal</option>
+                <option value="High">High</option>
+                <option value="Urgent">Urgent</option>
+              </select>
             </div>
+            <div className="md:col-span-2">
+              <label className="block text-xs text-text-muted">Notes</label>
+              <textarea
+                value={editData.internalNotes || ''}
+                onChange={(e) => setEditData(prev => ({ ...prev, internalNotes: e.target.value }))}
+                className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary"
+                rows={3}
+              />
+            </div>
+            {('expenseDate' in editData || 'expenseDate' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Expense Date</label>
+                <input type="date" value={editData.expenseDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, expenseDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('paymentMethod' in editData || 'paymentMethod' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Payment Method</label>
+                <select
+                  value={editData.paymentMethod || ''}
+                  onChange={(e) => setEditData(prev => ({ ...prev, paymentMethod: e.target.value }))}
+                  className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
+                >
+                  <option value="">Select payment method</option>
+                  {(editData.paymentMethod || '')
+                    && !paymentMethodOptions.some((option) => option.toLowerCase() === (editData.paymentMethod || '').toLowerCase())
+                    && <option value={editData.paymentMethod}>{editData.paymentMethod}</option>}
+                  {paymentMethodOptions.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {('customerName' in editData || 'customerName' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Customer</label>
+                <input value={editData.customerName || ''} onChange={(e) => setEditData(prev => ({ ...prev, customerName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('invoiceNumber' in editData || 'invoiceNumber' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Invoice #</label>
+                <input value={editData.invoiceNumber || ''} onChange={(e) => setEditData(prev => ({ ...prev, invoiceNumber: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('bankName' in editData || 'bankName' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Bank Name</label>
+                <input value={editData.bankName || ''} onChange={(e) => setEditData(prev => ({ ...prev, bankName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('accountName' in editData || 'accountName' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Account Name</label>
+                <input value={editData.accountName || ''} onChange={(e) => setEditData(prev => ({ ...prev, accountName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('accountLast4' in editData || 'accountLast4' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Account Last 4</label>
+                <input value={editData.accountLast4 || ''} maxLength={4} onChange={(e) => setEditData(prev => ({ ...prev, accountLast4: e.target.value.replace(/\D/g, '').slice(0, 4) }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('statementStartDate' in editData || 'statementStartDate' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Statement Start Date</label>
+                <input type="date" value={editData.statementStartDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementStartDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('statementEndDate' in editData || 'statementEndDate' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Statement End Date</label>
+                <input type="date" value={editData.statementEndDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementEndDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
+            {('description' in editData || 'description' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Description</label>
+                <textarea value={editData.description || ''} onChange={(e) => setEditData(prev => ({ ...prev, description: e.target.value }))} className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary" rows={3} />
+              </div>
+            )}
+          </fieldset>
+
+          <div>
+            <label className="block text-xs text-text-muted">Status</label>
+            <div className="py-2 inline-flex items-center gap-2">
+              {isDeletedFile ? (
+                <span className="inline-flex items-center h-6 px-2.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
+                  Deleted
+                </span>
+              ) : (
+                <StatusBadge status={displayStatus} />
+              )}
+              <span className="text-xs text-text-muted">
+                {isDeletedFile ? 'Soft deleted file' : 'Managed by admin'}
+              </span>
+            </div>
+          </div>
+          {displayStatus === 'Approved' && (
+            <>
+              <div>
+                <label className="block text-xs text-text-muted">Approved By</label>
+                <div className="py-2 text-sm text-text-primary">{editData.approvedBy || file.approvedBy || '--'}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted">Approved On</label>
+                <div className="py-2 text-sm text-text-primary">{formatTimestamp(editData.approvedAtIso || file.approvedAtIso || '')}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted">Locked</label>
+                <div className="py-2 text-sm text-text-primary">Yes</div>
+              </div>
+            </>
           )}
-          {('paymentMethod' in editData || 'paymentMethod' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Payment Method</label>
-              <input value={editData.paymentMethod || ''} onChange={(e) => setEditData(prev => ({ ...prev, paymentMethod: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('customerName' in editData || 'customerName' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Customer</label>
-              <input value={editData.customerName || ''} onChange={(e) => setEditData(prev => ({ ...prev, customerName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('invoiceNumber' in editData || 'invoiceNumber' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Invoice #</label>
-              <input value={editData.invoiceNumber || ''} onChange={(e) => setEditData(prev => ({ ...prev, invoiceNumber: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('salesClass' in editData || 'salesClass' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Class</label>
-              <input value={editData.salesClass || ''} onChange={(e) => setEditData(prev => ({ ...prev, salesClass: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('bankName' in editData || 'bankName' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Bank Name</label>
-              <input value={editData.bankName || ''} onChange={(e) => setEditData(prev => ({ ...prev, bankName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('accountName' in editData || 'accountName' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Account Name</label>
-              <input value={editData.accountName || ''} onChange={(e) => setEditData(prev => ({ ...prev, accountName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('accountLast4' in editData || 'accountLast4' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Account Last 4</label>
-              <input value={editData.accountLast4 || ''} maxLength={4} onChange={(e) => setEditData(prev => ({ ...prev, accountLast4: e.target.value.replace(/\D/g, '').slice(0, 4) }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('statementStartDate' in editData || 'statementStartDate' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Statement Start Date</label>
-              <input type="date" value={editData.statementStartDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementStartDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('statementEndDate' in editData || 'statementEndDate' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Statement End Date</label>
-              <input type="date" value={editData.statementEndDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementEndDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm" />
-            </div>
-          )}
-          {('description' in editData || 'description' in file) && (
-            <div>
-              <label className="block text-xs text-text-muted">Description</label>
-              <textarea value={editData.description || ''} onChange={(e) => setEditData(prev => ({ ...prev, description: e.target.value }))} className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none" rows={3} />
-            </div>
+          {displayStatus === 'Rejected' && (
+            <>
+              <div>
+                <label className="block text-xs text-text-muted">Rejected By</label>
+                <div className="py-2 text-sm text-text-primary">{editData.rejectedBy || file.rejectedBy || '--'}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted">Rejected On</label>
+                <div className="py-2 text-sm text-text-primary">{formatTimestamp(editData.rejectedAtIso || file.rejectedAtIso || '')}</div>
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-xs text-text-muted">Reason</label>
+                <div className="py-2 text-sm text-text-primary">{editData.rejectionReason || file.rejectionReason || adminComment || requiredAction || 'No reason provided.'}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-text-muted">Can Be Edited</label>
+                <div className="py-2 text-sm text-text-primary">Yes</div>
+              </div>
+            </>
           )}
 
-          {file.status === 'Rejected' && (
-            <div className="p-3 bg-error-bg rounded-md">
+          <div className="md:col-span-2 border border-border rounded-md p-3 bg-background">
+            <p className="text-xs uppercase tracking-wide text-text-muted mb-2">Upload Information</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <div>
+                <p className="text-xs text-text-muted">Original Upload Date</p>
+                <p className="text-text-primary mt-0.5">{formatDate(uploadInfo.originalUploadedAtIso || file.createdAtIso || file.date)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">Original Upload Time</p>
+                <p className="text-text-primary mt-0.5">{formatTime(uploadInfo.originalUploadedAtIso || file.createdAtIso || file.date)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">Uploaded By</p>
+                <p className="text-text-primary mt-0.5">{uploadInfo.originalUploadedBy || file.user || '--'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">Upload Source</p>
+                <p className="text-text-primary mt-0.5">{sourceLabelMap[uploadInfo.originalUploadSource] || uploadInfo.originalUploadSource || '--'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">Last Modified</p>
+                <p className="text-text-primary mt-0.5">{formatTimestamp(uploadInfo.lastModifiedAtIso || file.updatedAtIso || file.date)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-text-muted">Total Versions</p>
+                <p className="text-text-primary mt-0.5">{versions.length}</p>
+              </div>
+            </div>
+          </div>
+
+          {(canResubmit || hasAdminFeedback) && (
+            <div className={`md:col-span-2 p-3 rounded-md ${canResubmit ? 'bg-error-bg' : 'bg-background border border-border-light'}`}>
               <label className="block text-xs text-text-muted">Admin Comment</label>
-              <div className="py-2 text-sm text-error">{file.adminComment || 'No comment provided by admin.'}</div>
+              <div className={`py-2 text-sm ${canResubmit ? 'text-error' : 'text-text-primary'}`}>{adminComment || 'No comment provided.'}</div>
               <label className="block text-xs text-text-muted">Required Action</label>
-              <div className="py-2 text-sm text-error">{file.requiredAction || 'Please resubmit with requested documents.'}</div>
+              <div className={`py-2 text-sm ${canResubmit ? 'text-error' : 'text-text-primary'}`}>{requiredAction || 'No required action provided.'}</div>
+              {infoRequestDetails && (
+                <>
+                  <label className="block text-xs text-text-muted">Info Request Details</label>
+                  <div className={`py-2 text-sm ${canResubmit ? 'text-error' : 'text-text-primary'}`}>{infoRequestDetails}</div>
+                </>
+              )}
+              {adminNotes && (
+                <>
+                  <label className="block text-xs text-text-muted">Admin Notes</label>
+                  <div className={`py-2 text-sm ${canResubmit ? 'text-error' : 'text-text-primary'}`}>{adminNotes}</div>
+                </>
+              )}
             </div>
           )}
 
-          {Array.isArray(file.versions) && file.versions.length > 0 && (
-            <div>
+          {versions.length > 0 && (
+            <div className="md:col-span-2">
               <label className="block text-xs text-text-muted">Version History</label>
-              <div className="border border-border rounded-md p-2 max-h-40 overflow-y-auto">
-                {file.versions.slice().reverse().map((v, idx) => (
-                  <div key={idx} className="flex items-center justify-between gap-2 py-2 border-b last:border-b-0">
-                    <div className="text-sm">
-                      <div className="font-medium">Version {v.version}</div>
-                      <div className="text-xs text-text-muted">{v.date}</div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button onClick={() => setSelectedVersion(v)} className="text-xs px-2 py-1 border border-border rounded">View</button>
-                      <a href={v.previewUrl} download={v.filename} className="text-xs px-2 py-1 border border-border rounded">Download</a>
-                    </div>
-                  </div>
-                ))}
+              <div className="border border-border rounded-md overflow-hidden max-h-56 overflow-y-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="bg-[#F9FAFB]">
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Version</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Action</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">User</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Time</th>
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Download</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {versions.slice().reverse().map((version, idx) => {
+                      const snapshot = version.fileSnapshot || {}
+                      const previewUrl = snapshot.previewUrl || version.previewUrl
+                      const filename = snapshot.filename || version.filename || file.filename
+                      const versionNumber = version.versionNumber || version.version || idx + 1
+                      return (
+                        <tr key={`version-row-${versionNumber}-${idx}`} className="border-b border-border-light last:border-b-0">
+                          <td className="px-3 py-2 text-sm text-text-primary">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedVersion({
+                                ...file,
+                                ...snapshot,
+                                filename,
+                                previewUrl,
+                                extension: snapshot.extension || file.extension,
+                              })}
+                              className="hover:text-primary hover:underline"
+                            >
+                              v{versionNumber}
+                            </button>
+                          </td>
+                          <td className="px-3 py-2 text-sm text-text-secondary">{version.action || 'Updated'}</td>
+                          <td className="px-3 py-2 text-sm text-text-secondary">{version.performedBy || '--'}</td>
+                          <td className="px-3 py-2 text-sm text-text-secondary">{formatDate(version.timestamp || version.date)}</td>
+                          <td className="px-3 py-2 text-sm text-text-secondary">{formatTime(version.timestamp || version.date)}</td>
+                          <td className="px-3 py-2 text-sm">
+                            {previewUrl && !isDeletedFile ? (
+                              <a href={previewUrl} download={filename} className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background">
+                                Download
+                              </a>
+                            ) : (
+                              <span className="text-xs text-text-muted">Unavailable</span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
 
-          <div>
-            <label className="block text-xs text-text-muted">Status</label>
-            <select value={editData.status} onChange={(e) => setEditData(prev => ({ ...prev, status: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm">
-              <option>Pending</option>
-              <option>Approved</option>
-              <option>Rejected</option>
-            </select>
-          </div>
-
           <div className="pt-4 flex items-center gap-2 justify-end">
-            <a href={editData.previewUrl || file.previewUrl || (file.rawFile ? URL.createObjectURL(file.rawFile) : '')} download={editData.filename} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
-            <button onClick={() => { onDelete(file.id) }} className="h-9 px-4 border border-border rounded-md text-sm text-error hover:bg-error-bg">Delete</button>
-            <button onClick={() => { onSave(editData) }} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Save</button>
+            {currentDownloadUrl ? (
+              <a href={currentDownloadUrl} download={editData.filename} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
+            ) : (
+              <span className="h-9 px-4 inline-flex items-center rounded-md bg-background text-xs text-text-secondary border border-border">
+                Download unavailable
+              </span>
+            )}
+            {!effectiveReadOnly && canResubmit && onResubmit && (
+              <>
+                <input ref={resubmitInputRef} type="file" className="hidden" onChange={handleResubmitSelection} />
+                <button onClick={() => resubmitInputRef.current?.click()} className="h-9 px-4 border border-warning rounded-md text-sm text-warning hover:bg-warning-bg">Resubmit File</button>
+              </>
+            )}
+            {(readOnly || isDeletedFile) ? (
+              <span className="h-9 px-4 inline-flex items-center rounded-md bg-background text-xs text-text-secondary border border-border">
+                Read-only
+              </span>
+            ) : (
+              <>
+                {!isApprovedLocked && (
+                  <button onClick={() => { onDelete?.(editData || file) }} className="h-9 px-4 border border-border rounded-md text-sm text-error hover:bg-error-bg">Delete</button>
+                )}
+                {!isEditing ? (
+                  <button
+                    onClick={() => {
+                      if (isApprovedLocked) {
+                        setShowLockedEditNotice(true)
+                        return
+                      }
+                      setIsEditing(true)
+                    }}
+                    className="h-9 px-4 bg-primary text-white rounded-md text-sm"
+                  >
+                    Edit
+                  </button>
+                ) : (
+                  <>
+                    <button onClick={() => { setEditData(file); setSelectedVersion(null); setIsEditing(false) }} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background">Cancel</button>
+                    <button onClick={() => { onSave?.(editData); setIsEditing(false) }} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Save</button>
+                  </>
+                )}
+              </>
+            )}
           </div>
+          {showLockedEditNotice && (
+            <div className="md:col-span-2 fixed inset-0 z-[60] bg-black/35 flex items-center justify-center p-4" onClick={() => setShowLockedEditNotice(false)}>
+              <div className="w-full max-w-sm bg-white border border-border rounded-xl shadow-card p-5" onClick={(event) => event.stopPropagation()}>
+                <p className="text-sm text-text-primary">This file has been approved and is locked.</p>
+                <div className="mt-4 flex justify-end">
+                  <button type="button" onClick={() => setShowLockedEditNotice(false)} className="h-8 px-3 bg-primary text-white rounded-md text-sm">
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1891,6 +3518,8 @@ export {
   SalesPage,
   BankStatementsPage,
   UploadHistoryPage,
+  RecentActivitiesPage,
+  SupportPage,
   ClientSupportWidget,
   FileViewerModal,
 }

@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { ShieldCheck, Lock, Mail, Loader2, ArrowLeft } from 'lucide-react'
+import { Lock, Mail, Loader2, ArrowLeft } from 'lucide-react'
 import AdminOtpModal from './AdminOtpModal'
+import KiaminaLogo from '../../common/KiaminaLogo'
 
 function AdminLoginPortal({
   onLogin,
@@ -37,9 +38,7 @@ function AdminLoginPortal({
     >
       <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-8">
         <div className="flex items-center justify-center mb-6">
-          <div className="w-11 h-11 bg-primary rounded-md flex items-center justify-center">
-            <ShieldCheck className="w-6 h-6 text-white" />
-          </div>
+          <KiaminaLogo className="h-12 w-auto" />
         </div>
 
         <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Portal</h1>

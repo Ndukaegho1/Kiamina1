@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 340" fill="none">
+  <g fill="#0C3AA8">
+    <path d="M300 142c-28-40-84-73-150-92v33c60 16 111 44 150 82 39-38 90-66 150-82V50c-66 19-122 52-150 92z"/>
+    <path d="M300 156c-33-36-94-65-171-77l17 39c67 12 118 36 154 70 36-34 87-58 154-70l17-39c-77 12-138 41-171 77z"/>
+    <path d="M300 172c-38-30-103-48-188-48l18 39c67 2 125 18 170 47 45-29 103-45 170-47l18-39c-85 0-150 18-188 48z"/>
+  </g>
+  <text x="300" y="272" text-anchor="middle" fill="#0C3AA8" font-family="Arial Black, Arial, sans-serif" font-size="84" letter-spacing="10">KIAMINA</text>
+</svg>
