@@ -39,6 +39,7 @@ import {
   MoreHorizontal,
   ShieldAlert,
   ArrowLeft,
+  Menu,
 } from 'lucide-react'
 import {
   getAdminLevelLabel,
@@ -53,6 +54,8 @@ import {
   uploadHistoryData,
 } from '../../data/client/mockData'
 import KiaminaLogo from '../common/KiaminaLogo'
+import DotLottiePreloader from '../common/DotLottiePreloader'
+import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 
 // Mock admin data
 const mockAdmin = {
@@ -128,6 +131,13 @@ const COMPLIANCE_STATUS_OPTIONS = [
   COMPLIANCE_STATUS.ACTION,
   COMPLIANCE_STATUS.PENDING,
 ]
+const waitForNetworkAwareDelay = (context = 'search') => new Promise((resolve) => {
+  if (typeof window === 'undefined') {
+    resolve()
+    return
+  }
+  window.setTimeout(resolve, getNetworkAwareDurationMs(context))
+})
 const ADMIN_PAGE_PERMISSION_RULES = {
   'admin-documents': ['view_documents'],
   'admin-communications': ['send_notifications'],
@@ -778,7 +788,14 @@ const canAccessAdminPage = (pageId, account) => {
 }
 
 // Sidebar Component
-function AdminSidebar({ activePage, setActivePage, onLogout, currentAdminAccount }) {
+function AdminSidebar({
+  activePage,
+  setActivePage,
+  onLogout,
+  currentAdminAccount,
+  isMobileOpen = false,
+  onCloseMobile,
+}) {
   const navItems = [
     { id: 'admin-dashboard', label: 'Admin Dashboard', icon: LayoutDashboard },
     { id: 'admin-documents', label: 'Document Review', icon: FileText },
@@ -800,67 +817,106 @@ function AdminSidebar({ activePage, setActivePage, onLogout, currentAdminAccount
   const displayRoleLabel = getAdminLevelLabel(displayAdmin.adminLevel)
   const visibleNavItems = navItems.filter((item) => canAccessAdminPage(item.id, displayAdmin))
   const visibleFooterNavItems = footerNavItems.filter((item) => canAccessAdminPage(item.id, displayAdmin))
+  const handleNavSelect = (pageId) => {
+    setActivePage(pageId)
+    onCloseMobile?.()
+  }
 
   return (
-    <aside className="w-64 bg-white border-r border-border fixed left-0 top-0 h-screen flex flex-col z-50">
-      <div className="p-4 border-b border-border-light">
-        <KiaminaLogo className="h-11 w-auto" />
-        <div className="text-[11px] text-text-muted uppercase tracking-wide mt-2">Admin Control</div>
-      </div>
-
-      <div className="p-4 border-b border-border-light">
-        <div className="text-sm font-medium text-text-primary">{displayAdmin.fullName}</div>
-        <div className="text-xs text-text-muted mt-1">Role: {displayRoleLabel}</div>
-      </div>
-
-      <nav className="flex-1 py-3 overflow-y-auto">
-        {visibleNavItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => setActivePage(item.id)}
-            className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
-          >
-            <item.icon className="w-5 h-5" />
-            {item.label}
-          </button>
-        ))}
-      </nav>
-
-      <div className="px-4 py-2">
-        <div className="border-t border-border-light"></div>
-      </div>
-
-      <div className="pb-3">
-        {visibleFooterNavItems.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => setActivePage(item.id)}
-            className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
-          >
-            <item.icon className="w-5 h-5" />
-            {item.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="py-3 border-t border-border-light">
+    <>
+      {isMobileOpen && (
         <button
-          onClick={onLogout}
-          className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-text-secondary hover:bg-background hover:text-text-primary transition-colors"
-        >
-          <LogOut className="w-5 h-5" />
-          Logout
-        </button>
-      </div>
-    </aside>
+          type="button"
+          onClick={() => onCloseMobile?.()}
+          aria-label="Close admin navigation"
+          className="fixed inset-0 bg-black/35 z-40 lg:hidden"
+        />
+      )}
+      <aside className={`w-64 bg-white border-r border-border fixed left-0 top-0 h-screen flex flex-col z-50 transform transition-transform duration-200 ease-out ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0`}>
+        <div className="p-4 border-b border-border-light">
+          <KiaminaLogo className="h-11 w-auto" />
+          <div className="text-[11px] text-text-muted uppercase tracking-wide mt-2">Admin Control</div>
+        </div>
+
+        <div className="p-4 border-b border-border-light">
+          <div className="text-sm font-medium text-text-primary">{displayAdmin.fullName}</div>
+          <div className="text-xs text-text-muted mt-1">Role: {displayRoleLabel}</div>
+        </div>
+
+        <nav className="flex-1 py-3 overflow-y-auto">
+          {visibleNavItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => handleNavSelect(item.id)}
+              className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
+            >
+              <item.icon className="w-5 h-5" />
+              {item.label}
+            </button>
+          ))}
+        </nav>
+
+        <div className="px-4 py-2">
+          <div className="border-t border-border-light"></div>
+        </div>
+
+        <div className="pb-3">
+          {visibleFooterNavItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => handleNavSelect(item.id)}
+              className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
+            >
+              <item.icon className="w-5 h-5" />
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="py-3 border-t border-border-light">
+          <button
+            onClick={() => {
+              onCloseMobile?.()
+              onLogout()
+            }}
+            className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-text-secondary hover:bg-background hover:text-text-primary transition-colors"
+          >
+            <LogOut className="w-5 h-5" />
+            Logout
+          </button>
+        </div>
+      </aside>
+    </>
   )
 }
 
 // Admin Top Bar with notifications dropdown
-function AdminTopBar({ adminFirstName, notifications, onMarkNotificationRead, currentAdminAccount }) {
+function AdminTopBar({
+  adminFirstName,
+  notifications,
+  onMarkNotificationRead,
+  onMarkAllNotificationsRead,
+  currentAdminAccount,
+  onOpenSidebar,
+  searchTerm = '',
+  onSearchTermChange,
+  onSearchSubmit,
+  searchSuggestions = [],
+  searchState = 'idle',
+  searchResults = [],
+  onSearchResultSelect,
+  onSearchResultsDismiss,
+}) {
   const [showNotifications, setShowNotifications] = useState(false)
   const notificationRef = useRef(null)
+  const searchRef = useRef(null)
   const unreadCount = notifications.filter(n => !n.read).length
+  const topBarSearchListId = 'admin-topbar-search-suggestions'
+  const resolvedSearchTerm = String(searchTerm || '')
+  const resolvedSuggestions = Array.isArray(searchSuggestions) ? searchSuggestions : []
+  const resolvedSearchState = String(searchState || 'idle')
+  const resolvedSearchResults = Array.isArray(searchResults) ? searchResults : []
+  const shouldShowSearchPanel = resolvedSearchState !== 'idle'
   const displayAdmin = normalizeAdminAccount({
     ...mockAdmin,
     role: 'admin',
@@ -872,15 +928,86 @@ function AdminTopBar({ adminFirstName, notifications, onMarkNotificationRead, cu
       if (notificationRef.current && !notificationRef.current.contains(event.target)) {
         setShowNotifications(false)
       }
+      if (searchRef.current && !searchRef.current.contains(event.target)) {
+        onSearchResultsDismiss?.()
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
+  }, [onSearchResultsDismiss])
 
   return (
-    <header className="h-14 bg-white border-b border-border flex items-center justify-between px-6 sticky top-0 z-40">
-      <div>
-        <h1 className="text-sm font-semibold text-text-primary uppercase tracking-wide">Admin Console</h1>
+    <header className="h-14 bg-white border-b border-border flex items-center justify-between px-3 sm:px-4 lg:px-6 sticky top-0 z-40 gap-2">
+      <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
+        <button
+          type="button"
+          onClick={() => onOpenSidebar?.()}
+          className="w-9 h-9 border border-border rounded-md text-text-secondary hover:text-text-primary hover:border-primary lg:hidden inline-flex items-center justify-center flex-shrink-0"
+          aria-label="Open admin navigation"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+        <div className="flex-1 min-w-0 flex items-center gap-2 sm:gap-3">
+          <h1 className="hidden sm:block text-sm font-semibold text-text-primary uppercase tracking-wide truncate">Admin Console</h1>
+          <div className="relative w-full sm:max-w-[18rem] lg:max-w-[22rem]" ref={searchRef}>
+            <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={resolvedSearchTerm}
+              onChange={(event) => onSearchTermChange?.(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  onSearchSubmit?.(resolvedSearchTerm)
+                  return
+                }
+                if (event.key === 'Escape') {
+                  onSearchResultsDismiss?.()
+                }
+              }}
+              placeholder="Search admin workspace..."
+              list={resolvedSuggestions.length > 0 ? topBarSearchListId : undefined}
+              className="w-full h-9 pl-9 pr-10 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+            {resolvedSearchState === 'loading' && (
+              <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+                <DotLottiePreloader size={18} />
+              </div>
+            )}
+            {resolvedSuggestions.length > 0 && (
+              <datalist id={topBarSearchListId}>
+                {resolvedSuggestions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            )}
+            {shouldShowSearchPanel && (
+              <div className="absolute left-0 right-0 mt-1 bg-white border border-border rounded-md shadow-card z-[55] max-h-72 overflow-y-auto">
+                {resolvedSearchState === 'loading' ? (
+                  <div className="px-3 py-3 text-sm text-text-secondary">
+                    <DotLottiePreloader size={22} label="Searching..." className="w-full justify-start" />
+                  </div>
+                ) : resolvedSearchState === 'empty' ? (
+                  <div className="px-3 py-3 text-sm text-text-muted">No item found</div>
+                ) : (
+                  resolvedSearchResults.map((result) => (
+                    <button
+                      key={result.id || `${result.pageId || 'page'}-${result.label || ''}`}
+                      type="button"
+                      onClick={() => onSearchResultSelect?.(result)}
+                      className="w-full px-3 py-2.5 text-left hover:bg-background border-b last:border-b-0 border-border-light"
+                    >
+                      <p className="text-sm font-medium text-text-primary truncate">{result.label}</p>
+                      {result.description && (
+                        <p className="text-xs text-text-muted mt-0.5 truncate">{result.description}</p>
+                      )}
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
       <div className="flex items-center gap-3">
         <div className="relative" ref={notificationRef}>
@@ -895,9 +1022,18 @@ function AdminTopBar({ adminFirstName, notifications, onMarkNotificationRead, cu
           </button>
           
           {showNotifications && (
-            <div className="absolute right-0 top-12 w-80 bg-white border border-border rounded-lg shadow-card z-50">
-              <div className="p-3 border-b border-border-light">
+            <div className="absolute right-0 top-12 w-[min(24rem,calc(100vw-1rem))] bg-white border border-border rounded-lg shadow-card z-50">
+              <div className="p-3 border-b border-border-light flex items-center justify-between gap-3">
                 <h3 className="text-sm font-semibold text-text-primary">Notifications</h3>
+                {unreadCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => onMarkAllNotificationsRead?.()}
+                    className="text-xs text-primary hover:underline"
+                  >
+                    Mark all as read
+                  </button>
+                )}
               </div>
               <div className="max-h-80 overflow-y-auto">
                 {notifications.length === 0 ? (
@@ -943,11 +1079,11 @@ function AdminDashboardPage({ setActivePage }) {
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h2 className="text-2xl font-semibold text-text-primary">Admin Dashboard</h2>
       </div>
 
-      <div className="grid grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
         {cards.map((card) => (
           <div key={card.label} className="bg-white rounded-lg shadow-card p-4 flex items-start gap-3">
             <div className={`w-10 h-10 rounded-md flex items-center justify-center ${card.tone}`}>
@@ -961,7 +1097,7 @@ function AdminDashboardPage({ setActivePage }) {
         ))}
       </div>
 
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <button onClick={() => setActivePage('admin-documents')} className="bg-white rounded-lg shadow-card p-5 text-left hover:shadow-card-hover transition-shadow">
           <p className="text-base font-semibold text-text-primary">Document Review Center</p>
           <p className="text-sm text-text-secondary mt-1">Review, approve, and manage uploaded documents.</p>
@@ -1181,12 +1317,12 @@ function AdminClientsPage({
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-start justify-between mb-6 gap-4">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between mb-6 gap-4">
         <div>
           <h2 className="text-2xl font-semibold text-text-primary">Client Management</h2>
           <p className="text-sm text-text-muted mt-1">View, manage, and assist client accounts.</p>
         </div>
-        <div className="w-80 relative">
+        <div className="w-full lg:w-80 relative">
           <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
@@ -1205,8 +1341,65 @@ function AdminClientsPage({
         </div>
       )}
 
-      <div className="bg-white rounded-lg shadow-card overflow-hidden">
-        <table className="w-full">
+      <div className="md:hidden space-y-3">
+        {filteredClients.length === 0 && (
+          <div className="bg-white rounded-lg shadow-card border border-border-light px-4 py-8 text-center text-sm text-text-muted">
+            No client accounts found.
+          </div>
+        )}
+        {filteredClients.map((client) => (
+          <div key={client.id} className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-text-primary">{client.businessName}</p>
+                <p className="text-xs text-text-muted mt-1">{client.cri}</p>
+              </div>
+              <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getStatusBadge(client.verificationStatus)}`}>
+                {client.verificationStatus}
+              </span>
+            </div>
+            <div className="mt-3 space-y-1.5 text-xs text-text-secondary">
+              <p><span className="text-text-muted">Contact:</span> {client.primaryContact}</p>
+              <p><span className="text-text-muted">Email:</span> {client.email}</p>
+              <p><span className="text-text-muted">Country:</span> {client.country}</p>
+              <p><span className="text-text-muted">Created:</span> {client.dateCreated}</p>
+            </div>
+            <details className="mt-3">
+              <summary className="h-8 px-3 border border-border rounded-md text-xs font-medium text-text-primary inline-flex items-center cursor-pointer select-none">
+                Actions
+              </summary>
+              <div className="mt-2 space-y-1">
+                {actionItemsForClient(client).map((item) => {
+                  const isImpersonateAction = item.id === 'impersonate'
+                  const isRestricted = Boolean(item.disabled)
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => {
+                        if (item.disabled) {
+                          safeToast('error', item.disabledMessage || 'Insufficient Permissions')
+                          return
+                        }
+                        handleClientAction(item.id, client)
+                      }}
+                      className={`w-full px-3 py-2 rounded-md border border-border-light text-left text-sm transition-colors inline-flex items-center gap-2 ${isImpersonateAction ? 'text-primary font-medium' : 'text-text-primary'} ${isRestricted ? 'opacity-70 cursor-not-allowed' : 'hover:bg-background'}`}
+                    >
+                      {isImpersonateAction && <ShieldCheck className="w-4 h-4" />}
+                      {item.label}
+                      {isRestricted && <span className="ml-auto text-[10px] text-warning uppercase tracking-wide">Restricted</span>}
+                    </button>
+                  )
+                })}
+              </div>
+            </details>
+          </div>
+        ))}
+      </div>
+
+      <div className="hidden md:block bg-white rounded-lg shadow-card border border-border-light">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[1180px]">
           <thead>
             <tr className="bg-[#F9FAFB]">
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Business Name</th>
@@ -1293,6 +1486,7 @@ function AdminClientsPage({
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )
@@ -2539,7 +2733,7 @@ function AdminClientUploadHistoryPage({ client, setActivePage }) {
 }
 
 // Document Review Center with Preview Panel
-function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
+function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlowRuntimeWatch }) {
   const [documents, setDocuments] = useState(() => readAllDocumentsForReview())
   const [selectedDocument, setSelectedDocument] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
@@ -2555,6 +2749,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
   const [editedCommentText, setEditedCommentText] = useState('')
   const [rejectionReason, setRejectionReason] = useState('')
   const [showRejectionModal, setShowRejectionModal] = useState(false)
+  const [isProcessingReviewAction, setIsProcessingReviewAction] = useState(false)
   const canUnlockApproved = currentAdminAccount?.adminLevel === 'senior'
   const adminActorName = currentAdminAccount?.fullName || 'Admin User'
 
@@ -2598,6 +2793,24 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
       const compareValue = toTimestamp(left.date) - toTimestamp(right.date)
       return sortOrder === 'asc' ? compareValue : -compareValue
     })
+
+  const runReviewAction = async (work, message = 'Updating document status...') => {
+    if (isProcessingReviewAction) return
+    setIsProcessingReviewAction(true)
+    const execute = async () => {
+      await waitForNetworkAwareDelay('search')
+      work()
+    }
+    try {
+      if (typeof runWithSlowRuntimeWatch === 'function') {
+        await runWithSlowRuntimeWatch(execute, message)
+      } else {
+        await execute()
+      }
+    } finally {
+      setIsProcessingReviewAction(false)
+    }
+  }
 
   const handleSelectDocument = (doc) => {
     setSelectedDocument(doc)
@@ -2697,8 +2910,10 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
 
   const handleApprove = () => {
     if (!selectedDocument) return
-    applyReviewStatus(DOCUMENT_REVIEW_STATUS.APPROVED)
-    showToast('success', 'Document approved successfully.')
+    void runReviewAction(() => {
+      applyReviewStatus(DOCUMENT_REVIEW_STATUS.APPROVED)
+      showToast('success', 'Document approved successfully.')
+    }, 'Approving document...')
   }
 
   const handleMarkPending = () => {
@@ -2718,16 +2933,20 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
       }
       unlockReason = input.trim()
     }
-    applyReviewStatus(DOCUMENT_REVIEW_STATUS.PENDING_REVIEW, selectedDocument.notes || '', { unlockReason })
-    showToast('success', 'Document moved to pending review.')
+    void runReviewAction(() => {
+      applyReviewStatus(DOCUMENT_REVIEW_STATUS.PENDING_REVIEW, selectedDocument.notes || '', { unlockReason })
+      showToast('success', 'Document moved to pending review.')
+    }, 'Moving file to pending review...')
   }
 
   const handleReject = () => {
     if (!selectedDocument || !rejectionReason.trim()) return
-    applyReviewStatus(DOCUMENT_REVIEW_STATUS.REJECTED, rejectionReason.trim())
-    setShowRejectionModal(false)
-    setRejectionReason('')
-    showToast('success', 'Document rejected. User has been notified.')
+    void runReviewAction(() => {
+      applyReviewStatus(DOCUMENT_REVIEW_STATUS.REJECTED, rejectionReason.trim())
+      setShowRejectionModal(false)
+      setRejectionReason('')
+      showToast('success', 'Document rejected. User has been notified.')
+    }, 'Rejecting document...')
   }
 
   const handleRequestInfo = () => {
@@ -2738,8 +2957,10 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
       showToast('error', 'Please provide a message for information request.')
       return
     }
-    applyReviewStatus(DOCUMENT_REVIEW_STATUS.INFO_REQUESTED, message.trim())
-    showToast('success', 'Information request sent to user.')
+    void runReviewAction(() => {
+      applyReviewStatus(DOCUMENT_REVIEW_STATUS.INFO_REQUESTED, message.trim())
+      showToast('success', 'Information request sent to user.')
+    }, 'Sending information request...')
   }
 
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 25, 200))
@@ -2771,7 +2992,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
 
       {/* Filters */}
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex items-center gap-4">
+        <div className="flex flex-col xl:flex-row xl:items-center gap-3">
           <div className="flex-1 relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
             <input
@@ -2782,12 +3003,12 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
               className="w-full h-10 pl-10 pr-4 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
           </div>
-          <div className="flex items-center gap-2">
-            <Filter className="w-4 h-4 text-text-muted" />
+          <div className="flex flex-wrap items-center gap-2 w-full xl:w-auto">
+            <Filter className="hidden sm:block w-4 h-4 text-text-muted" />
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value)}
-              className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             >
               <option value="All">All Status</option>
               <option value={DOCUMENT_REVIEW_STATUS.PENDING_REVIEW}>Pending Review</option>
@@ -2798,7 +3019,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
             <select
               value={filterCategory}
               onChange={(e) => setFilterCategory(e.target.value)}
-              className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             >
               <option value="All">All Categories</option>
               <option value="Expense">Expense</option>
@@ -2808,7 +3029,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value)}
-              className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             >
               <option value="date">Sort by Date</option>
               <option value="business">Sort by Business</option>
@@ -2817,7 +3038,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
             <button
               type="button"
               onClick={() => setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
-              className="h-10 px-3 border border-border rounded-md text-sm text-text-primary hover:bg-background"
+              className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm text-text-primary hover:bg-background"
             >
               {sortOrder === 'desc' ? 'Desc' : 'Asc'}
             </button>
@@ -2827,7 +3048,8 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
 
       {/* Document List */}
       <div className="bg-white rounded-lg shadow-card overflow-hidden">
-        <table className="w-full">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[760px]">
           <thead>
             <tr className="bg-[#F9FAFB]">
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Document</th>
@@ -2868,6 +3090,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Document Preview Panel */}
@@ -2886,7 +3109,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
             </div>
 
             {/* Content */}
-            <div className="flex flex-1 overflow-hidden">
+            <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
               {/* Left: Document Viewer */}
               <div className="flex-1 bg-[#F9FAFB] p-6 overflow-auto">
                 <div className="bg-white rounded-lg shadow-card p-8 min-h-[500px] flex items-center justify-center">
@@ -2902,7 +3125,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
               </div>
 
               {/* Right: Metadata Panel */}
-              <div className="w-80 border-l border-border-light p-4 overflow-y-auto">
+              <div className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-border-light p-4 overflow-y-auto">
                 <h4 className="text-sm font-semibold text-text-primary mb-4">Document Metadata</h4>
                 
                 <div className="space-y-4">
@@ -2970,28 +3193,32 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={handleApprove}
-                      className="h-9 bg-success text-white rounded-md text-sm font-medium hover:bg-success/90 transition-colors flex items-center justify-center gap-1"
+                      disabled={isProcessingReviewAction}
+                      className="h-9 bg-success text-white rounded-md text-sm font-medium hover:bg-success/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <CheckCircle className="w-4 h-4" />
                       Approve
                     </button>
                     <button
                       onClick={() => setShowRejectionModal(true)}
-                      className="h-9 bg-error text-white rounded-md text-sm font-medium hover:bg-error/90 transition-colors flex items-center justify-center gap-1"
+                      disabled={isProcessingReviewAction}
+                      className="h-9 bg-error text-white rounded-md text-sm font-medium hover:bg-error/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <XCircle className="w-4 h-4" />
                       Reject
                     </button>
                     <button
                       onClick={handleRequestInfo}
-                      className="h-9 bg-warning text-white rounded-md text-sm font-medium hover:bg-warning/90 transition-colors flex items-center justify-center gap-1"
+                      disabled={isProcessingReviewAction}
+                      className="h-9 bg-warning text-white rounded-md text-sm font-medium hover:bg-warning/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <HelpCircle className="w-4 h-4" />
                       Request Info
                     </button>
                     <button
                       onClick={handleMarkPending}
-                      className="h-9 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors flex items-center justify-center gap-1"
+                      disabled={isProcessingReviewAction}
+                      className="h-9 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <Clock className="w-4 h-4" />
                       Pending Review
@@ -3105,16 +3332,22 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount }) {
             <div className="p-4 border-t border-border-light flex justify-end gap-3">
               <button 
                 onClick={() => { setShowRejectionModal(false); setRejectionReason('') }}
+                disabled={isProcessingReviewAction}
                 className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background"
               >
                 Cancel
               </button>
               <button 
                 onClick={handleReject}
-                disabled={!rejectionReason.trim()}
-                className="h-10 px-4 bg-error text-white rounded-md text-sm font-medium hover:bg-error/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={!rejectionReason.trim() || isProcessingReviewAction}
+                className="h-10 px-4 bg-error text-white rounded-md text-sm font-medium hover:bg-error/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
               >
-                Reject Document
+                {isProcessingReviewAction ? (
+                  <>
+                    <DotLottiePreloader size={18} />
+                    <span>Processing...</span>
+                  </>
+                ) : 'Reject Document'}
               </button>
             </div>
           </div>
@@ -3254,7 +3487,7 @@ function AdminCommunicationsCenter({ showToast }) {
 }
 
 // Send Notification Page
-function AdminSendNotificationPage({ showToast }) {
+function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
   const [mode, setMode] = useState('bulk') // 'bulk' or 'targeted'
   const [bulkAudience, setBulkAudience] = useState('all-users')
   const [title, setTitle] = useState('')
@@ -3263,6 +3496,7 @@ function AdminSendNotificationPage({ showToast }) {
   const [priority, setPriority] = useState('normal')
   const [showPreview, setShowPreview] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
+  const [isSending, setIsSending] = useState(false)
   
   // Targeted notification filters
   const [searchUser, setSearchUser] = useState('')
@@ -3299,19 +3533,33 @@ function AdminSendNotificationPage({ showToast }) {
   }
 
   const handleSend = () => {
+    if (isSending) return
     setShowConfirm(true)
   }
 
-  const confirmSend = () => {
-    // In a real app, this would send notifications
-    showToast('success', mode === 'bulk' 
-      ? `Notification sent successfully to ${getAudienceCount()} users.` 
-      : `Notification sent successfully to ${selectedUsers.length} users.`)
-    setShowConfirm(false)
-    setTitle('')
-    setMessage('')
-    setLink('')
-    setSelectedUsers([])
+  const confirmSend = async () => {
+    if (isSending) return
+    setIsSending(true)
+    const executeSend = async () => {
+      await waitForNetworkAwareDelay('search')
+      showToast('success', mode === 'bulk'
+        ? `Notification sent successfully to ${getAudienceCount()} users.`
+        : `Notification sent successfully to ${selectedUsers.length} users.`)
+      setShowConfirm(false)
+      setTitle('')
+      setMessage('')
+      setLink('')
+      setSelectedUsers([])
+    }
+    try {
+      if (typeof runWithSlowRuntimeWatch === 'function') {
+        await runWithSlowRuntimeWatch(executeSend, 'Sending notification...')
+      } else {
+        await executeSend()
+      }
+    } finally {
+      setIsSending(false)
+    }
   }
 
   const getAudienceCount = () => {
@@ -3340,10 +3588,10 @@ function AdminSendNotificationPage({ showToast }) {
 
       {/* Mode Selection */}
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <button
             onClick={() => setMode('bulk')}
-            className={`flex-1 p-4 rounded-lg border-2 transition-all ${mode === 'bulk' ? 'border-primary bg-primary-tint' : 'border-border-light hover:border-border'}`}
+            className={`w-full p-4 rounded-lg border-2 transition-all ${mode === 'bulk' ? 'border-primary bg-primary-tint' : 'border-border-light hover:border-border'}`}
           >
             <div className="flex items-center gap-3">
               <UsersRound className={`w-6 h-6 ${mode === 'bulk' ? 'text-primary' : 'text-text-muted'}`} />
@@ -3355,7 +3603,7 @@ function AdminSendNotificationPage({ showToast }) {
           </button>
           <button
             onClick={() => setMode('targeted')}
-            className={`flex-1 p-4 rounded-lg border-2 transition-all ${mode === 'targeted' ? 'border-primary bg-primary-tint' : 'border-border-light hover:border-border'}`}
+            className={`w-full p-4 rounded-lg border-2 transition-all ${mode === 'targeted' ? 'border-primary bg-primary-tint' : 'border-border-light hover:border-border'}`}
           >
             <div className="flex items-center gap-3">
               <User className={`w-6 h-6 ${mode === 'targeted' ? 'text-primary' : 'text-text-muted'}`} />
@@ -3374,7 +3622,7 @@ function AdminSendNotificationPage({ showToast }) {
           <div className="space-y-6">
             <div>
               <label className="block text-sm font-medium text-text-primary mb-2">Select Audience</label>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {[
                   { id: 'all-users', label: 'All Users', icon: Users, count: 324 },
                   { id: 'all-businesses', label: 'All Businesses', icon: Building, count: 42 },
@@ -3441,7 +3689,7 @@ function AdminSendNotificationPage({ showToast }) {
               </button>
               <button
                 onClick={handleSend}
-                disabled={!title || !message}
+                disabled={!title || !message || isSending}
                 className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
               >
                 <Send className="w-4 h-4" />
@@ -3461,7 +3709,7 @@ function AdminSendNotificationPage({ showToast }) {
               <Filter className="w-5 h-5 text-text-muted" />
               <h3 className="text-sm font-semibold text-text-primary">Filter Users</h3>
             </div>
-            <div className="grid grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
               <div>
                 <label className="block text-xs text-text-muted mb-1">Business</label>
                 <select
@@ -3531,7 +3779,7 @@ function AdminSendNotificationPage({ showToast }) {
 
           {/* User Selection */}
           <div className="bg-white rounded-lg shadow-card p-4">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
               <h3 className="text-sm font-semibold text-text-primary">Select Users</h3>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-text-muted">{selectedUsers.length} selected</span>
@@ -3562,7 +3810,8 @@ function AdminSendNotificationPage({ showToast }) {
               </div>
             </div>
             <div className="max-h-64 overflow-y-auto border border-border-light rounded-lg">
-              <table className="w-full">
+              <div className="overflow-x-auto">
+              <table className="w-full min-w-[700px]">
                 <thead className="bg-[#F9FAFB] sticky top-0">
                   <tr>
                     <th className="w-10 px-3 py-2 text-left"></th>
@@ -3599,6 +3848,7 @@ function AdminSendNotificationPage({ showToast }) {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           </div>
 
@@ -3629,7 +3879,7 @@ function AdminSendNotificationPage({ showToast }) {
 
               <div>
                 <label className="block text-sm font-medium text-text-primary mb-2">Priority Level</label>
-                <div className="flex gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   {[
                     { id: 'normal', label: 'Normal' },
                     { id: 'important', label: 'Important' },
@@ -3657,7 +3907,7 @@ function AdminSendNotificationPage({ showToast }) {
                 </button>
                 <button
                   onClick={handleSend}
-                  disabled={!title || !message || selectedUsers.length === 0}
+                  disabled={!title || !message || selectedUsers.length === 0 || isSending}
                   className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
                 >
                   <Send className="w-4 h-4" />
@@ -3735,15 +3985,22 @@ function AdminSendNotificationPage({ showToast }) {
             <div className="p-4 border-t border-border-light flex justify-end gap-3">
               <button 
                 onClick={() => setShowConfirm(false)}
+                disabled={isSending}
                 className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background"
               >
                 Cancel
               </button>
               <button 
-                onClick={confirmSend}
-                className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+                onClick={() => void confirmSend()}
+                disabled={isSending}
+                className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
               >
-                Confirm & Send
+                {isSending ? (
+                  <>
+                    <DotLottiePreloader size={18} />
+                    <span>Sending...</span>
+                  </>
+                ) : 'Confirm & Send'}
               </button>
             </div>
           </div>
@@ -3785,13 +4042,33 @@ function AdminActivityLogPage() {
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-6">
         <h2 className="text-2xl font-semibold text-text-primary">System Activity Log</h2>
         <p className="text-sm text-text-muted">Audit trail for all admin actions</p>
       </div>
 
-      <div className="bg-white rounded-lg shadow-card overflow-hidden">
-        <table className="w-full">
+      <div className="md:hidden space-y-3">
+        {logs.map((log) => (
+          <div key={log.id} className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <div className="flex items-center gap-2 text-xs text-text-muted">
+              <Clock className="w-3.5 h-3.5" />
+              {log.timestamp}
+            </div>
+            <p className="text-sm font-semibold text-text-primary mt-2">{log.adminName}</p>
+            <div className="mt-2">
+              <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getActionStyle(log.action)}`}>
+                {log.action}
+              </span>
+            </div>
+            <p className="text-xs text-text-secondary mt-2"><span className="text-text-muted">Affected:</span> {log.affectedUser}</p>
+            <p className="text-xs text-text-secondary mt-1"><span className="text-text-muted">Details:</span> {log.details}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="hidden md:block bg-white rounded-lg shadow-card border border-border-light">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px]">
           <thead>
             <tr className="bg-[#F9FAFB]">
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Timestamp</th>
@@ -3822,6 +4099,7 @@ function AdminActivityLogPage() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )

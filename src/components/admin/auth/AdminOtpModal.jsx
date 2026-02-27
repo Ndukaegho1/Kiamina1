@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { Loader2 } from 'lucide-react'
+import DotLottiePreloader from '../../common/DotLottiePreloader'
 
 function maskEmailAddress(email) {
   const normalizedEmail = email?.trim() || ''
@@ -172,7 +172,7 @@ function AdminOtpModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
               disabled={otpCode.length !== 6 || isVerifying}
               className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
             >
-              {isVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
+              {isVerifying && <DotLottiePreloader size={18} />}
               {isVerifying ? 'Verifying...' : 'Verify'}
             </button>
           </div>

@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Loader2, ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2 } from 'lucide-react'
 import {
   ADMIN_LEVELS,
   ADMIN_PERMISSION_DEFINITIONS,
@@ -8,6 +8,7 @@ import {
 } from '../adminIdentity'
 import AdminOtpModal from './AdminOtpModal'
 import KiaminaLogo from '../../common/KiaminaLogo'
+import DotLottiePreloader from '../../common/DotLottiePreloader'
 
 function AdminAccountSetup({
   invite,
@@ -178,7 +179,7 @@ function AdminAccountSetup({
               disabled={isSubmitting}
               className="h-11 px-5 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
             >
-              {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+              {isSubmitting && <DotLottiePreloader size={18} />}
               {isSubmitting ? 'Processing...' : 'Create Admin Account'}
             </button>
           </div>

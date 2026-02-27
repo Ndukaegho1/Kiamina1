@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { Lock, Mail, Loader2, ArrowLeft } from 'lucide-react'
+import { Lock, Mail, ArrowLeft } from 'lucide-react'
 import AdminOtpModal from './AdminOtpModal'
 import KiaminaLogo from '../../common/KiaminaLogo'
+import DotLottiePreloader from '../../common/DotLottiePreloader'
 
 function AdminLoginPortal({
   onLogin,
@@ -104,7 +105,7 @@ function AdminLoginPortal({
             disabled={isSubmitting}
             className="w-full h-11 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
           >
-            {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
+            {isSubmitting && <DotLottiePreloader size={18} />}
             {isSubmitting ? 'Processing...' : 'Sign In to Admin Portal'}
           </button>
         </form>

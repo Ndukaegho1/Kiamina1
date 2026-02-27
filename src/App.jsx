@@ -1853,6 +1853,7 @@ function App() {
   const issueEmailOtp = async (email, purpose = 'login') => {
     const normalizedEmail = email?.trim()?.toLowerCase()
     if (!normalizedEmail) return false
+    const startedAt = Date.now()
 
     const otp = `${Math.floor(100000 + Math.random() * 900000)}`
     const nextStore = {
@@ -1890,12 +1891,20 @@ function App() {
       // Fallback to local demo flow when backend endpoint is unavailable.
     }
 
+    const minimumDelayMs = getNetworkAwareDurationMs('search')
+    const elapsedMs = Date.now() - startedAt
+    const remainingMs = Math.max(0, minimumDelayMs - elapsedMs)
+    if (remainingMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, remainingMs))
+    }
+
     return true
   }
 
   const issuePasswordResetLink = async (email) => {
     const normalizedEmail = email?.trim()?.toLowerCase()
     if (!normalizedEmail) return false
+    const startedAt = Date.now()
 
     const resetToken = `${Date.now()}-${Math.floor(100000 + Math.random() * 900000)}`
     const resetLink = `${window.location.origin}/reset-password?email=${encodeURIComponent(normalizedEmail)}&token=${encodeURIComponent(resetToken)}`
@@ -1912,6 +1921,13 @@ function App() {
       if (!response.ok) throw new Error('Password reset email service unavailable')
     } catch {
       // Fallback to local demo flow when backend endpoint is unavailable.
+    }
+
+    const minimumDelayMs = getNetworkAwareDurationMs('search')
+    const elapsedMs = Date.now() - startedAt
+    const remainingMs = Math.max(0, minimumDelayMs - elapsedMs)
+    if (remainingMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, remainingMs))
     }
 
     return true
@@ -2050,7 +2066,7 @@ function App() {
     if (isLoggingOut) return
     const wasAdmin = currentUserRole === 'admin'
     setIsLoggingOut(true)
-    await new Promise((resolve) => setTimeout(resolve, 450))
+    await new Promise((resolve) => setTimeout(resolve, getNetworkAwareDurationMs('search')))
     setIsLogoutConfirmOpen(false)
     setIsModalOpen(false)
     setIsAuthenticated(false)
@@ -2161,6 +2177,7 @@ function App() {
 
   const handleVerifyOtp = async (code) => {
     if (!otpChallenge?.email) return { ok: false, message: 'Incorrect verification code.' }
+    await new Promise((resolve) => window.setTimeout(resolve, getNetworkAwareDurationMs('search')))
 
     const normalizedEmail = otpChallenge.email.trim().toLowerCase()
     const otpEntry = otpStore[normalizedEmail]
@@ -2287,6 +2304,7 @@ function App() {
 
   const handleResendOtp = async () => {
     if (!otpChallenge?.email) return { ok: false }
+    await new Promise((resolve) => window.setTimeout(resolve, getNetworkAwareDurationMs('search')))
     await issueEmailOtp(otpChallenge.email, otpChallenge.purpose || 'login')
     return { ok: true }
   }

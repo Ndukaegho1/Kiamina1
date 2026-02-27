@@ -8,10 +8,10 @@ import {
   CheckCircle,
   Ban,
   Trash2,
-  Loader2,
   KeyRound,
   Info,
 } from 'lucide-react'
+import DotLottiePreloader from '../../common/DotLottiePreloader'
 import {
   ADMIN_LEVELS,
   ADMIN_PERMISSION_DEFINITIONS,
@@ -24,6 +24,7 @@ import {
   isAdminAccount,
   isAdminInvitePending,
 } from '../adminIdentity'
+import { getNetworkAwareDurationMs } from '../../../utils/networkRuntime'
 
 const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
@@ -31,6 +32,13 @@ const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
 
 const passwordStrengthRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+const waitForNetworkAwareDelay = () => new Promise((resolve) => {
+  if (typeof window === 'undefined') {
+    resolve()
+    return
+  }
+  window.setTimeout(resolve, getNetworkAwareDurationMs('search'))
+})
 
 const readArrayFromStorage = (key) => {
   try {
@@ -121,7 +129,7 @@ const getAdminSettings = () => {
   }
 }
 
-function AdminSettingsPage({ showToast, currentAdminAccount }) {
+function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeWatch }) {
   const currentAdmin = useMemo(
     () => normalizeAdminAccount(currentAdminAccount || {}),
     [currentAdminAccount],
@@ -439,144 +447,154 @@ function AdminSettingsPage({ showToast, currentAdminAccount }) {
     if (!confirmAction?.type) return
     setIsBusy(true)
     try {
-      if (confirmAction.type === 'create-admin') {
-        const allAccounts = readAccounts()
-        const exists = allAccounts.some(
-          (account) => account.email?.trim()?.toLowerCase() === confirmAction.payload.email,
-        )
-        if (exists) {
-          setFormError('An account with that email already exists.')
-          return
+      const executeAction = async () => {
+        await waitForNetworkAwareDelay()
+
+        if (confirmAction.type === 'create-admin') {
+          const allAccounts = readAccounts()
+          const exists = allAccounts.some(
+            (account) => account.email?.trim()?.toLowerCase() === confirmAction.payload.email,
+          )
+          if (exists) {
+            setFormError('An account with that email already exists.')
+            return
+          }
+
+          const createdAdmin = normalizeAdminAccount({
+            fullName: confirmAction.payload.fullName,
+            email: confirmAction.payload.email,
+            password: confirmAction.payload.password,
+            role: 'admin',
+            adminLevel: confirmAction.payload.adminLevel,
+            adminPermissions: confirmAction.payload.adminLevel === ADMIN_LEVELS.SENIOR
+              ? FULL_ADMIN_PERMISSION_IDS
+              : confirmAction.payload.permissions,
+            status: 'active',
+            createdBy: currentAdmin.email,
+            createdAt: new Date().toISOString(),
+          })
+
+          writeAccounts([...allAccounts, createdAdmin])
+          appendActivityLog({
+            adminName: currentAdmin.fullName || 'Admin User',
+            action: 'Created admin account',
+            details: `${createdAdmin.email} (${getAdminLevelLabel(createdAdmin.adminLevel)})`,
+          })
+          setCreateAdminForm({
+            fullName: '',
+            email: '',
+            password: '',
+            adminLevel: ADMIN_LEVELS.OPERATIONAL,
+            permissions: ['view_documents', 'view_businesses'],
+          })
+          refreshAdminData()
+          notify('success', 'Admin account created successfully.')
         }
 
-        const createdAdmin = normalizeAdminAccount({
-          fullName: confirmAction.payload.fullName,
-          email: confirmAction.payload.email,
-          password: confirmAction.payload.password,
-          role: 'admin',
-          adminLevel: confirmAction.payload.adminLevel,
-          adminPermissions: confirmAction.payload.adminLevel === ADMIN_LEVELS.SENIOR
-            ? FULL_ADMIN_PERMISSION_IDS
-            : confirmAction.payload.permissions,
-          status: 'active',
-          createdBy: currentAdmin.email,
-          createdAt: new Date().toISOString(),
-        })
+        if (confirmAction.type === 'invite-admin') {
+          const allAccounts = readAccounts()
+          const existingAccount = allAccounts.find(
+            (account) => account.email?.trim()?.toLowerCase() === confirmAction.payload.email,
+          )
+          if (existingAccount && isAdminAccount(existingAccount)) {
+            setFormError('That email is already an admin account.')
+            return
+          }
 
-        writeAccounts([...allAccounts, createdAdmin])
-        appendActivityLog({
-          adminName: currentAdmin.fullName || 'Admin User',
-          action: 'Created admin account',
-          details: `${createdAdmin.email} (${getAdminLevelLabel(createdAdmin.adminLevel)})`,
-        })
-        setCreateAdminForm({
-          fullName: '',
-          email: '',
-          password: '',
-          adminLevel: ADMIN_LEVELS.OPERATIONAL,
-          permissions: ['view_documents', 'view_businesses'],
-        })
-        refreshAdminData()
-        notify('success', 'Admin account created successfully.')
+          const existingInvites = readInvites().filter(
+            (invite) => invite.email !== confirmAction.payload.email || !isAdminInvitePending(invite),
+          )
+          const createdInvite = normalizeAdminInvite({
+            id: `INV-${Date.now()}`,
+            token: createInviteToken(),
+            email: confirmAction.payload.email,
+            adminLevel: confirmAction.payload.adminLevel,
+            adminPermissions: confirmAction.payload.adminLevel === ADMIN_LEVELS.SENIOR
+              ? FULL_ADMIN_PERMISSION_IDS
+              : confirmAction.payload.permissions,
+            status: 'pending',
+            invitedBy: currentAdmin.email || '',
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
+          })
+
+          const nextInvites = [createdInvite, ...existingInvites]
+          writeInvites(nextInvites)
+          setAdminInvites(nextInvites)
+          setInviteForm({
+            email: '',
+            adminLevel: ADMIN_LEVELS.OPERATIONAL,
+            permissions: ['view_documents', 'view_businesses'],
+          })
+          const inviteUrl = `${window.location.origin}/admin/setup?invite=${encodeURIComponent(createdInvite.token)}`
+          setGeneratedInviteLink(inviteUrl)
+          appendActivityLog({
+            adminName: currentAdmin.fullName || 'Admin User',
+            action: 'Sent admin invite',
+            details: `${createdInvite.email} (${getAdminLevelLabel(createdInvite.adminLevel)})`,
+          })
+          notify('success', 'Admin invitation created.')
+        }
+
+        if (confirmAction.type === 'suspend-admin' || confirmAction.type === 'activate-admin') {
+          const targetEmail = confirmAction.payload.email?.trim()?.toLowerCase()
+          if (!targetEmail) return
+          if (targetEmail === currentAdmin.email?.trim()?.toLowerCase()) {
+            setFormError('You cannot change your own admin status.')
+            return
+          }
+
+          const allAccounts = readAccounts()
+          const targetIndex = allAccounts.findIndex(
+            (account) => account.email?.trim()?.toLowerCase() === targetEmail,
+          )
+          if (targetIndex === -1) {
+            setFormError('Admin account not found.')
+            return
+          }
+
+          const nextStatus = confirmAction.type === 'suspend-admin' ? 'suspended' : 'active'
+          allAccounts[targetIndex] = normalizeAdminAccount({
+            ...allAccounts[targetIndex],
+            status: nextStatus,
+          })
+          writeAccounts(allAccounts)
+          appendActivityLog({
+            adminName: currentAdmin.fullName || 'Admin User',
+            action: `${nextStatus === 'suspended' ? 'Suspended' : 'Activated'} admin account`,
+            details: targetEmail,
+          })
+          refreshAdminData()
+          notify('success', `Admin ${nextStatus === 'suspended' ? 'suspended' : 'activated'} successfully.`)
+        }
+
+        if (confirmAction.type === 'delete-admin') {
+          const targetEmail = confirmAction.payload.email?.trim()?.toLowerCase()
+          if (!targetEmail) return
+          if (targetEmail === currentAdmin.email?.trim()?.toLowerCase()) {
+            setFormError('You cannot delete your own account.')
+            return
+          }
+
+          const allAccounts = readAccounts()
+          const nextAccounts = allAccounts.filter(
+            (account) => account.email?.trim()?.toLowerCase() !== targetEmail,
+          )
+          writeAccounts(nextAccounts)
+          appendActivityLog({
+            adminName: currentAdmin.fullName || 'Admin User',
+            action: 'Deleted admin account',
+            details: targetEmail,
+          })
+          refreshAdminData()
+          notify('success', 'Admin account deleted.')
+        }
       }
 
-      if (confirmAction.type === 'invite-admin') {
-        const allAccounts = readAccounts()
-        const existingAccount = allAccounts.find(
-          (account) => account.email?.trim()?.toLowerCase() === confirmAction.payload.email,
-        )
-        if (existingAccount && isAdminAccount(existingAccount)) {
-          setFormError('That email is already an admin account.')
-          return
-        }
-
-        const existingInvites = readInvites().filter(
-          (invite) => invite.email !== confirmAction.payload.email || !isAdminInvitePending(invite),
-        )
-        const createdInvite = normalizeAdminInvite({
-          id: `INV-${Date.now()}`,
-          token: createInviteToken(),
-          email: confirmAction.payload.email,
-          adminLevel: confirmAction.payload.adminLevel,
-          adminPermissions: confirmAction.payload.adminLevel === ADMIN_LEVELS.SENIOR
-            ? FULL_ADMIN_PERMISSION_IDS
-            : confirmAction.payload.permissions,
-          status: 'pending',
-          invitedBy: currentAdmin.email || '',
-          createdAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + (7 * 24 * 60 * 60 * 1000)).toISOString(),
-        })
-
-        const nextInvites = [createdInvite, ...existingInvites]
-        writeInvites(nextInvites)
-        setAdminInvites(nextInvites)
-        setInviteForm({
-          email: '',
-          adminLevel: ADMIN_LEVELS.OPERATIONAL,
-          permissions: ['view_documents', 'view_businesses'],
-        })
-        const inviteUrl = `${window.location.origin}/admin/setup?invite=${encodeURIComponent(createdInvite.token)}`
-        setGeneratedInviteLink(inviteUrl)
-        appendActivityLog({
-          adminName: currentAdmin.fullName || 'Admin User',
-          action: 'Sent admin invite',
-          details: `${createdInvite.email} (${getAdminLevelLabel(createdInvite.adminLevel)})`,
-        })
-        notify('success', 'Admin invitation created.')
-      }
-
-      if (confirmAction.type === 'suspend-admin' || confirmAction.type === 'activate-admin') {
-        const targetEmail = confirmAction.payload.email?.trim()?.toLowerCase()
-        if (!targetEmail) return
-        if (targetEmail === currentAdmin.email?.trim()?.toLowerCase()) {
-          setFormError('You cannot change your own admin status.')
-          return
-        }
-
-        const allAccounts = readAccounts()
-        const targetIndex = allAccounts.findIndex(
-          (account) => account.email?.trim()?.toLowerCase() === targetEmail,
-        )
-        if (targetIndex === -1) {
-          setFormError('Admin account not found.')
-          return
-        }
-
-        const nextStatus = confirmAction.type === 'suspend-admin' ? 'suspended' : 'active'
-        allAccounts[targetIndex] = normalizeAdminAccount({
-          ...allAccounts[targetIndex],
-          status: nextStatus,
-        })
-        writeAccounts(allAccounts)
-        appendActivityLog({
-          adminName: currentAdmin.fullName || 'Admin User',
-          action: `${nextStatus === 'suspended' ? 'Suspended' : 'Activated'} admin account`,
-          details: targetEmail,
-        })
-        refreshAdminData()
-        notify('success', `Admin ${nextStatus === 'suspended' ? 'suspended' : 'activated'} successfully.`)
-      }
-
-      if (confirmAction.type === 'delete-admin') {
-        const targetEmail = confirmAction.payload.email?.trim()?.toLowerCase()
-        if (!targetEmail) return
-        if (targetEmail === currentAdmin.email?.trim()?.toLowerCase()) {
-          setFormError('You cannot delete your own account.')
-          return
-        }
-
-        const allAccounts = readAccounts()
-        const nextAccounts = allAccounts.filter(
-          (account) => account.email?.trim()?.toLowerCase() !== targetEmail,
-        )
-        writeAccounts(nextAccounts)
-        appendActivityLog({
-          adminName: currentAdmin.fullName || 'Admin User',
-          action: 'Deleted admin account',
-          details: targetEmail,
-        })
-        refreshAdminData()
-        notify('success', 'Admin account deleted.')
+      if (typeof runWithSlowRuntimeWatch === 'function') {
+        await runWithSlowRuntimeWatch(executeAction, 'Applying admin settings...')
+      } else {
+        await executeAction()
       }
     } finally {
       setIsBusy(false)
@@ -1134,7 +1152,7 @@ function AdminSettingsPage({ showToast, currentAdminAccount }) {
                 disabled={isBusy}
                 className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
               >
-                {isBusy && <Loader2 className="w-4 h-4 animate-spin" />}
+                {isBusy && <DotLottiePreloader size={18} />}
                 {isBusy ? 'Processing...' : 'Confirm'}
               </button>
             </div>

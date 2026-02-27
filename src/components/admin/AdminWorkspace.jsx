@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   canAccessAdminPage,
   AdminSidebar,
@@ -15,11 +15,116 @@ import {
 } from './AdminViews'
 import AdminSettingsPage from './settings/AdminSettingsPage'
 import { ADMIN_DEFAULT_PAGE } from './adminConfig'
+import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
+import DotLottiePreloader from '../common/DotLottiePreloader'
 
 const defaultAdminNotifications = [
   { id: 'NOT-001', type: 'comment', message: 'New comment on Expense_Report_Feb2026.pdf', timestamp: 'Feb 24, 2026 11:00 AM', read: false },
   { id: 'NOT-002', type: 'status', message: 'Bank_Statement_GTB_Feb2026.pdf requires review', timestamp: 'Feb 22, 2026 9:45 AM', read: false },
 ]
+
+const buildKeywordSuggestions = (values = [], limit = 20) => {
+  const seen = new Set()
+  const keywords = []
+  ;(Array.isArray(values) ? values : []).forEach((value) => {
+    String(value || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2)
+      .forEach((token) => {
+        if (seen.has(token)) return
+        seen.add(token)
+        keywords.push(token)
+      })
+  })
+  return keywords.slice(0, Math.max(1, limit))
+}
+
+const safeParseJson = (rawValue, fallback) => {
+  try {
+    const parsed = rawValue ? JSON.parse(rawValue) : fallback
+    return parsed ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
+const isAdminAccount = (account = {}) => {
+  const normalizedRole = String(account?.role || '').trim().toLowerCase()
+  const normalizedEmail = String(account?.email || '').trim().toLowerCase()
+  return normalizedRole === 'admin'
+    || normalizedEmail.startsWith('admin@')
+    || normalizedEmail.endsWith('@admin.kiamina.local')
+}
+
+const flattenDocumentRowsForSearch = (rows = [], fallbackCategory = '') => (
+  (Array.isArray(rows) ? rows : []).flatMap((row) => {
+    if (!row || typeof row !== 'object') return []
+    if (!row.isFolder) return [{ ...row, category: row.category || fallbackCategory }]
+    const files = Array.isArray(row.files) ? row.files : []
+    return files.map((file) => ({
+      ...file,
+      category: file.category || fallbackCategory,
+      folderName: file.folderName || row.folderName || '',
+    }))
+  })
+)
+
+const readAdminSearchSnapshot = () => {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+    return { clients: [], documents: [], activityLogs: [] }
+  }
+
+  const accounts = safeParseJson(localStorage.getItem('kiaminaAccounts'), [])
+  const clients = (Array.isArray(accounts) ? accounts : [])
+    .filter((account) => account && typeof account === 'object' && !isAdminAccount(account))
+    .map((account, index) => ({
+      id: `client-${account.email || index}`,
+      businessName: account.businessName || account.companyName || account.fullName || `Client ${index + 1}`,
+      fullName: account.fullName || '',
+      email: account.email || '',
+      country: account.country || '',
+      status: account.status || '',
+    }))
+
+  const documentStorageKeys = Object.keys(localStorage)
+    .filter((key) => key === 'kiaminaClientDocuments' || key.startsWith('kiaminaClientDocuments:'))
+  const documentBundles = documentStorageKeys.flatMap((key) => {
+    const parsed = safeParseJson(localStorage.getItem(key), null)
+    if (!parsed || typeof parsed !== 'object') return []
+    return [parsed]
+  })
+
+  const documents = documentBundles.flatMap((bundle) => {
+    const expenses = flattenDocumentRowsForSearch(bundle.expenses, 'Expense')
+    const sales = flattenDocumentRowsForSearch(bundle.sales, 'Sales')
+    const bankStatements = flattenDocumentRowsForSearch(bundle.bankStatements, 'Bank Statement')
+    const uploadHistory = flattenDocumentRowsForSearch(bundle.uploadHistory, 'Upload History')
+    return [...expenses, ...sales, ...bankStatements, ...uploadHistory]
+  })
+    .filter((row) => row && typeof row === 'object')
+    .map((row, index) => ({
+      id: `doc-${row.fileId || row.id || row.filename || index}`,
+      filename: row.filename || row.fileId || `Document ${index + 1}`,
+      category: row.category || '',
+      fileId: row.fileId || '',
+      folderName: row.folderName || '',
+      status: row.status || '',
+      user: row.user || '',
+    }))
+
+  const activityLogs = safeParseJson(localStorage.getItem('kiaminaAdminActivityLog'), [])
+  const normalizedActivityLogs = (Array.isArray(activityLogs) ? activityLogs : []).map((row, index) => ({
+    id: `activity-${row.id || index}`,
+    action: row.action || 'Admin action',
+    affectedUser: row.affectedUser || '',
+    details: row.details || '',
+    timestamp: row.timestamp || '',
+  }))
+
+  return { clients, documents, activityLogs: normalizedActivityLogs }
+}
 
 function AdminAccessDenied({ onReturn }) {
   return (
@@ -52,6 +157,80 @@ function AdminWorkspace({
 }) {
   const [adminNotifications, setAdminNotifications] = useState(defaultAdminNotifications)
   const [selectedClientContext, setSelectedClientContext] = useState(null)
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const [adminSearchTerm, setAdminSearchTerm] = useState('')
+  const [adminSearchResults, setAdminSearchResults] = useState([])
+  const [adminSearchState, setAdminSearchState] = useState('idle')
+  const [searchIndexRevision, setSearchIndexRevision] = useState(0)
+  const [isSlowRuntimeOverlayVisible, setIsSlowRuntimeOverlayVisible] = useState(false)
+  const [slowRuntimeOverlayMessage, setSlowRuntimeOverlayMessage] = useState('Please wait...')
+  const adminSearchRequestRef = useRef(0)
+  const adminSearchTimeoutRef = useRef(null)
+  const slowRuntimeOperationCountRef = useRef(0)
+  const slowRuntimeRevealTimerRef = useRef(null)
+  const slowRuntimeHideTimerRef = useRef(null)
+  const slowRuntimeMinVisibleUntilRef = useRef(0)
+  const slowRuntimeVisibleRef = useRef(false)
+  const slowRuntimeMessageRef = useRef('Please wait...')
+  const liveAdminSearchSnapshot = useMemo(
+    () => readAdminSearchSnapshot(),
+    [searchIndexRevision],
+  )
+  const adminSearchEntries = useMemo(() => ([
+    { id: 'search-admin-dashboard', label: 'Admin Dashboard', description: 'Overview and key admin metrics', pageId: 'admin-dashboard', keywords: ['dashboard', 'overview', 'metrics'] },
+    { id: 'search-admin-clients', label: 'Client Management', description: 'Manage client accounts', pageId: 'admin-clients', keywords: ['clients', 'accounts', 'businesses'] },
+    { id: 'search-admin-documents', label: 'Document Review Center', description: 'Approve, reject, and request information', pageId: 'admin-documents', keywords: ['documents', 'review', 'approve', 'reject', 'pending'] },
+    { id: 'search-admin-communications', label: 'Communications Center', description: 'Conversation and communication tools', pageId: 'admin-communications', keywords: ['communications', 'messages', 'broadcast'] },
+    { id: 'search-admin-notifications', label: 'Send Notification', description: 'Send bulk or targeted notifications', pageId: 'admin-notifications', keywords: ['notification', 'bulk', 'targeted', 'send'] },
+    { id: 'search-admin-activity', label: 'Activity Log', description: 'System activity audit trail', pageId: 'admin-activity', keywords: ['activity', 'audit', 'logs'] },
+    { id: 'search-admin-settings', label: 'Admin Settings', description: 'Manage roles, permissions, and system controls', pageId: 'admin-settings', keywords: ['settings', 'admin', 'permissions', 'roles'] },
+    ...liveAdminSearchSnapshot.clients.map((client) => ({
+      id: `search-client-${client.id}`,
+      label: client.businessName || client.fullName || 'Client Account',
+      description: `Client / ${client.email || '--'}`,
+      pageId: 'admin-clients',
+      keywords: [client.fullName, client.country, client.status, 'client', 'account'],
+    })),
+    ...liveAdminSearchSnapshot.documents.map((document) => ({
+      id: `search-document-${document.id}`,
+      label: document.filename,
+      description: `Document / ${document.category || 'General'}`,
+      pageId: 'admin-documents',
+      keywords: [document.fileId, document.folderName, document.status, document.user, 'document', 'review'],
+    })),
+    ...liveAdminSearchSnapshot.activityLogs.map((log) => ({
+      id: `search-activity-${log.id}`,
+      label: log.action,
+      description: 'Activity Log',
+      pageId: 'admin-activity',
+      keywords: [log.affectedUser, log.details, log.timestamp, 'activity', 'audit'],
+    })),
+    ...adminNotifications.map((notification, index) => ({
+      id: `search-admin-notification-${notification.id || index}`,
+      label: notification.message || `Notification ${index + 1}`,
+      description: 'Notification item',
+      pageId: 'admin-dashboard',
+      keywords: [notification.type, notification.timestamp, 'notification'],
+    })),
+  ].map((entry) => {
+    const label = String(entry.label || '').trim()
+    const description = String(entry.description || '').trim()
+    const keywords = Array.isArray(entry.keywords) ? entry.keywords : []
+    return {
+      id: entry.id,
+      label,
+      description,
+      pageId: entry.pageId,
+      searchText: [label, description, ...keywords]
+        .map((value) => String(value || '').toLowerCase())
+        .join(' '),
+    }
+  })), [adminNotifications, liveAdminSearchSnapshot])
+  const adminSearchSuggestions = useMemo(() => (
+    buildKeywordSuggestions([
+      ...adminSearchEntries.flatMap((entry) => [entry.label, entry.description, entry.searchText]),
+    ], 24)
+  ), [adminSearchEntries])
 
   const handleMarkNotificationRead = (notificationId) => {
     setAdminNotifications((prev) => prev.map((notification) => (
@@ -59,10 +238,192 @@ function AdminWorkspace({
     )))
   }
 
+  const handleMarkAllNotificationsRead = () => {
+    setAdminNotifications((prev) => prev.map((notification) => ({ ...notification, read: true })))
+  }
+
+  const beginSlowRuntimeWatch = (message = 'Please wait...') => {
+    const resolvedMessage = String(message || '').trim() || 'Please wait...'
+    slowRuntimeMessageRef.current = resolvedMessage
+    setSlowRuntimeOverlayMessage(resolvedMessage)
+
+    slowRuntimeOperationCountRef.current += 1
+    if (slowRuntimeHideTimerRef.current) {
+      window.clearTimeout(slowRuntimeHideTimerRef.current)
+      slowRuntimeHideTimerRef.current = null
+    }
+
+    if (!slowRuntimeVisibleRef.current && !slowRuntimeRevealTimerRef.current) {
+      const revealDelayMs = getNetworkAwareDurationMs('slow-threshold')
+      slowRuntimeRevealTimerRef.current = window.setTimeout(() => {
+        slowRuntimeRevealTimerRef.current = null
+        if (slowRuntimeOperationCountRef.current <= 0) return
+        slowRuntimeMinVisibleUntilRef.current = Date.now() + getNetworkAwareDurationMs('runtime-min-visible')
+        setSlowRuntimeOverlayMessage(slowRuntimeMessageRef.current)
+        setIsSlowRuntimeOverlayVisible(true)
+      }, revealDelayMs)
+    }
+
+    return () => {
+      slowRuntimeOperationCountRef.current = Math.max(0, slowRuntimeOperationCountRef.current - 1)
+      if (slowRuntimeOperationCountRef.current > 0) return
+
+      if (slowRuntimeRevealTimerRef.current) {
+        window.clearTimeout(slowRuntimeRevealTimerRef.current)
+        slowRuntimeRevealTimerRef.current = null
+      }
+
+      const hideOverlay = () => {
+        slowRuntimeMinVisibleUntilRef.current = 0
+        setIsSlowRuntimeOverlayVisible(false)
+      }
+
+      if (!slowRuntimeVisibleRef.current) {
+        hideOverlay()
+        return
+      }
+
+      const remainingVisibleMs = slowRuntimeMinVisibleUntilRef.current - Date.now()
+      if (remainingVisibleMs <= 0) {
+        hideOverlay()
+        return
+      }
+
+      slowRuntimeHideTimerRef.current = window.setTimeout(() => {
+        slowRuntimeHideTimerRef.current = null
+        hideOverlay()
+      }, remainingVisibleMs)
+    }
+  }
+
+  const runWithSlowRuntimeWatch = async (work, message = 'Please wait...') => {
+    const stopWatching = beginSlowRuntimeWatch(message)
+    try {
+      return await work()
+    } finally {
+      stopWatching()
+    }
+  }
+
+  const dismissAdminSearchFeedback = () => {
+    if (adminSearchTimeoutRef.current) {
+      window.clearTimeout(adminSearchTimeoutRef.current)
+      adminSearchTimeoutRef.current = null
+    }
+    setAdminSearchState('idle')
+    setAdminSearchResults([])
+  }
+
+  const handleAdminSearchTermChange = (value = '') => {
+    setAdminSearchTerm(String(value || ''))
+    dismissAdminSearchFeedback()
+  }
+
+  const handleAdminSearchSubmit = (value = adminSearchTerm) => {
+    const nextTerm = String(value || '')
+    const normalizedQuery = nextTerm.trim().toLowerCase()
+    setAdminSearchTerm(nextTerm)
+
+    if (!normalizedQuery) {
+      dismissAdminSearchFeedback()
+      return
+    }
+
+    if (adminSearchTimeoutRef.current) {
+      window.clearTimeout(adminSearchTimeoutRef.current)
+      adminSearchTimeoutRef.current = null
+    }
+
+    const requestId = adminSearchRequestRef.current + 1
+    adminSearchRequestRef.current = requestId
+    setAdminSearchState('loading')
+    setAdminSearchResults([])
+
+    adminSearchTimeoutRef.current = window.setTimeout(() => {
+      if (adminSearchRequestRef.current !== requestId) return
+
+      const queryTokens = normalizedQuery.split(/\s+/).filter(Boolean)
+      const matches = adminSearchEntries
+        .map((entry) => {
+          const label = entry.label.toLowerCase()
+          const matchesAllTokens = queryTokens.every((token) => entry.searchText.includes(token))
+          if (!matchesAllTokens) return null
+
+          let score = 0
+          if (label === normalizedQuery) score += 220
+          if (label.startsWith(normalizedQuery)) score += 140
+          if (label.includes(normalizedQuery)) score += 80
+          queryTokens.forEach((token) => {
+            if (label.startsWith(token)) score += 24
+            else if (label.includes(token)) score += 10
+          })
+
+          return {
+            ...entry,
+            score,
+          }
+        })
+        .filter(Boolean)
+        .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label))
+        .slice(0, 8)
+        .map(({ score, ...entry }) => entry)
+
+      if (matches.length === 0) {
+        setAdminSearchResults([])
+        setAdminSearchState('empty')
+        return
+      }
+
+      setAdminSearchResults(matches)
+      setAdminSearchState('ready')
+    }, getNetworkAwareDurationMs('search'))
+  }
+
+  const handleAdminSearchResultSelect = (result) => {
+    if (!result || typeof result !== 'object') return
+    dismissAdminSearchFeedback()
+    setAdminSearchTerm(String(result.label || '').trim())
+    setIsMobileSidebarOpen(false)
+    setActivePage(result.pageId || ADMIN_DEFAULT_PAGE)
+  }
+
   const openClientContext = (client) => {
     if (!client) return
     setSelectedClientContext(client)
   }
+
+  useEffect(() => {
+    slowRuntimeVisibleRef.current = isSlowRuntimeOverlayVisible
+  }, [isSlowRuntimeOverlayVisible])
+
+  useEffect(() => () => {
+    if (adminSearchTimeoutRef.current) {
+      window.clearTimeout(adminSearchTimeoutRef.current)
+      adminSearchTimeoutRef.current = null
+    }
+    if (slowRuntimeRevealTimerRef.current) {
+      window.clearTimeout(slowRuntimeRevealTimerRef.current)
+      slowRuntimeRevealTimerRef.current = null
+    }
+    if (slowRuntimeHideTimerRef.current) {
+      window.clearTimeout(slowRuntimeHideTimerRef.current)
+      slowRuntimeHideTimerRef.current = null
+    }
+    slowRuntimeOperationCountRef.current = 0
+    slowRuntimeMinVisibleUntilRef.current = 0
+    slowRuntimeVisibleRef.current = false
+  }, [])
+
+  useEffect(() => {
+    const refreshSearchSnapshot = () => setSearchIndexRevision((value) => value + 1)
+    refreshSearchSnapshot()
+    window.addEventListener('storage', refreshSearchSnapshot)
+    const intervalId = window.setInterval(refreshSearchSnapshot, 4000)
+    return () => {
+      window.removeEventListener('storage', refreshSearchSnapshot)
+      window.clearInterval(intervalId)
+    }
+  }, [])
 
   const renderAdminPage = () => {
     if (!canAccessAdminPage(activePage, currentAdminAccount)) {
@@ -108,34 +469,71 @@ function AdminWorkspace({
       case 'admin-client-upload-history':
         return <AdminClientUploadHistoryPage client={selectedClientContext} setActivePage={setActivePage} showToast={showToast} />
       case 'admin-documents':
-        return <AdminDocumentReviewCenter showToast={showToast} currentAdminAccount={currentAdminAccount} />
+        return (
+          <AdminDocumentReviewCenter
+            showToast={showToast}
+            currentAdminAccount={currentAdminAccount}
+            runWithSlowRuntimeWatch={runWithSlowRuntimeWatch}
+          />
+        )
       case 'admin-communications':
         return <AdminCommunicationsCenter showToast={showToast} />
       case 'admin-notifications':
-        return <AdminSendNotificationPage showToast={showToast} />
+        return <AdminSendNotificationPage showToast={showToast} runWithSlowRuntimeWatch={runWithSlowRuntimeWatch} />
       case 'admin-activity':
         return <AdminActivityLogPage />
       case 'admin-settings':
-        return <AdminSettingsPage showToast={showToast} currentAdminAccount={currentAdminAccount} />
+        return (
+          <AdminSettingsPage
+            showToast={showToast}
+            currentAdminAccount={currentAdminAccount}
+            runWithSlowRuntimeWatch={runWithSlowRuntimeWatch}
+          />
+        )
       default:
         return <AdminDashboardPage setActivePage={setActivePage} />
     }
   }
 
   return (
-    <div className="flex min-h-screen w-screen bg-background">
-      <AdminSidebar activePage={activePage} setActivePage={setActivePage} onLogout={onLogout} currentAdminAccount={currentAdminAccount} />
+    <div className="flex min-h-screen w-full bg-background">
+      <AdminSidebar
+        activePage={activePage}
+        setActivePage={setActivePage}
+        onLogout={onLogout}
+        currentAdminAccount={currentAdminAccount}
+        isMobileOpen={isMobileSidebarOpen}
+        onCloseMobile={() => setIsMobileSidebarOpen(false)}
+      />
 
-      <div className="flex-1 flex flex-col ml-64">
+      <div className="flex-1 flex flex-col min-w-0 lg:ml-64">
         <AdminTopBar
           adminFirstName={adminFirstName}
           notifications={adminNotifications}
           onMarkNotificationRead={handleMarkNotificationRead}
+          onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
           currentAdminAccount={currentAdminAccount}
+          onOpenSidebar={() => setIsMobileSidebarOpen(true)}
+          searchTerm={adminSearchTerm}
+          onSearchTermChange={handleAdminSearchTermChange}
+          onSearchSubmit={handleAdminSearchSubmit}
+          searchSuggestions={adminSearchSuggestions}
+          searchState={adminSearchState}
+          searchResults={adminSearchResults}
+          onSearchResultSelect={handleAdminSearchResultSelect}
+          onSearchResultsDismiss={dismissAdminSearchFeedback}
         />
-        <main className="p-6 flex-1 overflow-auto">
+        <main className="p-4 sm:p-6 flex-1 overflow-auto">
           {renderAdminPage()}
         </main>
+        {isSlowRuntimeOverlayVisible && (
+          <div className="fixed inset-0 z-[225] bg-black/25 flex items-center justify-center p-6">
+            <div className="w-full max-w-lg rounded-2xl border border-border-light bg-white shadow-card px-6 py-10 text-center">
+              <DotLottiePreloader size={220} className="w-full justify-center" />
+              <p className="mt-3 text-sm font-medium text-text-primary">{slowRuntimeOverlayMessage}</p>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
