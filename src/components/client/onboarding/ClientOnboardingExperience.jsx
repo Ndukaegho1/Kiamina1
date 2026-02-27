@@ -25,7 +25,6 @@ import {
   Shield,
   CheckCircle,
   AlertCircle,
-  Loader2,
   UploadCloud,
   MapPin,
   Building,

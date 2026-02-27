@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
-import { CheckCircle, AlertCircle, X, Loader2, ShieldAlert, ArrowLeftRight } from 'lucide-react'
+import { CheckCircle, AlertCircle, X, ShieldAlert, ArrowLeftRight } from 'lucide-react'
 import {
   Sidebar as ClientSidebar,
   TopBar as ClientTopBar,
@@ -38,6 +38,8 @@ import {
 } from './data/client/mockData'
 import { getScopedStorageKey } from './utils/storage'
 import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
+import DotLottiePreloader from './components/common/DotLottiePreloader'
+import { getNetworkAwareDurationMs, isPageReloadNavigation } from './utils/networkRuntime'
 
 const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
@@ -103,18 +105,28 @@ const normalizeUser = (user) => {
 
 const getDefaultPageForRole = (role = 'client') => (role === 'admin' ? ADMIN_DEFAULT_PAGE : 'dashboard')
 
-const buildSearchSuggestions = (values = [], limit = 16) => {
+const buildKeywordSuggestions = (values = [], limit = 20) => {
   const seen = new Set()
-  const suggestions = []
+  const keywords = []
   ;(Array.isArray(values) ? values : []).forEach((value) => {
-    const normalized = String(value || '').trim()
-    if (!normalized) return
-    const key = normalized.toLowerCase()
-    if (seen.has(key)) return
-    seen.add(key)
-    suggestions.push(normalized)
+    String(value || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/i)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2)
+      .forEach((token) => {
+        if (seen.has(token)) return
+        seen.add(token)
+        keywords.push(token)
+      })
   })
-  return suggestions.slice(0, Math.max(1, limit))
+  return keywords.slice(0, Math.max(1, limit))
+}
+
+const getCategoryLabelFromPageId = (pageId = '') => {
+  if (pageId === 'sales') return 'Sales'
+  if (pageId === 'bank-statements') return 'Bank Statements'
+  return 'Expenses'
 }
 
 const getAdminSystemSettings = () => {
@@ -884,6 +896,7 @@ function App() {
   const [activePage, setActivePage] = useState(() => getDefaultPageForRole(initialAuthUser?.role))
   const [activeFolderRoute, setActiveFolderRoute] = useState(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [isLogoutConfirmOpen, setIsLogoutConfirmOpen] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [modalInitialCategory, setModalInitialCategory] = useState('expenses')
@@ -907,6 +920,22 @@ function App() {
   
   const [userNotifications, setUserNotifications] = useState([])
   const [dashboardSearchTerm, setDashboardSearchTerm] = useState('')
+  const [dashboardSearchResults, setDashboardSearchResults] = useState([])
+  const [dashboardSearchState, setDashboardSearchState] = useState('idle')
+  const [isDashboardBootstrapLoading, setIsDashboardBootstrapLoading] = useState(
+    () => Boolean(initialAuthUser && isPageReloadNavigation()),
+  )
+  const [isSlowRuntimeOverlayVisible, setIsSlowRuntimeOverlayVisible] = useState(false)
+  const [slowRuntimeOverlayMessage, setSlowRuntimeOverlayMessage] = useState('Please wait...')
+  const dashboardSearchRequestRef = useRef(0)
+  const dashboardSearchTimeoutRef = useRef(null)
+  const dashboardBootstrapTimerRef = useRef(null)
+  const slowRuntimeRevealTimerRef = useRef(null)
+  const slowRuntimeHideTimerRef = useRef(null)
+  const slowRuntimeOperationCountRef = useRef(0)
+  const slowRuntimeMinVisibleUntilRef = useRef(0)
+  const slowRuntimeMessageRef = useRef('Please wait...')
+  const slowRuntimeVisibleRef = useRef(false)
   
   const currentUserRole = normalizeRole(authUser?.role, authUser?.email || '')
   const isAdminView = currentUserRole === 'admin'
@@ -915,49 +944,134 @@ function App() {
     ...flattenFolderFilesForDashboard(salesDocuments, 'sales'),
     ...flattenFolderFilesForDashboard(bankStatementDocuments, 'bank-statements'),
   ]), [expenseDocuments, salesDocuments, bankStatementDocuments])
-  const dashboardSearchSuggestions = useMemo(() => {
-    const getFolderSearchValues = (rows = []) => (
-      (Array.isArray(rows) ? rows : [])
+  const dashboardSearchEntries = useMemo(() => {
+    const entries = []
+    const seen = new Set()
+    const pushEntry = ({
+      id,
+      label,
+      description = '',
+      keywords = [],
+      pageId = 'dashboard',
+      categoryId = '',
+      folderId = '',
+    }) => {
+      const normalizedLabel = String(label || '').trim()
+      if (!normalizedLabel) return
+      const normalizedDescription = String(description || '').trim()
+      const normalizedCategoryId = String(categoryId || '').trim()
+      const normalizedFolderId = String(folderId || '').trim()
+      const dedupeKey = String(id || `${pageId}:${normalizedCategoryId}:${normalizedFolderId}:${normalizedLabel}`).toLowerCase()
+      if (seen.has(dedupeKey)) return
+      seen.add(dedupeKey)
+      const searchValues = [
+        normalizedLabel,
+        normalizedDescription,
+        ...(Array.isArray(keywords) ? keywords : []),
+      ]
+      entries.push({
+        id: dedupeKey,
+        label: normalizedLabel,
+        description: normalizedDescription,
+        pageId: APP_PAGE_IDS.includes(pageId) ? pageId : 'dashboard',
+        categoryId: normalizedCategoryId,
+        folderId: normalizedFolderId,
+        searchText: searchValues
+          .map((value) => String(value || '').trim().toLowerCase())
+          .filter(Boolean)
+          .join(' '),
+      })
+    }
+
+    const appendFolderEntries = (rows = [], categoryId = 'expenses') => {
+      const categoryLabel = getCategoryLabelFromPageId(categoryId)
+      ;(Array.isArray(rows) ? rows : [])
         .filter((row) => row?.isFolder)
-        .flatMap((folder) => [folder.folderName, folder.id, folder.user])
-    )
-    const recordValues = dashboardRecords.flatMap((record) => ([
-      record.filename,
-      record.fileId,
-      record.folderName,
-      record.folderId,
-      record.category,
-      record.class,
-      record.status,
-      record.extension || record.type,
-      record.user,
-    ]))
-    const uploadHistoryValues = (Array.isArray(uploadHistoryRecords) ? uploadHistoryRecords : []).flatMap((item) => ([
-      item?.filename,
-      item?.fileId,
-      item?.category,
-      item?.type,
-      item?.user,
-    ]))
-    const activityValues = (Array.isArray(clientActivityRecords) ? clientActivityRecords : []).flatMap((item) => ([
-      item?.action,
-      item?.details,
-      item?.actorName,
-      item?.actorRole,
-    ]))
-    return buildSearchSuggestions([
-      ...recordValues,
-      ...getFolderSearchValues(expenseDocuments),
-      ...getFolderSearchValues(salesDocuments),
-      ...getFolderSearchValues(bankStatementDocuments),
-      ...uploadHistoryValues,
-      ...activityValues,
-      'Expenses',
-      'Sales',
-      'Bank Statements',
-      'Upload History',
-      'Recent Activities',
-    ], 24)
+        .forEach((folder) => {
+          pushEntry({
+            id: `folder-${categoryId}-${folder.id || folder.folderName || ''}`,
+            label: folder.folderName || folder.id || `${categoryLabel} Folder`,
+            description: `${categoryLabel} folder`,
+            keywords: [folder.id, folder.user, categoryLabel, 'folder'],
+            pageId: categoryId,
+            categoryId,
+            folderId: folder.id || '',
+          })
+        })
+    }
+
+    appendFolderEntries(expenseDocuments, 'expenses')
+    appendFolderEntries(salesDocuments, 'sales')
+    appendFolderEntries(bankStatementDocuments, 'bank-statements')
+
+    dashboardRecords.forEach((record, index) => {
+      const categoryId = record.categoryId || resolveCategoryIdFromHistoryLabel(record.category || '')
+      const categoryLabel = getCategoryLabelFromPageId(categoryId)
+      pushEntry({
+        id: `file-${categoryId}-${record.fileId || record.id || index}`,
+        label: record.filename || record.fileId || `Document ${index + 1}`,
+        description: `${categoryLabel}${record.folderName ? ` / ${record.folderName}` : ''}`,
+        keywords: [
+          record.fileId,
+          record.folderName,
+          record.folderId,
+          record.category,
+          record.class,
+          record.status,
+          record.extension || record.type,
+          record.user,
+          categoryLabel,
+          'file',
+        ],
+        pageId: categoryId,
+        categoryId,
+        folderId: record.folderId || '',
+      })
+    })
+
+    ;(Array.isArray(uploadHistoryRecords) ? uploadHistoryRecords : []).forEach((item, index) => {
+      if (!item || item.isFolder) return
+      const categoryId = item.categoryId || resolveCategoryIdFromHistoryLabel(item.category || '')
+      const categoryLabel = getCategoryLabelFromPageId(categoryId)
+      const shouldOpenFolder = Boolean(categoryId && item.folderId)
+      pushEntry({
+        id: `upload-${item.id || `${categoryId}-${index}`}`,
+        label: item.filename || item.fileId || `Upload ${index + 1}`,
+        description: shouldOpenFolder ? `Upload History / ${categoryLabel}` : 'Upload History',
+        keywords: [
+          item.fileId,
+          item.category,
+          item.type,
+          item.status,
+          item.user,
+          categoryLabel,
+          'upload',
+          'history',
+        ],
+        pageId: shouldOpenFolder ? categoryId : 'upload-history',
+        categoryId: shouldOpenFolder ? categoryId : '',
+        folderId: shouldOpenFolder ? item.folderId : '',
+      })
+    })
+
+    ;(Array.isArray(clientActivityRecords) ? clientActivityRecords : []).forEach((item, index) => {
+      pushEntry({
+        id: `activity-${item.id || index}`,
+        label: item.action || item.details || `Activity ${index + 1}`,
+        description: 'Recent Activities',
+        keywords: [
+          item.details,
+          item.actorName,
+          item.actorRole,
+          item.timestamp,
+          'activity',
+          'recent',
+        ],
+        pageId: 'recent-activities',
+      })
+    })
+
+    return entries
   }, [
     dashboardRecords,
     expenseDocuments,
@@ -966,6 +1080,21 @@ function App() {
     uploadHistoryRecords,
     clientActivityRecords,
   ])
+  const dashboardSearchSuggestions = useMemo(() => {
+    return buildKeywordSuggestions([
+      ...dashboardSearchEntries.flatMap((entry) => [entry.label, entry.description, entry.searchText]),
+      'Expenses',
+      'Sales',
+      'Bank Statements',
+      'Upload History',
+      'Recent Activities',
+      'Folders',
+      'Files',
+      'Approved',
+      'Rejected',
+      'Pending',
+    ], 26)
+  }, [dashboardSearchEntries])
   const previousDashboardFilesRef = useRef(null)
 
   const isImpersonatingClient = Boolean(
@@ -1154,6 +1283,7 @@ function App() {
     touchImpersonationActivity()
     setActivePage(page)
     setActiveFolderRoute(null)
+    setIsMobileSidebarOpen(false)
     const path = page === 'dashboard' ? '/dashboard' : `/${page}`
     try {
       if (replace) history.replaceState({}, '', path)
@@ -1168,6 +1298,7 @@ function App() {
     touchImpersonationActivity()
     setActivePage(category)
     setActiveFolderRoute({ category, folderId })
+    setIsMobileSidebarOpen(false)
     const encodedId = encodeURIComponent(folderId)
     const path = `/${category}/folder/${encodedId}`
     try {
@@ -1176,6 +1307,161 @@ function App() {
     } catch {
       // ignore
     }
+  }
+
+  const beginSlowRuntimeWatch = (message = 'Please wait...') => {
+    const resolvedMessage = String(message || '').trim() || 'Please wait...'
+    slowRuntimeMessageRef.current = resolvedMessage
+    setSlowRuntimeOverlayMessage(resolvedMessage)
+
+    slowRuntimeOperationCountRef.current += 1
+    if (slowRuntimeHideTimerRef.current) {
+      window.clearTimeout(slowRuntimeHideTimerRef.current)
+      slowRuntimeHideTimerRef.current = null
+    }
+
+    if (!slowRuntimeVisibleRef.current && !slowRuntimeRevealTimerRef.current) {
+      const revealDelayMs = getNetworkAwareDurationMs('slow-threshold')
+      slowRuntimeRevealTimerRef.current = window.setTimeout(() => {
+        slowRuntimeRevealTimerRef.current = null
+        if (slowRuntimeOperationCountRef.current <= 0) return
+        slowRuntimeMinVisibleUntilRef.current = Date.now() + getNetworkAwareDurationMs('runtime-min-visible')
+        setSlowRuntimeOverlayMessage(slowRuntimeMessageRef.current)
+        setIsSlowRuntimeOverlayVisible(true)
+      }, revealDelayMs)
+    }
+
+    return () => {
+      slowRuntimeOperationCountRef.current = Math.max(0, slowRuntimeOperationCountRef.current - 1)
+      if (slowRuntimeOperationCountRef.current > 0) return
+
+      if (slowRuntimeRevealTimerRef.current) {
+        window.clearTimeout(slowRuntimeRevealTimerRef.current)
+        slowRuntimeRevealTimerRef.current = null
+      }
+
+      const hideOverlay = () => {
+        slowRuntimeMinVisibleUntilRef.current = 0
+        setIsSlowRuntimeOverlayVisible(false)
+      }
+
+      if (!slowRuntimeVisibleRef.current) {
+        hideOverlay()
+        return
+      }
+
+      const remainingVisibleMs = slowRuntimeMinVisibleUntilRef.current - Date.now()
+      if (remainingVisibleMs <= 0) {
+        hideOverlay()
+        return
+      }
+
+      slowRuntimeHideTimerRef.current = window.setTimeout(() => {
+        slowRuntimeHideTimerRef.current = null
+        hideOverlay()
+      }, remainingVisibleMs)
+    }
+  }
+
+  const runWithSlowRuntimeWatch = async (work, message = 'Please wait...') => {
+    const stopWatching = beginSlowRuntimeWatch(message)
+    try {
+      return await work()
+    } finally {
+      stopWatching()
+    }
+  }
+
+  const dismissDashboardSearchFeedback = () => {
+    if (dashboardSearchTimeoutRef.current) {
+      window.clearTimeout(dashboardSearchTimeoutRef.current)
+      dashboardSearchTimeoutRef.current = null
+    }
+    setDashboardSearchState('idle')
+    setDashboardSearchResults([])
+  }
+
+  const handleDashboardSearchTermChange = (value = '') => {
+    setDashboardSearchTerm(String(value || ''))
+    dismissDashboardSearchFeedback()
+  }
+
+  const handleDashboardSearchSubmit = (value = dashboardSearchTerm) => {
+    const nextTerm = String(value || '')
+    const normalizedQuery = nextTerm.trim().toLowerCase()
+    setDashboardSearchTerm(nextTerm)
+
+    if (!normalizedQuery) {
+      dismissDashboardSearchFeedback()
+      return
+    }
+
+    if (dashboardSearchTimeoutRef.current) {
+      window.clearTimeout(dashboardSearchTimeoutRef.current)
+      dashboardSearchTimeoutRef.current = null
+    }
+
+    const requestId = dashboardSearchRequestRef.current + 1
+    dashboardSearchRequestRef.current = requestId
+    setDashboardSearchState('loading')
+    setDashboardSearchResults([])
+    const searchDelayMs = getNetworkAwareDurationMs('search')
+
+    dashboardSearchTimeoutRef.current = window.setTimeout(() => {
+      if (dashboardSearchRequestRef.current !== requestId) return
+
+      const queryTokens = normalizedQuery.split(/\s+/).filter(Boolean)
+      const matches = dashboardSearchEntries
+        .map((entry) => {
+          const label = entry.label.toLowerCase()
+          const matchesAllTokens = queryTokens.every((token) => entry.searchText.includes(token))
+          if (!matchesAllTokens) return null
+
+          let score = 0
+          if (label === normalizedQuery) score += 260
+          if (label.startsWith(normalizedQuery)) score += 160
+          if (label.includes(normalizedQuery)) score += 90
+          queryTokens.forEach((token) => {
+            if (label.startsWith(token)) score += 30
+            else if (label.includes(token)) score += 12
+          })
+          score -= Math.min(36, Math.floor(label.length / 5))
+          return {
+            ...entry,
+            score,
+          }
+        })
+        .filter(Boolean)
+        .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label))
+        .slice(0, 8)
+        .map(({ score, ...entry }) => entry)
+
+      if (matches.length === 0) {
+        setDashboardSearchResults([])
+        setDashboardSearchState('empty')
+        return
+      }
+
+      setDashboardSearchResults(matches)
+      setDashboardSearchState('ready')
+    }, searchDelayMs)
+  }
+
+  const handleDashboardSearchResultSelect = (result) => {
+    if (!result || typeof result !== 'object') return
+
+    dismissDashboardSearchFeedback()
+    setDashboardSearchTerm(String(result.label || dashboardSearchTerm || '').trim())
+
+    const categoryId = String(result.categoryId || '').trim()
+    const folderId = String(result.folderId || '').trim()
+    if (categoryId && folderId) {
+      handleOpenFolderRoute(categoryId, folderId)
+      return
+    }
+
+    const targetPage = APP_PAGE_IDS.includes(result.pageId) ? result.pageId : 'dashboard'
+    handleSetActivePage(targetPage)
   }
 
   const navigateToAuth = (mode = 'login', { replace = false } = {}) => {
@@ -1199,6 +1485,58 @@ function App() {
       else history.pushState({}, '', '/admin/login')
     } catch {}
   }
+
+  useEffect(() => {
+    slowRuntimeVisibleRef.current = isSlowRuntimeOverlayVisible
+  }, [isSlowRuntimeOverlayVisible])
+
+  useEffect(() => {
+    if (dashboardBootstrapTimerRef.current) {
+      window.clearTimeout(dashboardBootstrapTimerRef.current)
+      dashboardBootstrapTimerRef.current = null
+    }
+
+    const shouldShowBootstrapLoader = Boolean(
+      isAuthenticated
+      && !showAuth
+      && !showAdminLogin
+      && !adminSetupToken
+      && isPageReloadNavigation(),
+    )
+
+    if (!shouldShowBootstrapLoader) {
+      setIsDashboardBootstrapLoading(false)
+      return
+    }
+
+    setIsDashboardBootstrapLoading(true)
+    dashboardBootstrapTimerRef.current = window.setTimeout(() => {
+      dashboardBootstrapTimerRef.current = null
+      setIsDashboardBootstrapLoading(false)
+    }, getNetworkAwareDurationMs('dashboard-refresh'))
+  }, [isAuthenticated, showAuth, showAdminLogin, adminSetupToken])
+
+  useEffect(() => () => {
+    if (dashboardSearchTimeoutRef.current) {
+      window.clearTimeout(dashboardSearchTimeoutRef.current)
+      dashboardSearchTimeoutRef.current = null
+    }
+    if (dashboardBootstrapTimerRef.current) {
+      window.clearTimeout(dashboardBootstrapTimerRef.current)
+      dashboardBootstrapTimerRef.current = null
+    }
+    if (slowRuntimeRevealTimerRef.current) {
+      window.clearTimeout(slowRuntimeRevealTimerRef.current)
+      slowRuntimeRevealTimerRef.current = null
+    }
+    if (slowRuntimeHideTimerRef.current) {
+      window.clearTimeout(slowRuntimeHideTimerRef.current)
+      slowRuntimeHideTimerRef.current = null
+    }
+    slowRuntimeOperationCountRef.current = 0
+    slowRuntimeMinVisibleUntilRef.current = 0
+    slowRuntimeVisibleRef.current = false
+  }, [])
 
   useEffect(() => {
     ensureDefaultDevAdminAccount()
@@ -2328,6 +2666,7 @@ function App() {
       return { ok: false, message: 'Please upload at least one file.' }
     }
 
+    return runWithSlowRuntimeWatch(async () => {
     const categoryConfig = {
       expenses: { prefix: 'EXP', label: 'Expense', setter: setExpenseDocuments },
       sales: { prefix: 'SAL', label: 'Sales', setter: setSalesDocuments },
@@ -2513,6 +2852,7 @@ function App() {
     setIsModalOpen(false)
     showClientToast('success', 'Documents uploaded successfully.')
     return { ok: true }
+    }, 'Uploading files...')
   }
 
   const renderClientPage = () => {
@@ -2695,12 +3035,34 @@ function App() {
     && (isImpersonatingClient || !isAdminView)
     && !onboardingState.completed
     && !onboardingState.skipped
+  const shouldShowDashboardBootstrapLoader = Boolean(
+    isDashboardBootstrapLoading
+    && isAuthenticated
+    && !showAuth
+    && !showAdminLogin
+    && !adminSetupToken,
+  )
 
   return (
-    <div className="min-h-screen w-screen bg-background">
+    <div className="min-h-screen w-full bg-background">
+      {shouldShowDashboardBootstrapLoader && (
+        <div className="fixed inset-0 z-[230] bg-white/95 backdrop-blur-[1px] flex items-center justify-center p-6">
+          <div className="w-full max-w-lg rounded-2xl border border-border-light bg-white shadow-card px-6 py-10 text-center">
+            <DotLottiePreloader size={230} className="w-full justify-center" />
+          </div>
+        </div>
+      )}
+      {isSlowRuntimeOverlayVisible && (
+        <div className="fixed inset-0 z-[225] bg-black/25 flex items-center justify-center p-6">
+          <div className="w-full max-w-lg rounded-2xl border border-border-light bg-white shadow-card px-6 py-10 text-center">
+            <DotLottiePreloader size={220} className="w-full justify-center" />
+            <p className="mt-3 text-sm font-medium text-text-primary">{slowRuntimeOverlayMessage}</p>
+          </div>
+        </div>
+      )}
       {/* Toast Notification */}
       {toast && (
-        <div className={`fixed top-6 right-6 z-[200] rounded-lg shadow-lg p-4 flex items-center gap-3 min-w-[320px] ${toast.type === 'success' ? 'bg-success-bg border-l-4 border-success' : 'bg-error-bg border-l-4 border-error'}`}>
+        <div className={`fixed top-4 right-3 sm:top-6 sm:right-6 z-[200] rounded-lg shadow-lg p-4 flex items-center gap-3 min-w-[280px] max-w-[calc(100vw-1.5rem)] sm:max-w-[420px] ${toast.type === 'success' ? 'bg-success-bg border-l-4 border-success' : 'bg-error-bg border-l-4 border-error'}`}>
           {toast.type === 'success' ? (
             <CheckCircle className="w-5 h-5 text-success flex-shrink-0" />
           ) : (
@@ -2739,8 +3101,12 @@ function App() {
                 disabled={isLoggingOut}
                 className="h-9 px-4 bg-red-600 text-white rounded-md text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
               >
-                {isLoggingOut && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isLoggingOut ? 'Processing...' : 'Logout'}
+                {isLoggingOut ? (
+                  <>
+                    <DotLottiePreloader size={20} />
+                    <span>Processing...</span>
+                  </>
+                ) : 'Logout'}
               </button>
             </div>
           </div>
@@ -2856,13 +3222,13 @@ function App() {
         <>
           {isImpersonatingClient && (
             <div className="fixed top-0 left-0 right-0 z-[215] bg-error-bg border-b border-error/30">
-              <div className="h-12 px-4 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2 text-sm text-error">
+              <div className="min-h-12 px-3 sm:px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="hidden md:flex items-center gap-2 text-sm text-error">
                   <ShieldAlert className="w-4 h-4" />
                   <span className="font-medium">You are viewing this account as Admin.</span>
                   <span className="text-xs text-text-secondary">All actions are logged.</span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 md:ml-auto">
                   <button
                     type="button"
                     onClick={handleOverrideDocumentStatus}
@@ -2897,14 +3263,23 @@ function App() {
             </div>
           )}
 
-          <div className={`flex min-h-screen w-screen bg-background ${isImpersonatingClient ? 'pt-12' : ''}`}>
-            <ClientSidebar activePage={activePage} setActivePage={handleSetActivePage} companyLogo={companyLogo} companyName={companyName} onLogout={handleLogout} />
+          <div className={`flex min-h-screen w-full bg-background ${isImpersonatingClient ? 'pt-16 md:pt-12' : ''}`}>
+            <ClientSidebar
+              activePage={activePage}
+              setActivePage={handleSetActivePage}
+              companyLogo={companyLogo}
+              companyName={companyName}
+              onLogout={handleLogout}
+              isMobileOpen={isMobileSidebarOpen}
+              onCloseMobile={() => setIsMobileSidebarOpen(false)}
+            />
 
-            <div className="flex-1 flex flex-col ml-64">
+            <div className="flex-1 flex flex-col min-w-0 lg:ml-64">
               <ClientTopBar
                 profilePhoto={isImpersonatingClient ? null : profilePhoto}
                 clientFirstName={clientFirstName}
                 notifications={userNotifications}
+                onOpenSidebar={() => setIsMobileSidebarOpen(true)}
                 onOpenProfile={() => handleSetActivePage('settings')}
                 onNotificationClick={(notification) => {
                   setUserNotifications((prev) => prev.map((item) => (
@@ -2925,11 +3300,16 @@ function App() {
                 roleLabel={isImpersonatingClient ? 'Client (Admin View)' : 'Client'}
                 forceClientIcon={isImpersonatingClient}
                 searchTerm={dashboardSearchTerm}
-                onSearchTermChange={setDashboardSearchTerm}
+                onSearchTermChange={handleDashboardSearchTermChange}
+                onSearchSubmit={handleDashboardSearchSubmit}
                 searchPlaceholder="Search folders, files, upload history, and activities..."
                 searchSuggestions={dashboardSearchSuggestions}
+                searchState={dashboardSearchState}
+                searchResults={dashboardSearchResults}
+                onSearchResultSelect={handleDashboardSearchResultSelect}
+                onSearchResultsDismiss={dismissDashboardSearchFeedback}
               />
-              <main className="p-6 flex-1 overflow-auto">
+              <main className="p-4 sm:p-6 flex-1 overflow-auto">
                 {renderClientPage()}
               </main>
             </div>

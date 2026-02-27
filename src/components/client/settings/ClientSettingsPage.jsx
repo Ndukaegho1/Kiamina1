@@ -25,7 +25,6 @@ import {
   Shield,
   CheckCircle,
   AlertCircle,
-  Loader2,
   UploadCloud,
   MapPin,
   Building,
@@ -476,7 +475,7 @@ function SettingsPage({
 
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">User Profile</h3>
                 <p className="text-sm text-text-muted">Manage your personal information</p>
@@ -492,7 +491,7 @@ function SettingsPage({
               </button>
             </div>
 
-            <div className="flex items-center gap-6">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-6">
               <div className="w-20 h-20 rounded-full flex items-center justify-center text-white text-2xl font-semibold overflow-hidden bg-primary">
                 {photoFile ? (
                   <img src={photoFile} alt="Profile" className="w-full h-full object-cover" />
@@ -517,7 +516,7 @@ function SettingsPage({
             </div>
 
             {!isProfileEditMode ? (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {renderReadonlyField('Full Name', formData.fullName, true)}
                 {renderReadonlyField('Email Address', formData.email, true)}
                 {renderReadonlyField('Phone Number', formData.phone, true)}
@@ -525,7 +524,7 @@ function SettingsPage({
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {fullNameLocked ? (
                     renderLockedField('fullName', 'Full Name', true)
                   ) : (
@@ -604,7 +603,7 @@ function SettingsPage({
       case 'notifications':
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Notification Settings</h3>
                 <p className="text-sm text-text-muted">Configure how you receive updates</p>
@@ -660,13 +659,13 @@ function SettingsPage({
         const isIdentityEditMode = editMode['identity']
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Identity Verification</h3>
                 <p className="text-sm text-text-muted">Verify your identity to comply with regulations</p>
                 <p className="text-xs text-text-muted mt-1">Fields marked with <span className="text-error">*</span> are mandatory.</p>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3">
                 <span className="inline-flex items-center h-7 px-3 rounded-full text-xs font-medium bg-warning-bg text-warning">
                   Pending Verification
                 </span>
@@ -744,7 +743,7 @@ function SettingsPage({
 
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Business Profile</h3>
                 <p className="text-sm text-text-muted">Manage your business information</p>
@@ -769,7 +768,7 @@ function SettingsPage({
                   </div>
                   <div className="mt-1 text-sm font-medium text-text-primary">CRI-2026-78234</div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {renderReadonlyField('Business Type', formData.businessType, true)}
                   {(formData.businessType === 'Business' || formData.businessType === 'Non-Profit') && renderReadonlyField(
                     ((formData.country || '').trim().toLowerCase() === 'nigeria' || !formData.country) ? 'CAC Registration Number' : 'Business Registration Number',
@@ -816,7 +815,7 @@ function SettingsPage({
                   </button>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {businessTypeLocked ? (
                     renderLockedField('businessType', 'Business Type', true)
                   ) : (
@@ -996,7 +995,7 @@ function SettingsPage({
         const tinLocked = isFieldLocked('tin')
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Tax Details</h3>
                 <p className="text-sm text-text-muted">Configure your tax reporting preferences</p>
@@ -1013,14 +1012,14 @@ function SettingsPage({
             </div>
 
             {!isTaxEditMode ? (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {renderReadonlyField('TIN (Tax Identification Number)', formData.tin, true)}
                 {renderReadonlyField('Reporting Cycle', formData.reportingCycle, true)}
                 {renderReadonlyField('Start Month', formData.startMonth, true)}
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {tinLocked ? (
                     renderLockedField('tin', 'TIN (Tax Identification Number)', true)
                   ) : (
@@ -1090,7 +1089,7 @@ function SettingsPage({
         const isAddressEditMode = editMode['registered-address']
         return (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Registered Address</h3>
                 <p className="text-sm text-text-muted">Your official business address</p>
@@ -1107,7 +1106,7 @@ function SettingsPage({
             </div>
 
             {!isAddressEditMode ? (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="col-span-2">{renderReadonlyField('Address Line 1', formData.address1, true)}</div>
                 <div className="col-span-2">{renderReadonlyField('Address Line 2', formData.address2, false)}</div>
                 {renderReadonlyField('City/Town', formData.city, true)}
@@ -1116,7 +1115,7 @@ function SettingsPage({
               </div>
             ) : (
               <>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="col-span-2">
                     <label className="block text-sm font-medium text-text-primary mb-1.5">Address Line 1 <span className="text-error">*</span></label>
                     <input
@@ -1200,9 +1199,9 @@ function SettingsPage({
         <h1 className="text-2xl font-semibold text-text-primary">Business Settings</h1>
       </div>
 
-      <div className="flex gap-6">
+      <div className="flex flex-col lg:flex-row gap-4 lg:gap-6">
         {/* Left Navigation */}
-        <div className="w-64 flex-shrink-0">
+        <div className="w-full lg:w-64 flex-shrink-0">
           <div className="bg-white rounded-lg shadow-card p-4">
             <div className="space-y-1">
               {navItems.map((item) => (
@@ -1241,8 +1240,8 @@ function SettingsPage({
         </div>
 
         {/* Right Content */}
-        <div className="flex-1">
-          <div className="bg-white rounded-lg shadow-card p-6">
+        <div className="flex-1 min-w-0">
+          <div className="bg-white rounded-lg shadow-card p-4 sm:p-6">
             {renderSection()}
           </div>
         </div>
@@ -1251,5 +1250,6 @@ function SettingsPage({
   )
 }
 export default SettingsPage
+
 
 

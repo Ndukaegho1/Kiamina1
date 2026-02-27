@@ -359,7 +359,7 @@ function FolderDetailsModal({ folder, onClose }) {
               {folder?.id}
             </p>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <p className="text-xs uppercase tracking-wide text-text-muted">Date Created</p>
               <p className="text-text-primary mt-1">{date}</p>
@@ -1046,12 +1046,12 @@ function DocumentFoldersPage({
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <h1 className="text-2xl font-semibold text-text-primary">{title}</h1>
         <button
           onClick={() => onAddDocument(categoryId)}
           disabled={uploadDisabled}
-          className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed"
+          className="h-10 px-5 w-full sm:w-auto bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed"
         >
           Upload Documents
         </button>
@@ -1079,7 +1079,7 @@ function DocumentFoldersPage({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <div className="relative max-w-md flex-1 min-w-[240px]">
+          <div className="relative w-full sm:max-w-md flex-1 min-w-0 sm:min-w-[240px]">
             <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
@@ -1102,7 +1102,7 @@ function DocumentFoldersPage({
             value={dateFrom}
             max={maxFilterDate}
             onChange={(event) => setDateFrom(clampFilterDateToToday(event.target.value))}
-            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="From date"
           />
           <input
@@ -1110,7 +1110,7 @@ function DocumentFoldersPage({
             value={dateTo}
             max={maxFilterDate}
             onChange={(event) => setDateTo(clampFilterDateToToday(event.target.value))}
-            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
           {(searchTerm || dateFrom || dateTo) && (
@@ -1141,7 +1141,7 @@ function DocumentFoldersPage({
               : 'Create your first folder by uploading documents.'}
           </p>
           {activeTab === 'active' && (
-            <button onClick={() => onAddDocument(categoryId)} className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light">
+            <button onClick={() => onAddDocument(categoryId)} className="mt-4 h-10 px-5 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light">
               Upload
             </button>
           )}
@@ -1777,14 +1777,14 @@ function FolderFilesPage({
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
         <div>
           <h1 className="text-2xl font-semibold text-text-primary mt-1">{folder.folderName}</h1>
           <p className="text-xs text-text-muted mt-1 font-mono">
             {folder.id} | {folderMeta.date} {folderMeta.time}
           </p>
         </div>
-        <button type="button" onClick={onBack} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background">
+        <button type="button" onClick={onBack} className="h-9 px-4 w-full sm:w-auto border border-border rounded-md text-sm text-text-primary hover:bg-background">
           Back to Folders
         </button>
       </div>
@@ -1792,14 +1792,14 @@ function FolderFilesPage({
       <BreadcrumbNav items={breadcrumbs} />
 
       {isArchivedFolder && (
-        <div className="bg-warning-bg border border-warning rounded-md px-4 py-3 mb-4 flex items-center justify-between gap-3">
+        <div className="bg-warning-bg border border-warning rounded-md px-4 py-3 mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <p className="text-sm text-warning">
             This folder is archived. Files are read-only until the folder is restored.
           </p>
           <button
             type="button"
             onClick={restoreArchivedFolder}
-            className="h-8 px-3 rounded-md bg-[#153585] text-white text-xs font-medium hover:bg-primary-light"
+            className="h-8 px-3 w-full sm:w-auto rounded-md bg-[#153585] text-white text-xs font-medium hover:bg-primary-light"
           >
             Restore Folder
           </button>
@@ -1808,7 +1808,7 @@ function FolderFilesPage({
 
       <div className="bg-white rounded-lg border border-border shadow-card p-4 mb-4">
         <div className="flex flex-wrap items-center gap-3">
-          <div className="relative max-w-md flex-1 min-w-[240px]">
+          <div className="relative w-full sm:max-w-md flex-1 min-w-0 sm:min-w-[240px]">
             <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
@@ -1829,7 +1829,7 @@ function FolderFilesPage({
           <select
             value={statusFilter}
             onChange={(event) => setStatusFilter(event.target.value)}
-            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Statuses</option>
             {statusOptions.map((status) => (
@@ -1839,7 +1839,7 @@ function FolderFilesPage({
           <select
             value={typeFilter}
             onChange={(event) => setTypeFilter(event.target.value)}
-            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Types</option>
             {typeOptions.map((type) => (
@@ -1851,7 +1851,7 @@ function FolderFilesPage({
             value={dateFrom}
             max={maxFilterDate}
             onChange={(event) => setDateFrom(clampFilterDateToToday(event.target.value))}
-            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="From date"
           />
           <input
@@ -1859,7 +1859,7 @@ function FolderFilesPage({
             value={dateTo}
             max={maxFilterDate}
             onChange={(event) => setDateTo(clampFilterDateToToday(event.target.value))}
-            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
           {(searchTerm || statusFilter || typeFilter || dateFrom || dateTo) && (

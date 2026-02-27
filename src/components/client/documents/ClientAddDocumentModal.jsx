@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Building2, DollarSign, FileUp, FolderUp, Loader2, TrendingUp, X } from 'lucide-react'
+import { Building2, DollarSign, FileUp, FolderUp, TrendingUp, X } from 'lucide-react'
+import DotLottiePreloader from '../../common/DotLottiePreloader'
 
 const DEFAULT_CLASS_OPTIONS = [
   'Office Expense',
@@ -642,8 +643,12 @@ function AddDocumentModal({
               disabled={!canSubmit}
               className="h-10 px-5 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
             >
-              {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-              {isSubmitting ? 'Processing...' : 'Upload & Save'}
+              {isSubmitting ? (
+                <>
+                  <DotLottiePreloader size={18} />
+                  <span>Processing...</span>
+                </>
+              ) : 'Upload & Save'}
             </button>
           </div>
         </div>

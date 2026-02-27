@@ -9,6 +9,7 @@ import {
   LogOut,
   Search,
   Bell,
+  Menu,
   ChevronDown,
   Plus,
   Eye,
@@ -24,7 +25,6 @@ import {
   Shield,
   CheckCircle,
   AlertCircle,
-  Loader2,
   UploadCloud,
   Download,
   FolderOpen,
@@ -58,6 +58,7 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import KiaminaLogo from '../../common/KiaminaLogo'
 import { getCachedFileBlob } from '../../../utils/fileCache'
+import DotLottiePreloader from '../../common/DotLottiePreloader'
 
 ChartJS.register(
   CategoryScale,
@@ -383,7 +384,15 @@ const removeFileFromRecords = (records = [], target = {}) => {
 }
 
 // Sidebar Component
-function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout }) {
+function Sidebar({
+  activePage,
+  setActivePage,
+  companyLogo,
+  companyName,
+  onLogout,
+  isMobileOpen = false,
+  onCloseMobile,
+}) {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard Overview', icon: LayoutDashboard },
     { id: 'expenses', label: 'Expenses', icon: DollarSign },
@@ -398,17 +407,43 @@ function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout
     { id: 'settings', label: 'Settings', icon: Settings },
   ]
 
+  const handleNavSelect = (pageId) => {
+    setActivePage(pageId)
+    onCloseMobile?.()
+  }
+
   return (
-    <aside className="w-64 bg-white border-r border-border fixed left-0 top-0 h-screen flex flex-col z-50">
-      {/* Logo */}
-      <div className="p-4 border-b border-border-light">
+    <>
+      {isMobileOpen && (
         <button
           type="button"
-          onClick={() => setActivePage('dashboard')}
+          onClick={() => onCloseMobile?.()}
+          aria-label="Close navigation"
+          className="fixed inset-0 bg-black/35 z-40 lg:hidden"
+        />
+      )}
+      <aside
+        className={`w-64 bg-white border-r border-border fixed left-0 top-0 h-screen flex flex-col z-50 transform transition-transform duration-200 ease-out ${
+          isMobileOpen ? 'translate-x-0' : '-translate-x-full'
+        } lg:translate-x-0`}
+      >
+      {/* Logo */}
+      <div className="p-4 border-b border-border-light flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => handleNavSelect('dashboard')}
           className="inline-flex items-center"
           title="Go to Dashboard Overview"
         >
           <KiaminaLogo className="h-11 w-auto" />
+        </button>
+        <button
+          type="button"
+          onClick={() => onCloseMobile?.()}
+          className="w-8 h-8 rounded-md border border-border text-text-muted hover:text-text-primary hover:border-primary lg:hidden"
+          aria-label="Close menu"
+        >
+          <X className="w-4 h-4 mx-auto" />
         </button>
       </div>
 
@@ -434,7 +469,7 @@ function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout
         {navItems.map((item) => (
           <button
             key={item.id}
-            onClick={() => setActivePage(item.id)}
+            onClick={() => handleNavSelect(item.id)}
             className={("w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent'))}
           >
             <item.icon className="w-5 h-5" />
@@ -453,7 +488,7 @@ function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout
         {footerNavItems.map((item) => (
           <button
             key={item.id}
-            onClick={() => setActivePage(item.id)}
+            onClick={() => handleNavSelect(item.id)}
             className={("w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent'))}
           >
             <item.icon className="w-5 h-5" />
@@ -465,14 +500,18 @@ function Sidebar({ activePage, setActivePage, companyLogo, companyName, onLogout
       {/* Logout */}
       <div className="py-3 border-t border-border-light">
         <button
-          onClick={onLogout}
+          onClick={() => {
+            onCloseMobile?.()
+            onLogout()
+          }}
           className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-text-secondary hover:bg-background hover:text-text-primary transition-colors"
         >
           <LogOut className="w-5 h-5" />
           Logout
         </button>
       </div>
-    </aside>
+      </aside>
+    </>
   )
 }
 
@@ -484,6 +523,7 @@ function TopBar({
   onNotificationClick,
   onMarkAllRead,
   onOpenProfile,
+  onOpenSidebar,
   isImpersonationMode = false,
   roleLabel = 'Client',
   forceClientIcon = false,
@@ -491,16 +531,25 @@ function TopBar({
   onSearchTermChange,
   searchPlaceholder = '',
   searchSuggestions = [],
+  searchState = 'idle',
+  searchResults = [],
+  onSearchSubmit,
+  onSearchResultSelect,
+  onSearchResultsDismiss,
 }) {
   const displayName = clientFirstName?.trim() || 'Client'
   const fallbackInitial = displayName.charAt(0).toUpperCase() || 'C'
   const [showNotifications, setShowNotifications] = useState(false)
   const notificationRef = useRef(null)
+  const searchRef = useRef(null)
   const unreadCount = notifications.filter(n => !n.read).length
   const resolvedSearchTerm = String(searchTerm || '')
   const resolvedSearchPlaceholder = searchPlaceholder
     || (isImpersonationMode ? 'Search client data (admin view)...' : 'Search transactions, documents...')
   const resolvedSearchSuggestions = buildSearchSuggestions(searchSuggestions, 14)
+  const resolvedSearchState = String(searchState || 'idle')
+  const resolvedSearchResults = Array.isArray(searchResults) ? searchResults : []
+  const shouldShowSearchPanel = resolvedSearchState !== 'idle'
   const topBarSearchListId = 'client-dashboard-topbar-search-suggestions'
 
   useEffect(() => {
@@ -508,10 +557,13 @@ function TopBar({
       if (notificationRef.current && !notificationRef.current.contains(event.target)) {
         setShowNotifications(false)
       }
+      if (searchRef.current && !searchRef.current.contains(event.target)) {
+        onSearchResultsDismiss?.()
+      }
     }
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
+  }, [onSearchResultsDismiss])
 
   const handleNotificationClick = (notification) => {
     if (onNotificationClick) {
@@ -521,24 +573,72 @@ function TopBar({
   }
 
   return (
-    <header className="h-14 bg-white border-b border-border flex items-center justify-between px-6 sticky top-0 z-40">
-      <div className="flex items-center gap-4">
-        <div className="relative w-72">
+    <header className="h-14 bg-white border-b border-border flex items-center justify-between px-3 sm:px-4 lg:px-6 sticky top-0 z-40 gap-2">
+      <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
+        <button
+          type="button"
+          onClick={() => onOpenSidebar?.()}
+          className="w-9 h-9 border border-border rounded-md text-text-secondary hover:text-text-primary hover:border-primary lg:hidden inline-flex items-center justify-center flex-shrink-0"
+          aria-label="Open navigation"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+        <div className="relative w-full sm:max-w-[20rem] lg:max-w-[24rem]" ref={searchRef}>
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
           <input
             type="text"
             value={resolvedSearchTerm}
             onChange={(event) => onSearchTermChange?.(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                onSearchSubmit?.(resolvedSearchTerm)
+                return
+              }
+              if (event.key === 'Escape') {
+                onSearchResultsDismiss?.()
+              }
+            }}
             placeholder={resolvedSearchPlaceholder}
             list={resolvedSearchSuggestions.length > 0 ? topBarSearchListId : undefined}
-            className="w-full h-9 pl-10 pr-4 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary focus:bg-white transition-colors"
+            className="w-full h-9 pl-10 pr-10 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary focus:bg-white transition-colors"
           />
+          {resolvedSearchState === 'loading' && (
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+              <DotLottiePreloader size={18} />
+            </div>
+          )}
           {resolvedSearchSuggestions.length > 0 && (
             <datalist id={topBarSearchListId}>
               {resolvedSearchSuggestions.map((item) => (
                 <option key={item} value={item} />
               ))}
             </datalist>
+          )}
+          {shouldShowSearchPanel && (
+            <div className="absolute left-0 right-0 mt-1 bg-white border border-border rounded-md shadow-card z-[55] max-h-72 overflow-y-auto">
+              {resolvedSearchState === 'loading' ? (
+                <div className="px-3 py-3 text-sm text-text-secondary">
+                  <DotLottiePreloader size={22} label="Searching..." className="w-full justify-start" />
+                </div>
+              ) : resolvedSearchState === 'empty' ? (
+                <div className="px-3 py-3 text-sm text-text-muted">No item found</div>
+              ) : (
+                resolvedSearchResults.map((result) => (
+                  <button
+                    key={result.id || `${result.pageId || 'page'}-${result.label || ''}`}
+                    type="button"
+                    onClick={() => onSearchResultSelect?.(result)}
+                    className="w-full px-3 py-2.5 text-left hover:bg-background border-b last:border-b-0 border-border-light"
+                  >
+                    <p className="text-sm font-medium text-text-primary truncate">{result.label}</p>
+                    {result.description && (
+                      <p className="text-xs text-text-muted mt-0.5 truncate">{result.description}</p>
+                    )}
+                  </button>
+                ))
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -556,7 +656,7 @@ function TopBar({
           </button>
 
           {showNotifications && (
-            <div className="absolute right-0 mt-2 w-96 bg-white border border-border rounded-lg shadow-card z-50">
+            <div className="absolute right-0 mt-2 w-[min(24rem,calc(100vw-1rem))] bg-white border border-border rounded-lg shadow-card z-50">
               <div className="p-3 border-b border-border-light flex items-center justify-between">
                 <h3 className="text-sm font-semibold">Notifications</h3>
                 <button onClick={() => onMarkAllRead?.()} className="text-xs text-primary hover:underline">Mark all read</button>
@@ -594,7 +694,7 @@ function TopBar({
         <button
           type="button"
           onClick={() => onOpenProfile?.()}
-          className="flex items-center gap-3 pl-3 border-l border-border hover:opacity-90 transition-opacity"
+          className="flex items-center gap-2 sm:gap-3 sm:pl-3 sm:border-l border-border hover:opacity-90 transition-opacity"
           title="Open Profile Settings"
         >
           <div className="w-8 h-8 bg-primary rounded-full flex items-center justify-center text-white text-sm font-semibold overflow-hidden">
@@ -606,7 +706,7 @@ function TopBar({
               fallbackInitial
             )}
           </div>
-          <div className="flex flex-col">
+          <div className="hidden sm:flex flex-col">
             <span className="text-sm font-medium text-text-primary">{displayName}</span>
             <span className="text-[11px] text-text-muted">{roleLabel || 'Client'}</span>
           </div>
@@ -915,8 +1015,8 @@ function DashboardPage({
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+        <div className="flex items-start gap-4 w-full">
           <div>
             <div className="inline-flex items-center gap-2 bg-primary text-white rounded-lg px-4 py-2">
               <GreetingIcon className="w-5 h-5" />
@@ -929,7 +1029,7 @@ function DashboardPage({
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 w-full sm:w-auto sm:justify-end">
           <div className="relative" ref={notifRef}>
             <button onClick={() => setShowNotif(s => !s)} className="relative w-10 h-9 rounded-md flex items-center justify-center text-text-secondary hover:bg-background">
               <Bell className="w-5 h-5" />
@@ -938,7 +1038,7 @@ function DashboardPage({
               )}
             </button>
             {showNotif && (
-              <div className="absolute right-0 mt-2 w-96 bg-white border border-border rounded-lg shadow-card z-50">
+              <div className="absolute right-0 mt-2 w-[min(24rem,calc(100vw-1rem))] bg-white border border-border rounded-lg shadow-card z-50">
                 <div className="p-3 border-b border-border-light flex items-center justify-between">
                   <h3 className="text-sm font-semibold">Notifications</h3>
                   <button onClick={markAllRead} className="text-xs text-primary hover:underline">Mark all read</button>
@@ -971,7 +1071,7 @@ function DashboardPage({
 
           <button
             onClick={onAddDocument}
-            className="flex items-center gap-2 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
+            className="flex items-center justify-center gap-2 h-10 px-5 w-full sm:w-auto sm:shrink-0 whitespace-nowrap bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
           >
             <Plus className="w-4 h-4" />
             Add Document
@@ -980,7 +1080,7 @@ function DashboardPage({
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-3 gap-6 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6 mb-8">
         {stats.map((stat) => (
           <div
             key={stat.label}
@@ -1007,7 +1107,7 @@ function DashboardPage({
       </div>
 
       {/* Activity Timeline & Recent Uploads */}
-      <div className="grid grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Activity Timeline */}
         <div className="bg-white rounded-lg shadow-card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
@@ -1203,21 +1303,21 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Expenses</h1>
-        <button onClick={() => onAddDocument('expenses')} className="flex items-center gap-2 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors">
+        <button onClick={() => onAddDocument('expenses')} className="flex items-center justify-center gap-2 h-10 px-5 w-full sm:w-auto sm:shrink-0 whitespace-nowrap bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors">
           <Plus className="w-4 h-4" />
           Add Document
         </button>
       </div>
 
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="relative flex-1 min-w-[200px]">
+        <div className="flex flex-wrap items-stretch sm:items-center gap-4">
+          <div className="relative flex-1 min-w-0 sm:min-w-[200px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
             <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full h-9 pl-10 pr-4 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
           </div>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary">
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary">
             <option value="">All Status</option>
             <option value="Approved">Approved</option>
             <option value="Pending Review">Pending Review</option>
@@ -1338,7 +1438,7 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
               ) : null}
 
               {filteredFolders.length === 0 && filteredFiles.length === 0 && (
-                <tr><td colSpan={8}><EmptyState title="No records found" description="Try uploading your first expense or check filters." cta={<button onClick={() => onAddDocument('expenses')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Expense</button>} /></td></tr>
+                <tr><td colSpan={8}><EmptyState title="No records found" description="Try uploading your first expense or check filters." cta={<button onClick={() => onAddDocument('expenses')} className="h-10 px-5 bg-primary text-white rounded-md text-sm font-medium">Upload Expense</button>} /></td></tr>
               )}
             </tbody>
           </table>
@@ -1503,20 +1603,20 @@ function SalesPage({ onAddDocument, records, setRecords }) {
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Sales</h1>
-        <button onClick={() => onAddDocument('sales')} className="flex items-center gap-2 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light">
+        <button onClick={() => onAddDocument('sales')} className="flex items-center justify-center gap-2 h-10 px-5 w-full sm:w-auto sm:shrink-0 whitespace-nowrap bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors">
           <Plus className="w-4 h-4" />Add Document
         </button>
       </div>
 
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="relative flex-1 min-w-[200px]">
+        <div className="flex flex-wrap items-stretch sm:items-center gap-4">
+          <div className="relative flex-1 min-w-0 sm:min-w-[200px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
             <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full h-9 pl-10 pr-4 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
           </div>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 px-3 bg-background border border-border rounded-md text-sm">
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm">
             <option value="">All Status</option>
             <option value="Approved">Approved</option>
             <option value="Pending Review">Pending Review</option>
@@ -1635,7 +1735,7 @@ function SalesPage({ onAddDocument, records, setRecords }) {
               ) : null}
 
               {filteredFolders.length === 0 && filteredFiles.length === 0 && (
-                <tr><td colSpan={8}><EmptyState title="No records found" description="No sales documents yet." cta={<button onClick={() => onAddDocument('sales')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Sales</button>} /></td></tr>
+                <tr><td colSpan={8}><EmptyState title="No records found" description="No sales documents yet." cta={<button onClick={() => onAddDocument('sales')} className="h-10 px-5 bg-primary text-white rounded-md text-sm font-medium">Upload Sales</button>} /></td></tr>
               )}
             </tbody>
           </table>
@@ -1767,11 +1867,11 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Bank Statements</h1>
         <button
           onClick={() => onAddDocument('bank-statements')}
-          className="flex items-center gap-2 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
+          className="flex items-center justify-center gap-2 h-10 px-5 w-full sm:w-auto sm:shrink-0 whitespace-nowrap bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
         >
           <Plus className="w-4 h-4" />
           Add Document
@@ -1779,12 +1879,12 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
       </div>
 
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex flex-wrap items-center gap-4">
-          <div className="relative flex-1 min-w-[200px]">
+        <div className="flex flex-wrap items-stretch sm:items-center gap-4">
+          <div className="relative flex-1 min-w-0 sm:min-w-[200px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
             <input type="text" placeholder="Search..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full h-9 pl-10 pr-4 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
           </div>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary">
+          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary">
             <option value="">All Status</option>
             <option value="Approved">Approved</option>
             <option value="Pending Review">Pending Review</option>
@@ -1903,7 +2003,7 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
               ) : null}
 
               {filteredFolders.length === 0 && filteredFiles.length === 0 && (
-                <tr><td colSpan={8}><EmptyState title="No records found" description="No bank statements uploaded." cta={<button onClick={() => onAddDocument('bank-statements')} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Upload Statement</button>} /></td></tr>
+                <tr><td colSpan={8}><EmptyState title="No records found" description="No bank statements uploaded." cta={<button onClick={() => onAddDocument('bank-statements')} className="h-10 px-5 bg-primary text-white rounded-md text-sm font-medium">Upload Statement</button>} /></td></tr>
               )}
             </tbody>
           </table>
@@ -2306,13 +2406,13 @@ function UploadHistoryPage({
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Upload History</h1>
       </div>
 
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative flex-1 min-w-[220px]">
+        <div className="flex flex-wrap items-stretch sm:items-center gap-3">
+          <div className="relative flex-1 min-w-0 sm:min-w-[220px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
             <input
               type="text"
@@ -2335,7 +2435,7 @@ function UploadHistoryPage({
             value={dateFrom}
             max={maxFilterDate}
             onChange={(event) => setDateFrom(clampFilterDateToToday(event.target.value))}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="From date"
           />
           <input
@@ -2343,13 +2443,13 @@ function UploadHistoryPage({
             value={dateTo}
             max={maxFilterDate}
             onChange={(event) => setDateTo(clampFilterDateToToday(event.target.value))}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
           <select
             value={filterType}
             onChange={(event) => setFilterType(event.target.value)}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Types</option>
             {typeOptions.map((type) => (
@@ -2359,7 +2459,7 @@ function UploadHistoryPage({
           <select
             value={filterCategory}
             onChange={(event) => setFilterCategory(event.target.value)}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Categories</option>
             <option value="expenses">Expenses</option>
@@ -2369,7 +2469,7 @@ function UploadHistoryPage({
           <select
             value={filterAvailability}
             onChange={(event) => setFilterAvailability(event.target.value)}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Availability</option>
             <option value="available">Available</option>
@@ -2380,7 +2480,7 @@ function UploadHistoryPage({
           <select
             value={sortBy}
             onChange={(event) => setSortBy(event.target.value)}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="date">Sort by Date</option>
             <option value="name">Sort by Name</option>
@@ -2391,7 +2491,7 @@ function UploadHistoryPage({
           <button
             type="button"
             onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm hover:bg-gray-50 flex items-center gap-1"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm hover:bg-gray-50 flex items-center justify-center gap-1"
           >
             {sortOrder === 'desc' ? '\u2193' : '\u2191'}
           </button>
@@ -2683,13 +2783,13 @@ function RecentActivitiesPage({
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Recent Activities</h1>
       </div>
 
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative flex-1 min-w-[220px]">
+        <div className="flex flex-wrap items-stretch sm:items-center gap-3">
+          <div className="relative flex-1 min-w-0 sm:min-w-[220px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
             <input
               type="text"
@@ -2710,7 +2810,7 @@ function RecentActivitiesPage({
           <select
             value={activityType}
             onChange={(event) => setActivityType(event.target.value)}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Types</option>
             <option value="upload">Upload</option>
@@ -2723,7 +2823,7 @@ function RecentActivitiesPage({
             value={dateFrom}
             max={maxFilterDate}
             onChange={(event) => setDateFrom(clampFilterDateToToday(event.target.value))}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="From date"
           />
           <input
@@ -2731,7 +2831,7 @@ function RecentActivitiesPage({
             value={dateTo}
             max={maxFilterDate}
             onChange={(event) => setDateTo(clampFilterDateToToday(event.target.value))}
-            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
           {(searchTerm || activityType || dateFrom || dateTo) && (
@@ -2859,7 +2959,7 @@ function SupportPage() {
 
   return (
     <div className="animate-fade-in">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Support</h1>
       </div>
 
@@ -2908,7 +3008,7 @@ function SupportPage() {
             {isSending && (
               <div className="flex justify-start">
                 <div className="bg-background border border-border-light rounded-lg px-3 py-2 text-sm text-text-muted">
-                  Typing...
+                  <DotLottiePreloader size={20} label="Typing..." className="w-full justify-start" />
                 </div>
               </div>
             )}
@@ -2938,7 +3038,11 @@ function SupportPage() {
                 disabled={!draftMessage.trim() || isSending}
                 className="h-10 px-3 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1"
               >
-                Send <ArrowUpRight className="w-4 h-4" />
+                {isSending ? (
+                  <DotLottiePreloader size={18} label="Sending..." labelClassName="text-sm text-white" />
+                ) : (
+                  <>Send <ArrowUpRight className="w-4 h-4" /></>
+                )}
               </button>
             </div>
           </div>
@@ -3056,7 +3160,7 @@ function ClientSupportWidget() {
             {isSending && (
               <div className="flex justify-start">
                 <div className="bg-background border border-border-light rounded-lg px-3 py-2 text-sm text-text-muted">
-                  Typing...
+                  <DotLottiePreloader size={20} label="Typing..." className="w-full justify-start" />
                 </div>
               </div>
             )}
@@ -3086,7 +3190,11 @@ function ClientSupportWidget() {
                 disabled={!draftMessage.trim() || isSending}
                 className="h-10 px-3 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1"
               >
-                Send <ArrowUpRight className="w-4 h-4" />
+                {isSending ? (
+                  <DotLottiePreloader size={18} label="Sending..." labelClassName="text-sm text-white" />
+                ) : (
+                  <>Send <ArrowUpRight className="w-4 h-4" /></>
+                )}
               </button>
             </div>
           </div>
@@ -3442,7 +3550,11 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
 
     if (SPREADSHEET_PREVIEW_EXTENSIONS.has(ext)) {
       if (isPreviewLoading && !tablePreview) {
-        return <div className="p-4 text-sm text-text-muted">Loading preview...</div>
+        return (
+          <div className="p-4 text-sm text-text-muted">
+            <DotLottiePreloader size={26} label="Loading preview..." className="w-full justify-start" />
+          </div>
+        )
       }
       if (externalPreviewUrl) {
         return <iframe title="spreadsheet-preview" src={externalPreviewUrl} className="w-full h-64" />
@@ -3487,7 +3599,11 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
 
     if (TEXT_PREVIEW_EXTENSIONS.has(ext) || WORD_PREVIEW_EXTENSIONS.has(ext) || PRESENTATION_PREVIEW_EXTENSIONS.has(ext)) {
       if (isPreviewLoading && !textPreview) {
-        return <div className="p-4 text-sm text-text-muted">Loading preview...</div>
+        return (
+          <div className="p-4 text-sm text-text-muted">
+            <DotLottiePreloader size={26} label="Loading preview..." className="w-full justify-start" />
+          </div>
+        )
       }
       if (externalPreviewUrl) {
         return <iframe title="document-preview" src={externalPreviewUrl} className="w-full h-64" />
@@ -3508,7 +3624,11 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
 
     if (PDF_PREVIEW_EXTENSIONS.has(ext)) {
       if (isPreviewLoading) {
-        return <div className="p-4 text-sm text-text-muted">Loading preview...</div>
+        return (
+          <div className="p-4 text-sm text-text-muted">
+            <DotLottiePreloader size={26} label="Loading preview..." className="w-full justify-start" />
+          </div>
+        )
       }
       if (pdfPreviewImageUrl) {
         return (
