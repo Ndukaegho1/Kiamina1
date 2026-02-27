@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Archive, ArrowRightLeft, ClipboardList, Download, Eye, Folder, FolderOpen, History, Info, Lock, Pencil, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { FileViewerModal, StatusBadge } from './ClientDashboardViews'
+import { buildFileCacheKey, putCachedFileBlob } from '../../../utils/fileCache'
 
 const toDateAndTime = (value) => {
   const parsed = Date.parse(value || '')
@@ -9,6 +10,27 @@ const toDateAndTime = (value) => {
     date: source.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
     time: source.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
   }
+}
+
+const buildSearchSuggestions = (values = [], limit = 12) => {
+  const seen = new Set()
+  const suggestions = []
+  ;(Array.isArray(values) ? values : []).forEach((value) => {
+    const normalized = String(value || '').trim()
+    if (!normalized) return
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    suggestions.push(normalized)
+  })
+  return suggestions.slice(0, Math.max(1, limit))
+}
+
+const normalizeRuntimePreviewUrl = (value = '', { allowBlob = false } = {}) => {
+  const normalized = String(value || '').trim()
+  if (!normalized) return ''
+  if (!allowBlob && /^blob:/i.test(normalized)) return ''
+  return normalized
 }
 
 const updateNestedFile = (records = [], folderId, fileId, updater) => (
@@ -112,6 +134,7 @@ const buildFileSnapshot = (file = {}) => ({
   extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
   status: file.status || 'Pending Review',
   class: file.class || file.expenseClass || file.salesClass || '',
+  fileCacheKey: file.fileCacheKey || '',
   folderId: file.folderId || '',
   folderName: file.folderName || '',
   previewUrl: file.previewUrl || null,
@@ -720,7 +743,8 @@ function VersionHistoryDrawer({ file, onClose }) {
               versions.slice().reverse().map((version) => {
                 const { date, time } = formatLogDateTime(version.timestamp)
                 const snapshot = version.fileSnapshot || {}
-                const canDownload = Boolean(snapshot.previewUrl) && !file?.isDeleted
+                const downloadUrl = normalizeRuntimePreviewUrl(snapshot.previewUrl || '', { allowBlob: false })
+                const canDownload = Boolean(downloadUrl) && !file?.isDeleted
                 return (
                   <tr key={`version-${version.versionNumber}-${version.timestamp}`} className="border-b border-border-light last:border-b-0">
                     <td className="px-3 py-2 text-sm text-text-primary">v{version.versionNumber}</td>
@@ -731,7 +755,7 @@ function VersionHistoryDrawer({ file, onClose }) {
                     <td className="px-3 py-2 text-sm">
                       {canDownload ? (
                         <a
-                          href={snapshot.previewUrl}
+                          href={downloadUrl}
                           download={snapshot.filename || file?.filename || 'document'}
                           className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background"
                         >
@@ -837,12 +861,24 @@ function DocumentFoldersPage({
   impersonationBusinessName = '',
   showToast,
   onRecordUploadHistory,
+  globalSearchTerm = '',
+  onGlobalSearchTermChange,
 }) {
   const folders = useMemo(
     () => records.filter((row) => row?.isFolder).map((row) => ({ ...row, archived: Boolean(row.archived) })),
     [records],
   )
-  const [searchTerm, setSearchTerm] = useState('')
+  const [localSearchTerm, setLocalSearchTerm] = useState('')
+  const searchTerm = typeof onGlobalSearchTermChange === 'function'
+    ? String(globalSearchTerm || '')
+    : localSearchTerm
+  const setSearchTerm = (value) => {
+    if (typeof onGlobalSearchTermChange === 'function') {
+      onGlobalSearchTermChange(value)
+      return
+    }
+    setLocalSearchTerm(value)
+  }
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const maxFilterDate = toIsoDate(new Date())
@@ -880,6 +916,14 @@ function DocumentFoldersPage({
       return matchesSearch && matchesDate
     })
   }, [folders, activeTab, searchTerm, dateFrom, dateTo])
+  const folderSearchSuggestions = useMemo(() => {
+    const scopedFolders = folders.filter((folder) => (activeTab === 'archived' ? folder.archived : !folder.archived))
+    return buildSearchSuggestions(
+      scopedFolders.flatMap((folder) => [folder.folderName, folder.id, folder.user, folder.category]),
+      16,
+    )
+  }, [folders, activeTab])
+  const folderSearchListId = `folder-search-suggestions-${categoryId}-${activeTab}`
 
   const activeFoldersCount = folders.filter((folder) => !folder.archived).length
   const archivedFoldersCount = folders.filter((folder) => folder.archived).length
@@ -1042,8 +1086,16 @@ function DocumentFoldersPage({
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
               placeholder={activeTab === 'archived' ? 'Search archived folders...' : 'Search folders...'}
+              list={folderSearchSuggestions.length > 0 ? folderSearchListId : undefined}
               className="w-full h-10 pl-10 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
+            {folderSearchSuggestions.length > 0 && (
+              <datalist id={folderSearchListId}>
+                {folderSearchSuggestions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            )}
           </div>
           <input
             type="date"
@@ -1227,8 +1279,20 @@ function FolderFilesPage({
   isImpersonatingClient = false,
   impersonationBusinessName = '',
   showToast,
+  globalSearchTerm = '',
+  onGlobalSearchTermChange,
 }) {
-  const [searchTerm, setSearchTerm] = useState('')
+  const [localSearchTerm, setLocalSearchTerm] = useState('')
+  const searchTerm = typeof onGlobalSearchTermChange === 'function'
+    ? String(globalSearchTerm || '')
+    : localSearchTerm
+  const setSearchTerm = (value) => {
+    if (typeof onGlobalSearchTermChange === 'function') {
+      onGlobalSearchTermChange(value)
+      return
+    }
+    setLocalSearchTerm(value)
+  }
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const maxFilterDate = toIsoDate(new Date())
@@ -1287,6 +1351,20 @@ function FolderFilesPage({
     () => Array.from(new Set(files.map((file) => String(file.extension || '').toUpperCase()).filter(Boolean))),
     [files],
   )
+  const fileSearchSuggestions = useMemo(() => (
+    buildSearchSuggestions(
+      files.flatMap((file) => [
+        file.filename,
+        file.fileId,
+        file.class,
+        file.extension,
+        file.status,
+        file.user,
+      ]),
+      16,
+    )
+  ), [files])
+  const fileSearchListId = `file-search-suggestions-${folder?.id || categoryId}`
   const priorityOptions = [
     { label: 'Normal', value: 'Normal' },
     { label: 'High', value: 'High' },
@@ -1417,11 +1495,9 @@ function FolderFilesPage({
       showToast?.('error', 'This file has been deleted and cannot be downloaded.')
       return
     }
-    const directUrl = String(targetFile.previewUrl || '').trim()
-    const expiredBlobUrl = /^blob:/i.test(directUrl) && !(targetFile.rawFile instanceof File)
-    const url = expiredBlobUrl
-      ? ''
-      : (directUrl || (targetFile.rawFile ? URL.createObjectURL(targetFile.rawFile) : ''))
+    const runtimeUrl = targetFile.rawFile instanceof File ? URL.createObjectURL(targetFile.rawFile) : ''
+    const persistedUrl = normalizeRuntimePreviewUrl(targetFile.previewUrl || '', { allowBlob: false })
+    const url = runtimeUrl || persistedUrl
     if (!url) {
       showToast?.('error', 'Download URL is not available for this file.')
       return
@@ -1432,6 +1508,15 @@ function FolderFilesPage({
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
+    if (runtimeUrl) {
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(runtimeUrl)
+        } catch {
+          // ignore object URL cleanup failures
+        }
+      }, 0)
+    }
     const actorName = getActorName(targetFile)
     const trackedFile = appendFileActivityOnly(targetFile, {
       actionType: 'download',
@@ -1730,8 +1815,16 @@ function FolderFilesPage({
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
               placeholder="Search files..."
+              list={fileSearchSuggestions.length > 0 ? fileSearchListId : undefined}
               className="w-full h-10 pl-10 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
+            {fileSearchSuggestions.length > 0 && (
+              <datalist id={fileSearchListId}>
+                {fileSearchSuggestions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            )}
           </div>
           <select
             value={statusFilter}
@@ -2017,6 +2110,10 @@ function FolderFilesPage({
               setShowApprovedLockNotice(true)
               return
             }
+            const fileCacheKey = target.fileCacheKey || buildFileCacheKey({ fileId: target.fileId })
+            if (fileCacheKey) {
+              await putCachedFileBlob(fileCacheKey, replacementFile, { filename: replacementFile.name })
+            }
             const submittedAt = new Date().toLocaleString('en-US', {
               month: 'short',
               day: '2-digit',
@@ -2050,6 +2147,7 @@ function FolderFilesPage({
                 filePatch: {
                   filename: replacementFile.name,
                   extension,
+                  fileCacheKey,
                   previewUrl,
                   rawFile: replacementFile,
                   date: submittedAt,

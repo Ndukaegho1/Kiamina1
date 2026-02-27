@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   LayoutDashboard,
   DollarSign,
@@ -19,7 +19,6 @@ import {
   Clock,
   FileText,
   FileSpreadsheet,
-  File,
   ChevronRight,
   User,
   Shield,
@@ -27,6 +26,8 @@ import {
   AlertCircle,
   Loader2,
   UploadCloud,
+  Download,
+  FolderOpen,
   MapPin,
   Folder,
   Building,
@@ -56,6 +57,7 @@ import * as XLSX from 'xlsx'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import KiaminaLogo from '../../common/KiaminaLogo'
+import { getCachedFileBlob } from '../../../utils/fileCache'
 
 ChartJS.register(
   CategoryScale,
@@ -86,6 +88,20 @@ const clampFilterDateToToday = (value = '') => {
   return normalized > todayIso ? todayIso : normalized
 }
 
+const buildSearchSuggestions = (values = [], limit = 12) => {
+  const seen = new Set()
+  const suggestions = []
+  ;(Array.isArray(values) ? values : []).forEach((value) => {
+    const normalized = String(value || '').trim()
+    if (!normalized) return
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    suggestions.push(normalized)
+  })
+  return suggestions.slice(0, Math.max(1, limit))
+}
+
 const SPREADSHEET_PREVIEW_EXTENSIONS = new Set(['CSV', 'XLS', 'XLSX', 'XLSM', 'XLSB'])
 const TEXT_PREVIEW_EXTENSIONS = new Set(['TXT'])
 const WORD_PREVIEW_EXTENSIONS = new Set(['DOC', 'DOCX'])
@@ -93,6 +109,7 @@ const PRESENTATION_PREVIEW_EXTENSIONS = new Set(['PPT', 'PPTX'])
 const OFFICE_EMBED_PREVIEW_EXTENSIONS = new Set(['DOC', 'DOCX', 'XLS', 'XLSX', 'XLSM', 'XLSB', 'PPT', 'PPTX'])
 const PDF_PREVIEW_EXTENSIONS = new Set(['PDF'])
 const IMAGE_PREVIEW_EXTENSIONS = new Set(['PNG', 'JPG', 'JPEG', 'GIF', 'WEBP', 'BMP'])
+const EMPTY_FILE_RECORD = Object.freeze({})
 const MIME_EXTENSION_MAP = {
   'application/pdf': 'PDF',
   'text/plain': 'TXT',
@@ -162,18 +179,48 @@ const resolvePreviewExtension = (target = {}, fallback = {}) => (
 )
 
 const isHttpUrl = (value = '') => /^https?:\/\//i.test(String(value || '').trim())
+const isPrivateOrLocalHostName = (host = '') => {
+  const normalizedHost = String(host || '').trim().toLowerCase()
+  if (!normalizedHost) return true
+  if (
+    normalizedHost === 'localhost'
+    || normalizedHost === '127.0.0.1'
+    || normalizedHost === '0.0.0.0'
+    || normalizedHost === '::1'
+    || normalizedHost.endsWith('.local')
+  ) {
+    return true
+  }
+  if (/^10\./.test(normalizedHost)) return true
+  if (/^192\.168\./.test(normalizedHost)) return true
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(normalizedHost)) return true
+  return false
+}
+const isPublicHttpUrl = (value = '') => {
+  if (!isHttpUrl(value)) return false
+  try {
+    const parsed = new URL(String(value || '').trim())
+    return !isPrivateOrLocalHostName(parsed.hostname)
+  } catch {
+    return false
+  }
+}
 const toOfficeEmbedUrl = (value = '') => (
-  isHttpUrl(value) ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(String(value || ''))}` : ''
+  isPublicHttpUrl(value) ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(String(value || ''))}` : ''
 )
 
 const runtimeObjectUrlCache = new WeakMap()
+const isBlobLike = (value) => (
+  typeof Blob !== 'undefined'
+  && value instanceof Blob
+)
 
-const getRuntimeObjectUrl = (file) => {
-  if (!(file instanceof File)) return ''
-  if (!runtimeObjectUrlCache.has(file)) {
-    runtimeObjectUrlCache.set(file, URL.createObjectURL(file))
+const getRuntimeObjectUrl = (blob) => {
+  if (!isBlobLike(blob)) return ''
+  if (!runtimeObjectUrlCache.has(blob)) {
+    runtimeObjectUrlCache.set(blob, URL.createObjectURL(blob))
   }
-  return runtimeObjectUrlCache.get(file) || ''
+  return runtimeObjectUrlCache.get(blob) || ''
 }
 
 const normalizeRuntimePreviewUrl = (value = '', { allowBlob = false } = {}) => {
@@ -258,6 +305,7 @@ function CategoryTag({ category }) {
 
 // File Type Icon Component
 function FileTypeIcon({ type }) {
+  const safeType = String(type || 'FILE').trim().toUpperCase() || 'FILE'
   const styles = {
     'PDF': 'bg-error-bg text-error',
     'XLSX': 'bg-success-bg text-success',
@@ -266,8 +314,8 @@ function FileTypeIcon({ type }) {
   }
   
   return (
-    <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-semibold ${styles[type] || styles['PDF']}`}>
-      {type.substring(0, 3)}
+    <div className={`w-8 h-8 rounded flex items-center justify-center text-xs font-semibold ${styles[safeType] || 'bg-background text-text-secondary'}`}>
+      {safeType.substring(0, 3)}
     </div>
   )
 }
@@ -439,12 +487,21 @@ function TopBar({
   isImpersonationMode = false,
   roleLabel = 'Client',
   forceClientIcon = false,
+  searchTerm = '',
+  onSearchTermChange,
+  searchPlaceholder = '',
+  searchSuggestions = [],
 }) {
   const displayName = clientFirstName?.trim() || 'Client'
   const fallbackInitial = displayName.charAt(0).toUpperCase() || 'C'
   const [showNotifications, setShowNotifications] = useState(false)
   const notificationRef = useRef(null)
   const unreadCount = notifications.filter(n => !n.read).length
+  const resolvedSearchTerm = String(searchTerm || '')
+  const resolvedSearchPlaceholder = searchPlaceholder
+    || (isImpersonationMode ? 'Search client data (admin view)...' : 'Search transactions, documents...')
+  const resolvedSearchSuggestions = buildSearchSuggestions(searchSuggestions, 14)
+  const topBarSearchListId = 'client-dashboard-topbar-search-suggestions'
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -470,9 +527,19 @@ function TopBar({
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
           <input
             type="text"
-            placeholder={isImpersonationMode ? 'Search client data (admin view)...' : 'Search transactions, documents...'}
+            value={resolvedSearchTerm}
+            onChange={(event) => onSearchTermChange?.(event.target.value)}
+            placeholder={resolvedSearchPlaceholder}
+            list={resolvedSearchSuggestions.length > 0 ? topBarSearchListId : undefined}
             className="w-full h-9 pl-10 pr-4 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary focus:bg-white transition-colors"
           />
+          {resolvedSearchSuggestions.length > 0 && (
+            <datalist id={topBarSearchListId}>
+              {resolvedSearchSuggestions.map((item) => (
+                <option key={item} value={item} />
+              ))}
+            </datalist>
+          )}
         </div>
       </div>
       
@@ -1915,15 +1982,40 @@ function BankStatementsPage({ onAddDocument, records, setRecords }) {
 }
 
 // Upload History Page
-function UploadHistoryPage({ records }) {
-  const [searchTerm, setSearchTerm] = useState('')
+function UploadHistoryPage({
+  records = [],
+  expenseRecords = [],
+  salesRecords = [],
+  bankStatementRecords = [],
+  ownerEmail = '',
+  onOpenFileLocation,
+  showToast,
+  globalSearchTerm = '',
+  onGlobalSearchTermChange,
+}) {
+  const [localSearchTerm, setLocalSearchTerm] = useState('')
+  const searchTerm = typeof onGlobalSearchTermChange === 'function'
+    ? String(globalSearchTerm || '')
+    : localSearchTerm
+  const setSearchTerm = (value) => {
+    if (typeof onGlobalSearchTermChange === 'function') {
+      onGlobalSearchTermChange(value)
+      return
+    }
+    setLocalSearchTerm(value)
+  }
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const maxFilterDate = toIsoDate(new Date())
   const [filterType, setFilterType] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
+  const [filterAvailability, setFilterAvailability] = useState('')
   const [sortBy, setSortBy] = useState('date')
   const [sortOrder, setSortOrder] = useState('desc')
+  const [contextMenu, setContextMenu] = useState(null)
+  const [viewingFile, setViewingFile] = useState(null)
+  const normalizedOwnerEmail = String(ownerEmail || '').trim().toLowerCase()
+
   const toDateMs = (value = '') => {
     const parsed = Date.parse(value)
     return Number.isFinite(parsed) ? parsed : NaN
@@ -1933,11 +2025,157 @@ function UploadHistoryPage({ records }) {
     const parsed = Date.parse(`${value}T23:59:59.999`)
     return Number.isFinite(parsed) ? parsed : NaN
   }
+  const resolveCategoryId = (value = '') => {
+    const normalized = String(value || '').trim().toLowerCase()
+    if (normalized.includes('sales')) return 'sales'
+    if (normalized.includes('bank')) return 'bank-statements'
+    return 'expenses'
+  }
+  const resolveCategoryLabel = (categoryId = '') => {
+    if (categoryId === 'sales') return 'Sales'
+    if (categoryId === 'bank-statements') return 'Bank Statement'
+    return 'Expense'
+  }
+  const flattenCategoryFiles = (sourceRecords = [], categoryId = 'expenses') => (
+    (Array.isArray(sourceRecords) ? sourceRecords : []).flatMap((row) => {
+      if (row?.isFolder) {
+        const folderId = row.id || ''
+        const folderName = row.folderName || ''
+        return (Array.isArray(row.files) ? row.files : []).map((file) => ({
+          ...file,
+          categoryId,
+          folderId: file?.folderId || folderId,
+          folderName: file?.folderName || folderName,
+        }))
+      }
+      return [{
+        ...row,
+        categoryId,
+      }]
+    })
+  )
+  const getAvailabilityMeta = (availability = 'unavailable') => {
+    if (availability === 'available') {
+      return {
+        label: 'Available',
+        className: 'bg-success-bg text-success',
+        note: '',
+      }
+    }
+    if (availability === 'moved') {
+      return {
+        label: 'Moved',
+        className: 'bg-warning-bg text-warning',
+        note: 'This file has been moved to another location.',
+      }
+    }
+    if (availability === 'deleted') {
+      return {
+        label: 'Deleted',
+        className: 'bg-error-bg text-error',
+        note: 'This file has been deleted.',
+      }
+    }
+    return {
+      label: 'Unavailable',
+      className: 'bg-background text-text-secondary',
+      note: 'This file has been deleted or moved to another location.',
+    }
+  }
 
-  const filteredData = records
-    .filter(item => {
-      const matchesSearch = item.filename.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          item.user.toLowerCase().includes(searchTerm.toLowerCase())
+  const liveFiles = [
+    ...flattenCategoryFiles(expenseRecords, 'expenses'),
+    ...flattenCategoryFiles(salesRecords, 'sales'),
+    ...flattenCategoryFiles(bankStatementRecords, 'bank-statements'),
+  ]
+  const liveFileMap = new Map()
+  liveFiles.forEach((file) => {
+    const fileId = String(file?.fileId || '').trim()
+    if (!fileId) return
+    const categoryId = file?.categoryId || 'expenses'
+    const key = `${categoryId}:${fileId}`
+    if (!liveFileMap.has(key)) {
+      liveFileMap.set(key, file)
+    }
+  })
+
+  const scopedRows = normalizedOwnerEmail
+    ? (Array.isArray(records) ? records : []).filter((item) => (
+      String(item?.ownerEmail || '').trim().toLowerCase() === normalizedOwnerEmail
+    ))
+    : (Array.isArray(records) ? records : [])
+  const enrichedRows = scopedRows
+    .filter((item) => item && typeof item === 'object' && !item.isFolder)
+    .map((item, index) => {
+      const categoryId = item.categoryId || resolveCategoryId(item.category || '')
+      const category = item.category || resolveCategoryLabel(categoryId)
+      const fileId = String(item.fileId || '').trim()
+      const liveFile = fileId ? (liveFileMap.get(`${categoryId}:${fileId}`) || null) : null
+      const isLiveDeleted = Boolean(
+        liveFile
+        && (liveFile.isDeleted || String(liveFile.status || '').trim().toLowerCase() === 'deleted')
+      )
+      const isMoved = Boolean(
+        liveFile
+        && !isLiveDeleted
+        && String(item.folderId || '').trim()
+        && String(liveFile.folderId || '').trim()
+        && String(item.folderId || '').trim() !== String(liveFile.folderId || '').trim()
+      )
+      let availability = 'unavailable'
+      if (liveFile && isLiveDeleted) availability = 'deleted'
+      else if (liveFile && isMoved) availability = 'moved'
+      else if (liveFile) availability = 'available'
+
+      return {
+        ...item,
+        id: item.id || `UP-${index}-${fileId || item.filename || 'file'}`,
+        fileId,
+        categoryId,
+        category,
+        type: String(item.type || '').trim().toUpperCase() || 'FILE',
+        availability,
+        liveFile,
+        canPreview: Boolean(liveFile && !isLiveDeleted),
+        canOpenLocation: Boolean(liveFile?.folderId),
+      }
+    })
+
+  const typeSortPriority = ['PDF', 'DOCX', 'DOC', 'XLSX', 'XLSM', 'XLSB', 'XLS', 'CSV', 'TXT', 'PPTX', 'PPT', 'PNG', 'JPG', 'JPEG', 'GIF', 'WEBP', 'BMP', 'ZIP', 'RAR', '7Z']
+  const getTypeRank = (value = '') => {
+    const normalized = String(value || '').trim().toUpperCase()
+    const index = typeSortPriority.indexOf(normalized)
+    return index === -1 ? 999 : index
+  }
+  const typeOptions = Array.from(new Set(enrichedRows.map((item) => item.type).filter(Boolean)))
+    .sort((left, right) => {
+      const leftRank = getTypeRank(left)
+      const rightRank = getTypeRank(right)
+      if (leftRank !== rightRank) return leftRank - rightRank
+      return String(left || '').localeCompare(String(right || ''))
+    })
+  const uploadSearchSuggestions = buildSearchSuggestions(
+    enrichedRows.flatMap((item) => [
+      item.filename,
+      item.fileId,
+      item.type,
+      item.category,
+      item.user,
+      item.availability,
+    ]),
+    16,
+  )
+  const uploadHistorySearchListId = 'upload-history-search-suggestions'
+
+  const filteredData = enrichedRows
+    .filter((item) => {
+      const query = searchTerm.trim().toLowerCase()
+      const matchesSearch = !query || (
+        String(item.filename || '').toLowerCase().includes(query)
+        || String(item.user || '').toLowerCase().includes(query)
+        || String(item.fileId || '').toLowerCase().includes(query)
+        || String(item.category || '').toLowerCase().includes(query)
+      )
       const itemDateMs = toDateMs(item.date)
       const normalizedFrom = clampFilterDateToToday(dateFrom)
       const normalizedTo = clampFilterDateToToday(dateTo)
@@ -1946,17 +2184,116 @@ function UploadHistoryPage({ records }) {
       const matchesDateFrom = !normalizedFrom || (!Number.isNaN(itemDateMs) && itemDateMs >= fromMs)
       const matchesDateTo = !normalizedTo || (!Number.isNaN(itemDateMs) && itemDateMs <= toMs)
       const matchesType = !filterType || item.type === filterType
-      const matchesCategory = !filterCategory || item.category === filterCategory
-      return matchesSearch && matchesDateFrom && matchesDateTo && matchesType && matchesCategory
+      const matchesCategory = !filterCategory || item.categoryId === filterCategory
+      const matchesAvailability = !filterAvailability || item.availability === filterAvailability
+      return (
+        matchesSearch
+        && matchesDateFrom
+        && matchesDateTo
+        && matchesType
+        && matchesCategory
+        && matchesAvailability
+      )
     })
     .sort((a, b) => {
       if (sortBy === 'date') {
-        const dateA = new Date(a.date)
-        const dateB = new Date(b.date)
-        return sortOrder === 'desc' ? dateB - dateA : dateA - dateB
+        const left = toDateMs(a.date)
+        const right = toDateMs(b.date)
+        const safeLeft = Number.isNaN(left) ? 0 : left
+        const safeRight = Number.isNaN(right) ? 0 : right
+        return sortOrder === 'desc' ? safeRight - safeLeft : safeLeft - safeRight
       }
-      return 0
+      const read = (value) => String(value || '').trim().toLowerCase()
+      if (sortBy === 'type') {
+        const leftRank = getTypeRank(a.type)
+        const rightRank = getTypeRank(b.type)
+        if (leftRank !== rightRank) {
+          return sortOrder === 'desc' ? rightRank - leftRank : leftRank - rightRank
+        }
+        const typeCompared = read(a.type).localeCompare(read(b.type))
+        if (typeCompared !== 0) return sortOrder === 'desc' ? typeCompared * -1 : typeCompared
+        const nameCompared = read(a.filename).localeCompare(read(b.filename))
+        return sortOrder === 'desc' ? nameCompared * -1 : nameCompared
+      }
+      const left = sortBy === 'name'
+        ? read(a.filename)
+        : sortBy === 'category'
+            ? read(a.category)
+            : sortBy === 'availability'
+                ? read(a.availability)
+                : read(a.filename)
+      const right = sortBy === 'name'
+        ? read(b.filename)
+        : sortBy === 'category'
+            ? read(b.category)
+            : sortBy === 'availability'
+                ? read(b.availability)
+                : read(b.filename)
+      const compared = left.localeCompare(right)
+      return sortOrder === 'desc' ? compared * -1 : compared
     })
+
+  const activeContextRow = contextMenu
+    ? filteredData.find((item) => item.id === contextMenu.rowId) || null
+    : null
+
+  useEffect(() => {
+    const closeContextMenu = () => setContextMenu(null)
+    window.addEventListener('click', closeContextMenu)
+    window.addEventListener('scroll', closeContextMenu)
+    return () => {
+      window.removeEventListener('click', closeContextMenu)
+      window.removeEventListener('scroll', closeContextMenu)
+    }
+  }, [])
+
+  const withContextRow = (callback) => {
+    if (!activeContextRow) return
+    callback(activeContextRow)
+    setContextMenu(null)
+  }
+  const openPreview = (item) => {
+    if (!item?.canPreview || !item?.liveFile) {
+      showToast?.('error', 'This file is no longer available for preview because it was deleted or moved.')
+      return
+    }
+    setViewingFile({
+      ...item.liveFile,
+      folderId: item.liveFile.folderId || item.folderId || '',
+      folderName: item.liveFile.folderName || '',
+    })
+  }
+  const openFileLocation = (item) => {
+    const folderId = item?.liveFile?.folderId || ''
+    const categoryId = item?.liveFile?.categoryId || item?.categoryId || ''
+    if (!folderId || !categoryId) {
+      showToast?.('error', 'Folder location is no longer available for this file.')
+      return
+    }
+    onOpenFileLocation?.(categoryId, folderId)
+  }
+  const downloadFile = (item) => {
+    if (!item?.canPreview || !item?.liveFile) {
+      showToast?.('error', 'This file is no longer available for download.')
+      return
+    }
+    const source = item.liveFile
+    const directUrl = normalizeRuntimePreviewUrl(
+      source.previewUrl || source.url || source.fileUrl || source.documentUrl || '',
+      { allowBlob: false },
+    )
+    const url = isBlobLike(source.rawFile) ? getRuntimeObjectUrl(source.rawFile) : directUrl
+    if (!url) {
+      showToast?.('error', 'Download URL is not available for this file.')
+      return
+    }
+    const link = document.createElement('a')
+    link.href = url
+    link.download = source.filename || item.filename || 'document'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
 
   const clearFilters = () => {
     setSearchTerm('')
@@ -1964,6 +2301,7 @@ function UploadHistoryPage({ records }) {
     setDateTo('')
     setFilterType('')
     setFilterCategory('')
+    setFilterAvailability('')
   }
 
   return (
@@ -1972,26 +2310,31 @@ function UploadHistoryPage({ records }) {
         <h1 className="text-2xl font-semibold text-text-primary">Upload History</h1>
       </div>
 
-      {/* Filters */}
       <div className="bg-white rounded-lg shadow-card p-4 mb-6">
-        <div className="flex flex-wrap items-center gap-4">
-          {/* Search */}
-          <div className="relative flex-1 min-w-[200px]">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[220px]">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
             <input
               type="text"
-              placeholder="Search by filename or user..."
+              placeholder="Search by file name, user, ID, or category..."
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              list={uploadSearchSuggestions.length > 0 ? uploadHistorySearchListId : undefined}
               className="w-full h-9 pl-10 pr-4 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
+            {uploadSearchSuggestions.length > 0 && (
+              <datalist id={uploadHistorySearchListId}>
+                {uploadSearchSuggestions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            )}
           </div>
-
           <input
             type="date"
             value={dateFrom}
             max={maxFilterDate}
-            onChange={(e) => setDateFrom(clampFilterDateToToday(e.target.value))}
+            onChange={(event) => setDateFrom(clampFilterDateToToday(event.target.value))}
             className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="From date"
           />
@@ -1999,56 +2342,62 @@ function UploadHistoryPage({ records }) {
             type="date"
             value={dateTo}
             max={maxFilterDate}
-            onChange={(e) => setDateTo(clampFilterDateToToday(e.target.value))}
+            onChange={(event) => setDateTo(clampFilterDateToToday(event.target.value))}
             className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
-
-          {/* Document Type Filter */}
           <select
             value={filterType}
-            onChange={(e) => setFilterType(e.target.value)}
+            onChange={(event) => setFilterType(event.target.value)}
             className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Types</option>
-            <option value="PDF">PDF</option>
-            <option value="XLSX">XLSX</option>
-            <option value="DOCX">DOCX</option>
-            <option value="CSV">CSV</option>
+            {typeOptions.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
           </select>
-
-          {/* Category Filter */}
           <select
             value={filterCategory}
-            onChange={(e) => setFilterCategory(e.target.value)}
+            onChange={(event) => setFilterCategory(event.target.value)}
             className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="">All Categories</option>
-            <option value="Expense">Expenses</option>
-            <option value="Sales">Sales</option>
-            <option value="Bank Statement">Bank Statement</option>
+            <option value="expenses">Expenses</option>
+            <option value="sales">Sales</option>
+            <option value="bank-statements">Bank Statements</option>
           </select>
-
-          {/* Sort */}
+          <select
+            value={filterAvailability}
+            onChange={(event) => setFilterAvailability(event.target.value)}
+            className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="">All Availability</option>
+            <option value="available">Available</option>
+            <option value="moved">Moved</option>
+            <option value="deleted">Deleted</option>
+            <option value="unavailable">Unavailable</option>
+          </select>
           <select
             value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
+            onChange={(event) => setSortBy(event.target.value)}
             className="h-9 px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
           >
             <option value="date">Sort by Date</option>
             <option value="name">Sort by Name</option>
+            <option value="type">Sort by Type</option>
+            <option value="category">Sort by Category</option>
+            <option value="availability">Sort by Availability</option>
           </select>
-
           <button
+            type="button"
             onClick={() => setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc')}
             className="h-9 px-3 bg-background border border-border rounded-md text-sm hover:bg-gray-50 flex items-center gap-1"
           >
             {sortOrder === 'desc' ? '\u2193' : '\u2191'}
           </button>
-
-          {/* Clear Filters */}
-          {(searchTerm || dateFrom || dateTo || filterType || filterCategory) && (
+          {(searchTerm || dateFrom || dateTo || filterType || filterCategory || filterAvailability) && (
             <button
+              type="button"
               onClick={clearFilters}
               className="h-9 px-3 text-sm text-error hover:bg-error-bg rounded-md"
             >
@@ -2064,33 +2413,85 @@ function UploadHistoryPage({ records }) {
             <thead>
               <tr className="bg-[#F9FAFB]">
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File Name</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File ID</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">File Type</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Category</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Upload Date</th>
                 <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Uploaded By</th>
-                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Availability</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Actions</th>
               </tr>
             </thead>
             <tbody>
               {filteredData.length > 0 ? (
-                filteredData.map((row) => (
-                  <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB] transition-colors">
-                    <td className="px-4 py-3.5">
-                      <div className="flex items-center gap-3">
-                        <FileTypeIcon type={row.type} />
-                        <span className="text-sm">{row.filename}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3.5 text-sm">{row.type}</td>
-                    <td className="px-4 py-3.5"><CategoryTag category={row.category} /></td>
-                    <td className="px-4 py-3.5 text-sm">{row.date}</td>
-                    <td className="px-4 py-3.5 text-sm">{row.user}</td>
-                    <td className="px-4 py-3.5"><StatusBadge status={row.status} /></td>
-                  </tr>
-                ))
+                filteredData.map((row) => {
+                  const availability = getAvailabilityMeta(row.availability)
+                  return (
+                    <tr
+                      key={row.id}
+                      onContextMenu={(event) => {
+                        event.preventDefault()
+                        const menuWidth = 224
+                        const menuHeight = 134
+                        const nextX = Math.min(event.clientX, window.innerWidth - menuWidth - 8)
+                        const nextY = Math.min(event.clientY, window.innerHeight - menuHeight - 8)
+                        setContextMenu({
+                          rowId: row.id,
+                          x: Math.max(8, nextX),
+                          y: Math.max(8, nextY),
+                        })
+                      }}
+                      className="group border-b border-border-light hover:bg-[#F9FAFB] transition-colors"
+                    >
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-start gap-3">
+                          <FileTypeIcon type={row.type} />
+                          <div>
+                            <span className="text-sm text-text-primary">{row.filename || '--'}</span>
+                            {availability.note && (
+                              <p className="text-xs text-text-muted mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                {availability.note}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5 text-sm font-medium text-text-primary">{row.fileId || '--'}</td>
+                      <td className="px-4 py-3.5 text-sm text-text-secondary">{row.type}</td>
+                      <td className="px-4 py-3.5"><CategoryTag category={row.category} /></td>
+                      <td className="px-4 py-3.5 text-sm text-text-secondary">{row.date || '--'}</td>
+                      <td className="px-4 py-3.5 text-sm text-text-secondary">{row.user || '--'}</td>
+                      <td className="px-4 py-3.5">
+                        <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${availability.className}`}>
+                          {availability.label}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openPreview(row)}
+                            disabled={!row.canPreview}
+                            className="h-8 px-2.5 rounded border border-border text-xs text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Preview
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openFileLocation(row)}
+                            disabled={!row.canOpenLocation}
+                            className="h-8 px-2.5 rounded border border-border text-xs text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Open Folder
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })
               ) : (
                 <tr>
-                  <td colSpan={6} className="px-4 py-8">
+                  <td colSpan={8} className="px-4 py-8">
                     <EmptyState title="No records" description="No matching records found." />
                   </td>
                 </tr>
@@ -2099,12 +2500,70 @@ function UploadHistoryPage({ records }) {
           </table>
         </div>
       </div>
+
+      {contextMenu && (
+        <div
+          className="fixed z-[240] w-56 bg-white border border-border rounded-md shadow-card py-1"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => withContextRow(openPreview)}
+            disabled={!activeContextRow?.canPreview}
+            className="w-full h-9 px-3 text-left text-sm text-text-primary hover:bg-background inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Eye className="w-4 h-4 text-text-muted" />
+            Preview
+          </button>
+          <button
+            type="button"
+            onClick={() => withContextRow(openFileLocation)}
+            disabled={!activeContextRow?.canOpenLocation}
+            className="w-full h-9 px-3 text-left text-sm text-text-primary hover:bg-background inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <FolderOpen className="w-4 h-4 text-text-muted" />
+            Open File Location
+          </button>
+          <button
+            type="button"
+            onClick={() => withContextRow(downloadFile)}
+            disabled={!activeContextRow?.canPreview}
+            className="w-full h-9 px-3 text-left text-sm text-text-primary hover:bg-background inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="w-4 h-4 text-text-muted" />
+            Download
+          </button>
+        </div>
+      )}
+
+      {viewingFile && (
+        <FileViewerModal
+          file={viewingFile}
+          readOnly
+          onClose={() => setViewingFile(null)}
+        />
+      )}
     </div>
   )
 }
-
-function RecentActivitiesPage({ records = [], activityLogs = [] }) {
-  const [searchTerm, setSearchTerm] = useState('')
+function RecentActivitiesPage({
+  records = [],
+  activityLogs = [],
+  globalSearchTerm = '',
+  onGlobalSearchTermChange,
+}) {
+  const [localSearchTerm, setLocalSearchTerm] = useState('')
+  const searchTerm = typeof onGlobalSearchTermChange === 'function'
+    ? String(globalSearchTerm || '')
+    : localSearchTerm
+  const setSearchTerm = (value) => {
+    if (typeof onGlobalSearchTermChange === 'function') {
+      onGlobalSearchTermChange(value)
+      return
+    }
+    setLocalSearchTerm(value)
+  }
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const maxFilterDate = toIsoDate(new Date())
@@ -2183,6 +2642,18 @@ function RecentActivitiesPage({ records = [], activityLogs = [] }) {
         }
       })
 
+  const activitySearchSuggestions = buildSearchSuggestions(
+    activities.flatMap((item) => [
+      item.activity,
+      item.details,
+      item.actorName,
+      item.actorRole,
+      item.type,
+    ]),
+    16,
+  )
+  const recentActivitiesSearchListId = 'recent-activities-search-suggestions'
+
   const filteredActivities = activities.filter((item) => {
     const query = searchTerm.trim().toLowerCase()
     const normalizedFrom = clampFilterDateToToday(dateFrom)
@@ -2225,8 +2696,16 @@ function RecentActivitiesPage({ records = [], activityLogs = [] }) {
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
               placeholder="Search activities..."
+              list={activitySearchSuggestions.length > 0 ? recentActivitiesSearchListId : undefined}
               className="w-full h-9 pl-10 pr-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
+            {activitySearchSuggestions.length > 0 && (
+              <datalist id={recentActivitiesSearchListId}>
+                {activitySearchSuggestions.map((item) => (
+                  <option key={item} value={item} />
+                ))}
+              </datalist>
+            )}
           </div>
           <select
             value={activityType}
@@ -2627,7 +3106,8 @@ function ClientSupportWidget() {
 }
 
 // Reusable file viewer modal used by pages
-function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly = false }) {
+function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResubmit, readOnly = false }) {
+  const file = incomingFile && typeof incomingFile === 'object' ? incomingFile : EMPTY_FILE_RECORD
   const [editData, setEditData] = useState(file)
   const [textPreview, setTextPreview] = useState(null)
   const [tablePreview, setTablePreview] = useState(null)
@@ -2638,9 +3118,16 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
   const [selectedVersion, setSelectedVersion] = useState(null)
   const [isEditing, setIsEditing] = useState(false)
   const [showLockedEditNotice, setShowLockedEditNotice] = useState(false)
+  const [cachedFileBlob, setCachedFileBlob] = useState(null)
+  const [cachedFileCacheKey, setCachedFileCacheKey] = useState('')
   const resubmitInputRef = useRef(null)
   const resolvePreviewUrl = (target = {}) => {
-    if (target?.rawFile instanceof File) return getRuntimeObjectUrl(target.rawFile)
+    if (isBlobLike(target?.rawFile)) return getRuntimeObjectUrl(target.rawFile)
+
+    const targetCacheKey = String(target?.fileCacheKey || '').trim()
+    if (targetCacheKey && targetCacheKey === cachedFileCacheKey && isBlobLike(cachedFileBlob)) {
+      return getRuntimeObjectUrl(cachedFileBlob)
+    }
 
     const directUrl = normalizeRuntimePreviewUrl(
       target?.previewUrl || target?.url || target?.fileUrl || target?.documentUrl || '',
@@ -2652,6 +3139,10 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     for (let index = versionRows.length - 1; index >= 0; index -= 1) {
       const version = versionRows[index] || {}
       const snapshot = version.fileSnapshot || {}
+      const snapshotCacheKey = String(snapshot.fileCacheKey || version.fileCacheKey || '').trim()
+      if (snapshotCacheKey && snapshotCacheKey === cachedFileCacheKey && isBlobLike(cachedFileBlob)) {
+        return getRuntimeObjectUrl(cachedFileBlob)
+      }
       const versionUrl = normalizeRuntimePreviewUrl((
         snapshot.previewUrl
         || version.previewUrl
@@ -2682,8 +3173,36 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     setShowLockedEditNotice(false)
   }, [file, readOnly])
 
+  const safeEditData = editData && typeof editData === 'object' ? editData : EMPTY_FILE_RECORD
+
   useEffect(() => {
-    const active = selectedVersion || editData || file
+    let cancelled = false
+    const nextCacheKey = String(file?.fileCacheKey || '').trim()
+    setCachedFileCacheKey(nextCacheKey)
+
+    if (isBlobLike(file?.rawFile)) {
+      setCachedFileBlob(file.rawFile)
+      return undefined
+    }
+
+    setCachedFileBlob(null)
+    if (!nextCacheKey) return undefined
+
+    ;(async () => {
+      const cachedBlob = await getCachedFileBlob(nextCacheKey)
+      if (cancelled) return
+      if (isBlobLike(cachedBlob)) {
+        setCachedFileBlob(cachedBlob)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [file])
+
+  useEffect(() => {
+    const active = selectedVersion || safeEditData || file
     const ext = resolvePreviewExtension(active, file)
     const needsRichPreview = (
       TEXT_PREVIEW_EXTENSIONS.has(ext)
@@ -2703,7 +3222,10 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     }
 
     const url = resolvePreviewUrl(active)
-    const sourceFile = active?.rawFile instanceof File ? active.rawFile : null
+    const activeCacheKey = String(active?.fileCacheKey || '').trim()
+    const sourceFile = isBlobLike(active?.rawFile)
+      ? active.rawFile
+      : (activeCacheKey && activeCacheKey === cachedFileCacheKey && isBlobLike(cachedFileBlob) ? cachedFileBlob : null)
 
     let cancelled = false
     const setIfActive = (callback) => {
@@ -2881,7 +3403,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
 
         setIfActive(() => setPreviewMessage('Preview not available for this file type.'))
       } catch {
-        if (!sourceFile && isHttpUrl(url)) {
+        if (!sourceFile && isPublicHttpUrl(url)) {
           if (OFFICE_EMBED_PREVIEW_EXTENSIONS.has(ext)) {
             const embedUrl = toOfficeEmbedUrl(url)
             if (embedUrl) {
@@ -2911,10 +3433,10 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     return () => {
       cancelled = true
     }
-  }, [editData, file, selectedVersion])
+  }, [safeEditData, file, selectedVersion, cachedFileBlob, cachedFileCacheKey])
 
   const renderFilePreview = () => {
-    const active = selectedVersion || editData || file
+    const active = selectedVersion || safeEditData || file
     const ext = resolvePreviewExtension(active, file)
     const url = resolvePreviewUrl(active)
 
@@ -3011,7 +3533,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     if (url && IMAGE_PREVIEW_EXTENSIONS.has(ext)) {
       return <img src={url} alt={active?.filename || file?.filename || 'Preview'} className="w-full object-contain max-h-64" />
     }
-    if (url && isHttpUrl(url) && !OFFICE_EMBED_PREVIEW_EXTENSIONS.has(ext)) {
+    if (url && isPublicHttpUrl(url) && !OFFICE_EMBED_PREVIEW_EXTENSIONS.has(ext)) {
       return <iframe title="file-preview" src={url} className="w-full h-64" />
     }
     return (
@@ -3019,16 +3541,16 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     )
   }
 
-  const displayStatus = editData.status || file.status || 'Pending Review'
-  const isDeletedFile = Boolean(editData.isDeleted || file.isDeleted || displayStatus === 'Deleted')
+  const displayStatus = safeEditData.status || file.status || 'Pending Review'
+  const isDeletedFile = Boolean(safeEditData.isDeleted || file.isDeleted || displayStatus === 'Deleted')
   const isApprovedLocked = !isDeletedFile
-    && (Boolean(editData.isLocked || file.isLocked) || String(displayStatus).toLowerCase() === 'approved')
+    && (Boolean(safeEditData.isLocked || file.isLocked) || String(displayStatus).toLowerCase() === 'approved')
   const effectiveReadOnly = readOnly || isDeletedFile || isApprovedLocked
   const canResubmit = !effectiveReadOnly && ['Rejected', 'Info Requested', 'Needs Clarification'].includes(displayStatus)
-  const adminComment = (editData.adminComment || file.adminComment || '').trim()
-  const requiredAction = (editData.requiredAction || file.requiredAction || '').trim()
-  const adminNotes = (editData.adminNotes || file.adminNotes || '').trim()
-  const infoRequestDetails = (editData.infoRequestDetails || file.infoRequestDetails || '').trim()
+  const adminComment = (safeEditData.adminComment || file.adminComment || '').trim()
+  const requiredAction = (safeEditData.requiredAction || file.requiredAction || '').trim()
+  const adminNotes = (safeEditData.adminNotes || file.adminNotes || '').trim()
+  const infoRequestDetails = (safeEditData.infoRequestDetails || file.infoRequestDetails || '').trim()
   const hasAdminFeedback = Boolean(adminComment || requiredAction || adminNotes || infoRequestDetails)
   const paymentMethodOptions = ['Cash', 'Bank Transfer', 'Card', 'Cheque', 'Mobile Money', 'POS', 'Other']
   const versions = Array.isArray(file.versions) ? file.versions : []
@@ -3079,8 +3601,8 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
       time: source.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
     }
   }
-  const approvedStampMeta = formatStampMeta(editData.approvedAtIso || file.approvedAtIso || '')
-  const rejectedStampMeta = formatStampMeta(editData.rejectedAtIso || file.rejectedAtIso || '')
+  const approvedStampMeta = formatStampMeta(safeEditData.approvedAtIso || file.approvedAtIso || '')
+  const rejectedStampMeta = formatStampMeta(safeEditData.rejectedAtIso || file.rejectedAtIso || '')
   const stampMode = displayStatus === 'Approved'
     ? 'approved'
     : displayStatus === 'Rejected'
@@ -3092,7 +3614,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
     event.target.value = ''
     if (!selectedFile) return
     if (!onResubmit) return
-    onResubmit(editData || file, selectedFile)
+    onResubmit(safeEditData || file, selectedFile)
   }
 
   return (
@@ -3124,11 +3646,11 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
                     </div>
                     {stampMode === 'approved' ? (
                       <div className="mt-2 text-xs tracking-wide font-medium">
-                        Approved by: {editData.approvedBy || file.approvedBy || 'Admin'} | Date: {approvedStampMeta.date} | Time: {approvedStampMeta.time}
+                        Approved by: {safeEditData.approvedBy || file.approvedBy || 'Admin'} | Date: {approvedStampMeta.date} | Time: {approvedStampMeta.time}
                       </div>
                     ) : (
                       <div className="mt-2 text-xs tracking-wide font-medium">
-                        Rejected by: {editData.rejectedBy || file.rejectedBy || 'Admin'} | Date: {rejectedStampMeta.date} | Reason: {(editData.rejectionReason || file.rejectionReason || adminComment || requiredAction || 'Not provided').slice(0, 80)}
+                        Rejected by: {safeEditData.rejectedBy || file.rejectedBy || 'Admin'} | Date: {rejectedStampMeta.date} | Reason: {(safeEditData.rejectionReason || file.rejectionReason || adminComment || requiredAction || 'Not provided').slice(0, 80)}
                       </div>
                     )}
                   </div>
@@ -3149,12 +3671,12 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
           <fieldset disabled={!isEditing || effectiveReadOnly} className="contents">
             <div>
               <label className="block text-xs text-text-muted">Uploaded By</label>
-              <input value={editData.user} onChange={(e) => setEditData(prev => ({ ...prev, user: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              <input value={safeEditData.user || ''} onChange={(e) => setEditData(prev => ({ ...prev, user: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
             </div>
             <div>
               <label className="block text-xs text-text-muted">Class</label>
               <input
-                value={editData.class || editData.expenseClass || editData.salesClass || ''}
+                value={safeEditData.class || safeEditData.expenseClass || safeEditData.salesClass || ''}
                 onChange={(e) => {
                   const nextClass = e.target.value
                   setEditData(prev => ({
@@ -3169,12 +3691,12 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
             </div>
             <div>
               <label className="block text-xs text-text-muted">Vendor</label>
-              <input value={editData.vendorName || ''} onChange={(e) => setEditData(prev => ({ ...prev, vendorName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              <input value={safeEditData.vendorName || ''} onChange={(e) => setEditData(prev => ({ ...prev, vendorName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
             </div>
             <div>
               <label className="block text-xs text-text-muted">Confidentiality</label>
               <select
-                value={editData.confidentialityLevel || 'Standard'}
+                value={safeEditData.confidentialityLevel || 'Standard'}
                 onChange={(e) => setEditData(prev => ({ ...prev, confidentialityLevel: e.target.value }))}
                 className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
               >
@@ -3186,7 +3708,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
             <div>
               <label className="block text-xs text-text-muted">Priority</label>
               <select
-                value={editData.processingPriority || 'Normal'}
+                value={safeEditData.processingPriority || 'Normal'}
                 onChange={(e) => setEditData(prev => ({ ...prev, processingPriority: e.target.value }))}
                 className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
               >
@@ -3198,82 +3720,82 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
             <div className="md:col-span-2">
               <label className="block text-xs text-text-muted">Notes</label>
               <textarea
-                value={editData.internalNotes || ''}
+                value={safeEditData.internalNotes || ''}
                 onChange={(e) => setEditData(prev => ({ ...prev, internalNotes: e.target.value }))}
                 className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary"
                 rows={3}
               />
             </div>
-            {('expenseDate' in editData || 'expenseDate' in file) && (
+            {('expenseDate' in safeEditData || 'expenseDate' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Expense Date</label>
-                <input type="date" value={editData.expenseDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, expenseDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input type="date" value={safeEditData.expenseDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, expenseDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('paymentMethod' in editData || 'paymentMethod' in file) && (
+            {('paymentMethod' in safeEditData || 'paymentMethod' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Payment Method</label>
                 <select
-                  value={editData.paymentMethod || ''}
+                  value={safeEditData.paymentMethod || ''}
                   onChange={(e) => setEditData(prev => ({ ...prev, paymentMethod: e.target.value }))}
                   className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
                 >
                   <option value="">Select payment method</option>
-                  {(editData.paymentMethod || '')
-                    && !paymentMethodOptions.some((option) => option.toLowerCase() === (editData.paymentMethod || '').toLowerCase())
-                    && <option value={editData.paymentMethod}>{editData.paymentMethod}</option>}
+                  {(safeEditData.paymentMethod || '')
+                    && !paymentMethodOptions.some((option) => option.toLowerCase() === (safeEditData.paymentMethod || '').toLowerCase())
+                    && <option value={safeEditData.paymentMethod}>{safeEditData.paymentMethod}</option>}
                   {paymentMethodOptions.map((option) => (
                     <option key={option} value={option}>{option}</option>
                   ))}
                 </select>
               </div>
             )}
-            {('customerName' in editData || 'customerName' in file) && (
+            {('customerName' in safeEditData || 'customerName' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Customer</label>
-                <input value={editData.customerName || ''} onChange={(e) => setEditData(prev => ({ ...prev, customerName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input value={safeEditData.customerName || ''} onChange={(e) => setEditData(prev => ({ ...prev, customerName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('invoiceNumber' in editData || 'invoiceNumber' in file) && (
+            {('invoiceNumber' in safeEditData || 'invoiceNumber' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Invoice #</label>
-                <input value={editData.invoiceNumber || ''} onChange={(e) => setEditData(prev => ({ ...prev, invoiceNumber: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input value={safeEditData.invoiceNumber || ''} onChange={(e) => setEditData(prev => ({ ...prev, invoiceNumber: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('bankName' in editData || 'bankName' in file) && (
+            {('bankName' in safeEditData || 'bankName' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Bank Name</label>
-                <input value={editData.bankName || ''} onChange={(e) => setEditData(prev => ({ ...prev, bankName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input value={safeEditData.bankName || ''} onChange={(e) => setEditData(prev => ({ ...prev, bankName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('accountName' in editData || 'accountName' in file) && (
+            {('accountName' in safeEditData || 'accountName' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Account Name</label>
-                <input value={editData.accountName || ''} onChange={(e) => setEditData(prev => ({ ...prev, accountName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input value={safeEditData.accountName || ''} onChange={(e) => setEditData(prev => ({ ...prev, accountName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('accountLast4' in editData || 'accountLast4' in file) && (
+            {('accountLast4' in safeEditData || 'accountLast4' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Account Last 4</label>
-                <input value={editData.accountLast4 || ''} maxLength={4} onChange={(e) => setEditData(prev => ({ ...prev, accountLast4: e.target.value.replace(/\D/g, '').slice(0, 4) }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input value={safeEditData.accountLast4 || ''} maxLength={4} onChange={(e) => setEditData(prev => ({ ...prev, accountLast4: e.target.value.replace(/\D/g, '').slice(0, 4) }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('statementStartDate' in editData || 'statementStartDate' in file) && (
+            {('statementStartDate' in safeEditData || 'statementStartDate' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Statement Start Date</label>
-                <input type="date" value={editData.statementStartDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementStartDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input type="date" value={safeEditData.statementStartDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementStartDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('statementEndDate' in editData || 'statementEndDate' in file) && (
+            {('statementEndDate' in safeEditData || 'statementEndDate' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Statement End Date</label>
-                <input type="date" value={editData.statementEndDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementEndDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+                <input type="date" value={safeEditData.statementEndDate || ''} onChange={(e) => setEditData(prev => ({ ...prev, statementEndDate: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
-            {('description' in editData || 'description' in file) && (
+            {('description' in safeEditData || 'description' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Description</label>
-                <textarea value={editData.description || ''} onChange={(e) => setEditData(prev => ({ ...prev, description: e.target.value }))} className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary" rows={3} />
+                <textarea value={safeEditData.description || ''} onChange={(e) => setEditData(prev => ({ ...prev, description: e.target.value }))} className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary" rows={3} />
               </div>
             )}
           </fieldset>
@@ -3297,11 +3819,11 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
             <>
               <div>
                 <label className="block text-xs text-text-muted">Approved By</label>
-                <div className="py-2 text-sm text-text-primary">{editData.approvedBy || file.approvedBy || '--'}</div>
+                <div className="py-2 text-sm text-text-primary">{safeEditData.approvedBy || file.approvedBy || '--'}</div>
               </div>
               <div>
                 <label className="block text-xs text-text-muted">Approved On</label>
-                <div className="py-2 text-sm text-text-primary">{formatTimestamp(editData.approvedAtIso || file.approvedAtIso || '')}</div>
+                <div className="py-2 text-sm text-text-primary">{formatTimestamp(safeEditData.approvedAtIso || file.approvedAtIso || '')}</div>
               </div>
               <div>
                 <label className="block text-xs text-text-muted">Locked</label>
@@ -3313,15 +3835,15 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
             <>
               <div>
                 <label className="block text-xs text-text-muted">Rejected By</label>
-                <div className="py-2 text-sm text-text-primary">{editData.rejectedBy || file.rejectedBy || '--'}</div>
+                <div className="py-2 text-sm text-text-primary">{safeEditData.rejectedBy || file.rejectedBy || '--'}</div>
               </div>
               <div>
                 <label className="block text-xs text-text-muted">Rejected On</label>
-                <div className="py-2 text-sm text-text-primary">{formatTimestamp(editData.rejectedAtIso || file.rejectedAtIso || '')}</div>
+                <div className="py-2 text-sm text-text-primary">{formatTimestamp(safeEditData.rejectedAtIso || file.rejectedAtIso || '')}</div>
               </div>
               <div className="md:col-span-2">
                 <label className="block text-xs text-text-muted">Reason</label>
-                <div className="py-2 text-sm text-text-primary">{editData.rejectionReason || file.rejectionReason || adminComment || requiredAction || 'No reason provided.'}</div>
+                <div className="py-2 text-sm text-text-primary">{safeEditData.rejectionReason || file.rejectionReason || adminComment || requiredAction || 'No reason provided.'}</div>
               </div>
               <div>
                 <label className="block text-xs text-text-muted">Can Be Edited</label>
@@ -3399,7 +3921,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
                   <tbody>
                     {versions.slice().reverse().map((version, idx) => {
                       const snapshot = version.fileSnapshot || {}
-                      const previewUrl = snapshot.previewUrl || version.previewUrl
+                      const previewUrl = normalizeRuntimePreviewUrl(snapshot.previewUrl || version.previewUrl || '', { allowBlob: false })
                       const filename = snapshot.filename || version.filename || file.filename
                       const versionNumber = version.versionNumber || version.version || idx + 1
                       return (
@@ -3443,7 +3965,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
 
           <div className="pt-4 flex items-center gap-2 justify-end">
             {currentDownloadUrl ? (
-              <a href={currentDownloadUrl} download={editData.filename} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
+              <a href={currentDownloadUrl} download={safeEditData.filename || file.filename || 'document'} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
             ) : (
               <span className="h-9 px-4 inline-flex items-center rounded-md bg-background text-xs text-text-secondary border border-border">
                 Download unavailable
@@ -3462,7 +3984,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
             ) : (
               <>
                 {!isApprovedLocked && (
-                  <button onClick={() => { onDelete?.(editData || file) }} className="h-9 px-4 border border-border rounded-md text-sm text-error hover:bg-error-bg">Delete</button>
+                  <button onClick={() => { onDelete?.(safeEditData || file) }} className="h-9 px-4 border border-border rounded-md text-sm text-error hover:bg-error-bg">Delete</button>
                 )}
                 {!isEditing ? (
                   <button
@@ -3480,7 +4002,7 @@ function FileViewerModal({ file, onClose, onSave, onDelete, onResubmit, readOnly
                 ) : (
                   <>
                     <button onClick={() => { setEditData(file); setSelectedVersion(null); setIsEditing(false) }} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background">Cancel</button>
-                    <button onClick={() => { onSave?.(editData); setIsEditing(false) }} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Save</button>
+                    <button onClick={() => { onSave?.(safeEditData); setIsEditing(false) }} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Save</button>
                   </>
                 )}
               </>
@@ -3523,5 +4045,3 @@ export {
   ClientSupportWidget,
   FileViewerModal,
 }
-
-

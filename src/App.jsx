@@ -37,6 +37,7 @@ import {
   bankStatementDocumentSeed,
 } from './data/client/mockData'
 import { getScopedStorageKey } from './utils/storage'
+import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
 
 const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
@@ -101,6 +102,20 @@ const normalizeUser = (user) => {
 }
 
 const getDefaultPageForRole = (role = 'client') => (role === 'admin' ? ADMIN_DEFAULT_PAGE : 'dashboard')
+
+const buildSearchSuggestions = (values = [], limit = 16) => {
+  const seen = new Set()
+  const suggestions = []
+  ;(Array.isArray(values) ? values : []).forEach((value) => {
+    const normalized = String(value || '').trim()
+    if (!normalized) return
+    const key = normalized.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    suggestions.push(normalized)
+  })
+  return suggestions.slice(0, Math.max(1, limit))
+}
 
 const getAdminSystemSettings = () => {
   try {
@@ -188,6 +203,7 @@ const buildFileSnapshot = (file = {}) => ({
   extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
   status: file.status || 'Pending Review',
   class: file.class || file.expenseClass || file.salesClass || '',
+  fileCacheKey: file.fileCacheKey || '',
   folderId: file.folderId || '',
   folderName: file.folderName || '',
   previewUrl: file.previewUrl || null,
@@ -523,21 +539,33 @@ const updateFirstPendingFileStatus = (records = [], nextStatus = 'Approved') => 
   return { updated, records: nextRecords }
 }
 
+const resolveCategoryIdFromHistoryLabel = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized.includes('sales')) return 'sales'
+  if (normalized.includes('bank')) return 'bank-statements'
+  return 'expenses'
+}
+
 const createDefaultClientDocuments = (ownerName = '') => {
   const normalizedOwner = ownerName?.trim() || 'Client User'
   return {
     expenses: expenseDocumentSeed.map((item) => ({ ...item, user: normalizedOwner })),
     sales: salesDocumentSeed.map((item) => ({ ...item, user: normalizedOwner })),
     bankStatements: bankStatementDocumentSeed.map((item) => ({ ...item, user: normalizedOwner })),
-    uploadHistory: uploadHistoryData.map((item) => ({ ...item, user: normalizedOwner })),
+    uploadHistory: [],
   }
 }
 
-const normalizeUploadHistoryRows = (rows = []) => (
-  (Array.isArray(rows) ? rows : []).map((row) => ({
-    ...row,
-    status: normalizeDocumentWorkflowStatus(row?.status || 'Pending Review'),
-  }))
+const normalizeUploadHistoryRows = (rows = [], ownerEmail = '') => (
+  (Array.isArray(rows) ? rows : [])
+    .filter((row) => row && typeof row === 'object' && !row.isFolder)
+    .map((row) => ({
+      ...row,
+      isFolder: false,
+      ownerEmail: String(row?.ownerEmail || ownerEmail || '').trim().toLowerCase(),
+      categoryId: row?.categoryId || resolveCategoryIdFromHistoryLabel(row?.category || ''),
+      status: normalizeDocumentWorkflowStatus(row?.status || 'Pending Review'),
+    }))
 )
 
 const readClientDocuments = (email, ownerName = '') => {
@@ -559,6 +587,7 @@ const readClientDocuments = (email, ownerName = '') => {
       bankStatements: Array.isArray(parsed.bankStatements) ? cloneDocumentRows(parsed.bankStatements) : fallback.bankStatements,
       uploadHistory: normalizeUploadHistoryRows(
         Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
+        email,
       ),
     }
   } catch {
@@ -571,7 +600,7 @@ const persistClientDocuments = (email, documents) => {
   const sanitizePreviewUrl = (value = '') => {
     const normalized = String(value || '').trim()
     if (!normalized) return ''
-    return normalized.toLowerCase().startsWith('blob:') ? '' : normalized
+    return /^blob:/i.test(normalized) ? '' : normalized
   }
   const sanitizeFile = (file = {}) => {
     const safeVersions = Array.isArray(file.versions)
@@ -610,12 +639,18 @@ const persistClientDocuments = (email, documents) => {
     })
   )
   const scopedKey = getScopedStorageKey(CLIENT_DOCUMENTS_STORAGE_KEY, email)
-  localStorage.setItem(scopedKey, JSON.stringify({
+  const payload = {
     ...documents,
     expenses: sanitizeCategoryRows(documents.expenses),
     sales: sanitizeCategoryRows(documents.sales),
     bankStatements: sanitizeCategoryRows(documents.bankStatements),
-  }))
+    uploadHistory: normalizeUploadHistoryRows(documents.uploadHistory, email),
+  }
+  try {
+    localStorage.setItem(scopedKey, JSON.stringify(payload))
+  } catch {
+    // Ignore storage quota failures so the UI remains usable for uploaded-file actions.
+  }
 }
 
 const appendClientActivityLog = (email, entry = {}) => {
@@ -871,6 +906,7 @@ function App() {
   })
   
   const [userNotifications, setUserNotifications] = useState([])
+  const [dashboardSearchTerm, setDashboardSearchTerm] = useState('')
   
   const currentUserRole = normalizeRole(authUser?.role, authUser?.email || '')
   const isAdminView = currentUserRole === 'admin'
@@ -879,6 +915,57 @@ function App() {
     ...flattenFolderFilesForDashboard(salesDocuments, 'sales'),
     ...flattenFolderFilesForDashboard(bankStatementDocuments, 'bank-statements'),
   ]), [expenseDocuments, salesDocuments, bankStatementDocuments])
+  const dashboardSearchSuggestions = useMemo(() => {
+    const getFolderSearchValues = (rows = []) => (
+      (Array.isArray(rows) ? rows : [])
+        .filter((row) => row?.isFolder)
+        .flatMap((folder) => [folder.folderName, folder.id, folder.user])
+    )
+    const recordValues = dashboardRecords.flatMap((record) => ([
+      record.filename,
+      record.fileId,
+      record.folderName,
+      record.folderId,
+      record.category,
+      record.class,
+      record.status,
+      record.extension || record.type,
+      record.user,
+    ]))
+    const uploadHistoryValues = (Array.isArray(uploadHistoryRecords) ? uploadHistoryRecords : []).flatMap((item) => ([
+      item?.filename,
+      item?.fileId,
+      item?.category,
+      item?.type,
+      item?.user,
+    ]))
+    const activityValues = (Array.isArray(clientActivityRecords) ? clientActivityRecords : []).flatMap((item) => ([
+      item?.action,
+      item?.details,
+      item?.actorName,
+      item?.actorRole,
+    ]))
+    return buildSearchSuggestions([
+      ...recordValues,
+      ...getFolderSearchValues(expenseDocuments),
+      ...getFolderSearchValues(salesDocuments),
+      ...getFolderSearchValues(bankStatementDocuments),
+      ...uploadHistoryValues,
+      ...activityValues,
+      'Expenses',
+      'Sales',
+      'Bank Statements',
+      'Upload History',
+      'Recent Activities',
+    ], 24)
+  }, [
+    dashboardRecords,
+    expenseDocuments,
+    salesDocuments,
+    bankStatementDocuments,
+    uploadHistoryRecords,
+    clientActivityRecords,
+  ])
   const previousDashboardFilesRef = useRef(null)
 
   const isImpersonatingClient = Boolean(
@@ -2261,6 +2348,12 @@ function App() {
     const ownerName = documentOwner?.trim()
       || (isImpersonatingClient ? (impersonationSession?.clientName || clientFirstName || 'Client') : authUser?.fullName)
       || 'Client User'
+    const ownerEmail = (
+      normalizedScopedClientEmail
+      || scopedClientEmail
+      || authUser?.email
+      || ''
+    ).trim().toLowerCase()
 
     const createdAtIso = new Date().toISOString()
     const createdAtDisplay = formatClientDocumentTimestamp(createdAtIso)
@@ -2268,7 +2361,7 @@ function App() {
     const folderToken = folderId.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-8)
     const buildFileReference = (index) => `${selectedConfig.prefix}-${folderToken}-${String(index + 1).padStart(3, '0')}`
 
-    const files = uploadedItems.map((item, index) => {
+    const files = await Promise.all(uploadedItems.map(async (item, index) => {
       const metadata = resolveFileDetails(item)
       const classValue = (metadata?.class || '').trim()
       const confidentialityLevel = metadata?.confidentialityLevel || 'Standard'
@@ -2276,6 +2369,11 @@ function App() {
       const internalNotes = (metadata?.internalNotes || '').trim()
       const vendorName = (metadata?.vendorName || '').trim()
       const fileCreatedAtIso = new Date().toISOString()
+      const fileId = buildFileReference(index)
+      const fileCacheKey = buildFileCacheKey({ ownerEmail, fileId })
+      if (item.rawFile instanceof Blob && fileCacheKey) {
+        await putCachedFileBlob(fileCacheKey, item.rawFile, { filename: item.name })
+      }
       const previewUrl = item.previewUrl || (item.rawFile ? URL.createObjectURL(item.rawFile) : null)
       const uploadSource = item.uploadSource || 'browse-file'
       const uploadSourceLabel = uploadSource === 'drag-drop'
@@ -2292,6 +2390,7 @@ function App() {
         class: classValue,
         expenseClass: category === 'expenses' ? classValue : '',
         salesClass: category === 'sales' ? classValue : '',
+        fileCacheKey,
         previewUrl,
       }
 
@@ -2299,7 +2398,8 @@ function App() {
         id: `${folderId}-FILE-${String(index + 1).padStart(3, '0')}`,
         folderId,
         folderName: folderName.trim(),
-        fileId: buildFileReference(index),
+        fileId,
+        fileCacheKey,
         filename: item.name,
         extension: baseFile.extension,
         status: 'Pending Review',
@@ -2358,7 +2458,7 @@ function App() {
           }),
         ],
       }
-    })
+    }))
 
     if (category === 'expenses') {
       const classValues = files.map((file) => file.class).filter(Boolean)
@@ -2391,16 +2491,18 @@ function App() {
         id: `UP-${Date.now()}-${index}-${Math.floor(Math.random() * 1000)}`,
         filename: file.filename,
         type: file.extension || 'FILE',
+        categoryId: category,
         category: selectedConfig.label,
         date: file.date || createdAtDisplay,
         user: ownerName,
+        ownerEmail,
         status: file.status || 'Pending Review',
         isFolder: false,
         folderId: folderRecord.id,
         fileId: file.fileId,
         uploadSource: file.uploadSource || 'browse-file',
       })),
-      ...prev,
+      ...(Array.isArray(prev) ? prev.filter((row) => !row?.isFolder) : []),
     ])
 
     appendScopedClientLog(
@@ -2431,6 +2533,7 @@ function App() {
         fileId,
         folderId,
         uploadedBy,
+        ownerEmail,
         uploadSource,
         timestampIso,
         status = 'Pending Review',
@@ -2440,15 +2543,17 @@ function App() {
           id: `UP-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           filename: filename || '--',
           type: extension || 'FILE',
+          categoryId,
           category: title,
           date: formatClientDocumentTimestamp(timestamp),
           user: uploadedBy || authUser?.fullName || clientFirstName || 'Client User',
+          ownerEmail: String(ownerEmail || normalizedScopedClientEmail || scopedClientEmail || authUser?.email || '').trim().toLowerCase(),
           status,
           isFolder: false,
           folderId: folderId || '',
           fileId: fileId || '',
           uploadSource: uploadSource || 'browse-file',
-        }, ...prev])
+        }, ...(Array.isArray(prev) ? prev.filter((row) => !row?.isFolder) : [])])
       }
       const isFolderRoute = activeFolderRoute?.category === categoryId && Boolean(activeFolderRoute?.folderId)
       if (isFolderRoute) {
@@ -2468,6 +2573,8 @@ function App() {
             impersonationBusinessName={impersonationBusinessName}
             showToast={showClientToast}
             onRecordUploadHistory={appendFileUploadHistory}
+            globalSearchTerm={dashboardSearchTerm}
+            onGlobalSearchTermChange={setDashboardSearchTerm}
           />
         )
       }
@@ -2485,6 +2592,8 @@ function App() {
           isImpersonatingClient={isImpersonatingClient}
           impersonationBusinessName={impersonationBusinessName}
           showToast={showClientToast}
+          globalSearchTerm={dashboardSearchTerm}
+          onGlobalSearchTermChange={setDashboardSearchTerm}
         />
       )
     }
@@ -2523,9 +2632,28 @@ function App() {
           setRecords: setBankStatementDocuments,
         })
       case 'upload-history':
-        return <ClientUploadHistoryPage records={uploadHistoryRecords} />
+        return (
+          <ClientUploadHistoryPage
+            records={uploadHistoryRecords}
+            expenseRecords={expenseDocuments}
+            salesRecords={salesDocuments}
+            bankStatementRecords={bankStatementDocuments}
+            ownerEmail={normalizedScopedClientEmail}
+            onOpenFileLocation={(categoryId, folderId) => handleOpenFolderRoute(categoryId, folderId)}
+            showToast={showClientToast}
+            globalSearchTerm={dashboardSearchTerm}
+            onGlobalSearchTermChange={setDashboardSearchTerm}
+          />
+        )
       case 'recent-activities':
-        return <ClientRecentActivitiesPage records={dashboardRecords} activityLogs={clientActivityRecords} />
+        return (
+          <ClientRecentActivitiesPage
+            records={dashboardRecords}
+            activityLogs={clientActivityRecords}
+            globalSearchTerm={dashboardSearchTerm}
+            onGlobalSearchTermChange={setDashboardSearchTerm}
+          />
+        )
       case 'support':
         return <ClientSupportPage />
       case 'settings':
@@ -2796,6 +2924,10 @@ function App() {
                 isImpersonationMode={isImpersonatingClient}
                 roleLabel={isImpersonatingClient ? 'Client (Admin View)' : 'Client'}
                 forceClientIcon={isImpersonatingClient}
+                searchTerm={dashboardSearchTerm}
+                onSearchTermChange={setDashboardSearchTerm}
+                searchPlaceholder="Search folders, files, upload history, and activities..."
+                searchSuggestions={dashboardSearchSuggestions}
               />
               <main className="p-6 flex-1 overflow-auto">
                 {renderClientPage()}
