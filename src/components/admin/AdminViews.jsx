@@ -42,91 +42,62 @@ import {
   Menu,
 } from 'lucide-react'
 import {
+  ADMIN_LEVELS,
   getAdminLevelLabel,
   hasAdminPermission,
+  isAdminInvitePending,
+  isOperationsAdminLevel,
+  isSuperAdminLevel,
+  isTechnicalAdminLevel,
+  normalizeAdminLevel,
   normalizeAdminAccount,
+  normalizeAdminInvite,
   normalizeRoleWithLegacyFallback,
 } from './adminIdentity'
 import {
-  expenseDocumentSeed,
-  salesDocumentSeed,
-  bankStatementDocumentSeed,
-  uploadHistoryData,
-} from '../../data/client/mockData'
+  CLIENT_ASSIGNMENTS_STORAGE_KEY,
+  canAdminAccessClientScope,
+  filterClientsForAdminScope,
+  readClientAssignmentsFromStorage,
+} from './adminAssignments'
 import KiaminaLogo from '../common/KiaminaLogo'
 import DotLottiePreloader from '../common/DotLottiePreloader'
+import * as XLSX from 'xlsx'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import { playSupportNotificationSound, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS } from '../../utils/supportNotificationSound'
+import { buildClientDownloadFilename } from '../../utils/downloadFilename'
+import { buildFileCacheKey } from '../../utils/fileCache'
+import {
+  buildSupportAttachmentPreview,
+  getSupportAttachmentBlob,
+  getSupportAttachmentKind,
+} from '../../utils/supportAttachments'
 import AdminSupportInboxPanel from './support/AdminSupportInboxPanel'
 import {
   deleteSupportLead,
   getSupportCenterSnapshot,
+  LEAD_CATEGORY,
   restoreSupportLead,
   subscribeSupportCenter,
   SUPPORT_TICKET_STATUS,
 } from '../../utils/supportCenter'
-
-// Mock admin data
-const mockAdmin = {
-  id: 'ADM-001',
-  fullName: 'System Administrator',
-  email: 'admin@kiamina.local',
-  role: 'Super Admin',
+const DEFAULT_ADMIN_ACCOUNT = {
+  id: 'ADMIN-CURRENT',
+  fullName: 'Admin User',
+  email: '',
+  role: 'admin',
+  adminLevel: ADMIN_LEVELS.SUPER,
 }
-
-// Mock documents for document review
-const mockDocuments = [
-  { id: 'DOC-001', filename: 'Expense_Report_Feb2026.pdf', category: 'Expense', user: 'John Doe', businessName: 'Acme Corporation', date: 'Feb 24, 2026 10:30 AM', status: 'Pending Review', priority: 'Normal', confidentiality: 'Internal', notes: '' },
-  { id: 'DOC-002', filename: 'Sales_Data_Jan2026.xlsx', category: 'Sales', user: 'Sarah Smith', businessName: 'Delta Ventures', date: 'Feb 23, 2026 2:15 PM', status: 'Approved', priority: 'High', confidentiality: 'Confidential', notes: '' },
-  { id: 'DOC-003', filename: 'Bank_Statement_GTB_Feb2026.pdf', category: 'Bank Statement', user: 'Mike Johnson', businessName: 'Prime Logistics', date: 'Feb 22, 2026 9:45 AM', status: 'Pending Review', priority: 'Normal', confidentiality: 'Internal', notes: '' },
-  { id: 'DOC-004', filename: 'Transactions_Export.csv', category: 'Bank Statement', user: 'John Doe', businessName: 'Acme Corporation', date: 'Feb 21, 2026 4:20 PM', status: 'Rejected', priority: 'Low', confidentiality: 'Internal', notes: 'Missing required signatures' },
-  { id: 'DOC-005', filename: 'Invoice_Template.docx', category: 'Sales', user: 'Sarah Smith', businessName: 'Delta Ventures', date: 'Feb 20, 2026 11:00 AM', status: 'Approved', priority: 'Normal', confidentiality: 'Public', notes: '' },
-  { id: 'DOC-006', filename: 'Receipt_Scanned_0042.pdf', category: 'Expense', user: 'Mike Johnson', businessName: 'Prime Logistics', date: 'Feb 19, 2026 3:30 PM', status: 'Pending Review', priority: 'High', confidentiality: 'Internal', notes: '' },
-]
-
-// Mock document comments
-const initialComments = {
-  'DOC-001': [
-    { id: 'CMT-001', adminId: 'ADM-001', adminName: 'System Administrator', adminRole: 'Super Admin', text: 'Please provide supporting documentation for this expense claim.', timestamp: 'Feb 24, 2026 11:00 AM', isEdited: false },
-  ],
-  'DOC-004': [
-    { id: 'CMT-002', adminId: 'ADM-001', adminName: 'System Administrator', adminRole: 'Super Admin', text: 'This document is missing required signatures as per compliance policy.', timestamp: 'Feb 21, 2026 4:30 PM', isEdited: false },
-  ],
-}
-
-// Mock notifications for admin
-const mockAdminNotifications = [
-  { id: 'NOT-001', type: 'comment', message: 'New comment on Expense_Report_Feb2026.pdf', timestamp: 'Feb 24, 2026 11:00 AM', read: false },
-  { id: 'NOT-002', type: 'status', message: 'Bank_Statement_GTB_Feb2026.pdf requires review', timestamp: 'Feb 22, 2026 9:45 AM', read: false },
-]
-
-// Mock sent notifications (for message center)
-const mockSentNotifications = [
-  { id: 'SN-001', title: 'Compliance Update Required', message: 'All businesses must update their tax documents by March 31st.', audience: 'All Businesses', dateSent: 'Feb 20, 2026', openRate: '45%', status: 'Delivered' },
-  { id: 'SN-002', title: 'System Maintenance Notice', message: 'Scheduled maintenance on Feb 28th from 2AM-4AM.', audience: 'All Users', dateSent: 'Feb 18, 2026', openRate: '78%', status: 'Delivered' },
-  { id: 'SN-003', title: 'Verification Reminder', message: 'Complete your business verification to avoid service interruption.', audience: 'Pending Verification Users', dateSent: 'Feb 15, 2026', openRate: '62%', status: 'Delivered' },
-]
-
-// Mock activity log
-const mockActivityLog = [
-  { id: 'LOG-001', adminName: 'System Administrator', action: 'Commented on document', affectedUser: 'John Doe', details: 'Expense_Report_Feb2026.pdf', timestamp: 'Feb 24, 2026 11:00 AM' },
-  { id: 'LOG-002', adminName: 'System Administrator', action: 'Approved document', affectedUser: 'Sarah Smith', details: 'Sales_Data_Jan2026.xlsx', timestamp: 'Feb 23, 2026 3:30 PM' },
-  { id: 'LOG-003', adminName: 'System Administrator', action: 'Rejected document', affectedUser: 'John Doe', details: 'Transactions_Export.csv - Missing signatures', timestamp: 'Feb 21, 2026 4:30 PM' },
-  { id: 'LOG-004', adminName: 'System Administrator', action: 'Sent bulk notification', affectedUser: '324 Users', details: 'Compliance Update Required', timestamp: 'Feb 20, 2026 10:00 AM' },
-  { id: 'LOG-005', adminName: 'System Administrator', action: 'Sent targeted notification', affectedUser: 'Mike Johnson', details: 'Verification Reminder', timestamp: 'Feb 15, 2026 2:15 PM' },
-]
-
-// Mock users for targeted notification
-const mockUsers = [
-  { id: 'USR-001', fullName: 'John Doe', email: 'john@acme.com', businessName: 'Acme Corporation', role: 'Client', verificationStatus: 'Verified', country: 'Nigeria', registrationStage: 'Completed' },
-  { id: 'USR-002', fullName: 'Sarah Smith', email: 'sarah@delta.com', businessName: 'Delta Ventures', role: 'Client', verificationStatus: 'Verified', country: 'Nigeria', registrationStage: 'Completed' },
-  { id: 'USR-003', fullName: 'Mike Johnson', email: 'mike@prime.com', businessName: 'Prime Logistics', role: 'Client', verificationStatus: 'Pending', country: 'Nigeria', registrationStage: 'Onboarding' },
-  { id: 'USR-004', fullName: 'Emily Davis', email: 'emily@omega.com', businessName: 'Omega Holdings', role: 'Client', verificationStatus: 'Rejected', country: 'Nigeria', registrationStage: 'Onboarding' },
-  { id: 'USR-005', fullName: 'Robert Wilson', email: 'robert@alpha.com', businessName: 'Alpha Industries', role: 'Accountant', verificationStatus: 'Verified', country: 'Nigeria', registrationStage: 'Completed' },
-]
 
 const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
+const ADMIN_WORK_SESSIONS_STORAGE_KEY = 'kiaminaAdminWorkSessions'
+const ADMIN_WORK_SESSIONS_SYNC_EVENT = 'kiamina:admin-work-sessions-sync'
+const ADMIN_WORK_INACTIVITY_PAUSE_MS = 30 * 60 * 1000
+const ADMIN_BREAK_START_HOUR = 13
+const ADMIN_BREAK_END_HOUR = 14
+const ADMIN_BREAK_DURATION_MS = Math.max(0, ADMIN_BREAK_END_HOUR - ADMIN_BREAK_START_HOUR) * 60 * 60 * 1000
+const ADMIN_WORK_ACTIVITY_EVENTS = ['mousedown', 'mousemove', 'keydown', 'scroll', 'touchstart']
 const ADMIN_SENT_NOTIFICATIONS_STORAGE_KEY = 'kiaminaAdminSentNotifications'
 const ADMIN_NOTIFICATION_DRAFTS_STORAGE_KEY = 'kiaminaAdminNotificationDrafts'
 const ADMIN_NOTIFICATION_EDIT_DRAFT_STORAGE_KEY = 'kiaminaAdminNotificationEditDraftId'
@@ -136,7 +107,12 @@ const ADMIN_TRASH_STORAGE_KEY = 'kiaminaAdminTrash'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
 const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
+const ACCOUNT_CREATED_AT_FALLBACK_STORAGE_KEY = 'kiaminaAccountCreatedAtFallback'
+const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_NOTIFICATIONS_SYNC_EVENT = 'kiamina:admin-notifications-sync'
+const DASHBOARD_REFRESH_INTERVAL_MS = 15000
+const DASHBOARD_INVITE_EXPIRING_SOON_MS = 12 * 60 * 60 * 1000
+const DASHBOARD_SCHEDULED_SOON_MS = 24 * 60 * 60 * 1000
 const COMPLIANCE_STATUS = {
   FULL: '?? Fully Compliant',
   ACTION: '?? Action Required',
@@ -159,12 +135,20 @@ const ADMIN_PAGE_PERMISSION_RULES = {
   'admin-leads': ['client_assistance'],
   'admin-communications': ['send_notifications', 'client_assistance'],
   'admin-notifications': ['send_notifications'],
-  'admin-clients': ['view_businesses'],
+  'admin-clients': ['view_businesses', 'view_assigned_clients'],
   'admin-activity': ['view_activity_logs'],
   'admin-trash': ['client_assistance'],
-  'admin-client-profile': ['view_businesses'],
+  'admin-client-profile': ['view_businesses', 'view_assigned_clients', 'view_client_settings'],
   'admin-client-documents': ['view_documents'],
-  'admin-client-upload-history': ['view_documents'],
+  'admin-client-upload-history': ['view_documents', 'view_upload_history'],
+}
+const ADMIN_PAGE_LEVEL_RULES = {
+  'admin-work-hours': [
+    ADMIN_LEVELS.SUPER,
+    ADMIN_LEVELS.AREA_ACCOUNTANT,
+    ADMIN_LEVELS.CUSTOMER_SERVICE,
+    ADMIN_LEVELS.TECHNICAL_SUPPORT,
+  ],
 }
 
 const CATEGORY_BUCKET_CONFIG = {
@@ -213,6 +197,308 @@ const formatTimestamp = (value) => {
     minute: '2-digit',
     hour12: true,
   })
+}
+
+const normalizeIsoTimestamp = (value = '') => {
+  const parsedDate = Date.parse(value || '')
+  if (!Number.isFinite(parsedDate)) return ''
+  return new Date(parsedDate).toISOString()
+}
+
+const toLocalDateKey = (value = '') => {
+  const parsedDate = Date.parse(value || '')
+  if (!Number.isFinite(parsedDate)) return ''
+  const date = new Date(parsedDate)
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const getLocalDateMsFromDateKey = (dateKey = '') => {
+  const [yearRaw, monthRaw, dayRaw] = String(dateKey || '').split('-')
+  const year = Number(yearRaw)
+  const month = Number(monthRaw)
+  const day = Number(dayRaw)
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return 0
+  const localDate = new Date(year, month - 1, day)
+  return localDate.getTime()
+}
+
+const formatLocalDateKey = (dateKey = '') => {
+  const dateMs = getLocalDateMsFromDateKey(dateKey)
+  if (!Number.isFinite(dateMs) || dateMs <= 0) return '--'
+  return new Date(dateMs).toLocaleDateString('en-US', {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+  })
+}
+
+const normalizeWorkPauseSegments = (pauseSegments = []) => (
+  (Array.isArray(pauseSegments) ? pauseSegments : [])
+    .map((segment) => {
+      const startAt = normalizeIsoTimestamp(segment?.startAt || segment?.pauseStartAt || '')
+      const endAt = normalizeIsoTimestamp(segment?.endAt || segment?.pauseEndAt || '')
+      if (!startAt || !endAt) return null
+      const startMs = Date.parse(startAt)
+      const endMs = Date.parse(endAt)
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null
+      return {
+        startAt,
+        endAt,
+        reason: String(segment?.reason || '').trim() || 'pause',
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => (Date.parse(left.startAt) || 0) - (Date.parse(right.startAt) || 0))
+)
+
+const mergeIntervals = (intervals = []) => {
+  const normalizedIntervals = (Array.isArray(intervals) ? intervals : [])
+    .map((interval) => {
+      const startMs = Number(interval?.startMs)
+      const endMs = Number(interval?.endMs)
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null
+      return { startMs, endMs }
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.startMs - right.startMs)
+  const mergedIntervals = []
+  normalizedIntervals.forEach((interval) => {
+    const previousInterval = mergedIntervals[mergedIntervals.length - 1]
+    if (!previousInterval || interval.startMs > previousInterval.endMs) {
+      mergedIntervals.push({ ...interval })
+      return
+    }
+    previousInterval.endMs = Math.max(previousInterval.endMs, interval.endMs)
+  })
+  return mergedIntervals
+}
+
+const getBreakOverlapMsForInterval = (startMs, endMs) => {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 0
+  let overlapMs = 0
+  const cursorDate = new Date(startMs)
+  cursorDate.setHours(0, 0, 0, 0)
+  const endDate = new Date(endMs)
+  endDate.setHours(0, 0, 0, 0)
+  while (cursorDate.getTime() <= endDate.getTime()) {
+    const breakStartMs = new Date(
+      cursorDate.getFullYear(),
+      cursorDate.getMonth(),
+      cursorDate.getDate(),
+      ADMIN_BREAK_START_HOUR,
+      0,
+      0,
+      0,
+    ).getTime()
+    const breakEndMs = new Date(
+      cursorDate.getFullYear(),
+      cursorDate.getMonth(),
+      cursorDate.getDate(),
+      ADMIN_BREAK_END_HOUR,
+      0,
+      0,
+      0,
+    ).getTime()
+    overlapMs += Math.max(0, Math.min(endMs, breakEndMs) - Math.max(startMs, breakStartMs))
+    cursorDate.setDate(cursorDate.getDate() + 1)
+  }
+  return overlapMs
+}
+
+const getBreakWindowMsForDateKey = (dateKey = '') => {
+  const [yearRaw, monthRaw, dayRaw] = String(dateKey || '').split('-')
+  const year = Number(yearRaw)
+  const month = Number(monthRaw)
+  const day = Number(dayRaw)
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return { breakStartMs: 0, breakEndMs: 0 }
+  }
+  const breakStartMs = new Date(year, month - 1, day, ADMIN_BREAK_START_HOUR, 0, 0, 0).getTime()
+  const breakEndMs = new Date(year, month - 1, day, ADMIN_BREAK_END_HOUR, 0, 0, 0).getTime()
+  return { breakStartMs, breakEndMs }
+}
+
+const getPaidBreakBonusMsForSessions = (sessions = [], dateKey = '', nowMs = Date.now()) => {
+  const normalizedDateKey = String(dateKey || '').trim()
+  if (!normalizedDateKey) return 0
+  const { breakStartMs } = getBreakWindowMsForDateKey(normalizedDateKey)
+  if (!Number.isFinite(breakStartMs) || breakStartMs <= 0) return 0
+
+  let earliestClockInMs = Number.POSITIVE_INFINITY
+  let latestPresenceMs = 0
+  ;(Array.isArray(sessions) ? sessions : []).forEach((session) => {
+    const clockInMs = Date.parse(session?.clockInAt || '')
+    if (!Number.isFinite(clockInMs)) return
+    const sessionDateKey = toLocalDateKey(session?.clockInAt || '')
+    if (sessionDateKey !== normalizedDateKey) return
+    earliestClockInMs = Math.min(earliestClockInMs, clockInMs)
+    const clockOutMs = session?.clockOutAt ? Date.parse(session.clockOutAt) : Number(nowMs)
+    if (Number.isFinite(clockOutMs)) {
+      latestPresenceMs = Math.max(latestPresenceMs, clockOutMs)
+    }
+  })
+
+  if (!Number.isFinite(earliestClockInMs) || earliestClockInMs >= breakStartMs) return 0
+  if (!Number.isFinite(latestPresenceMs) || latestPresenceMs < breakStartMs) return 0
+  return ADMIN_BREAK_DURATION_MS
+}
+
+const getWorkSessionActiveIntervals = (session = {}, nowMs = Date.now()) => {
+  const startMs = Date.parse(session?.clockInAt || '')
+  if (!Number.isFinite(startMs)) return []
+  const endMs = session?.clockOutAt ? Date.parse(session.clockOutAt) : Number(nowMs)
+  if (!Number.isFinite(endMs) || endMs <= startMs) return []
+
+  const pausedIntervals = normalizeWorkPauseSegments(session?.pauseSegments)
+    .map((segment) => {
+      const segmentStartMs = Math.max(startMs, Date.parse(segment.startAt))
+      const segmentEndMs = Math.min(endMs, Date.parse(segment.endAt))
+      if (!Number.isFinite(segmentStartMs) || !Number.isFinite(segmentEndMs) || segmentEndMs <= segmentStartMs) return null
+      return { startMs: segmentStartMs, endMs: segmentEndMs }
+    })
+    .filter(Boolean)
+
+  const activePauseStartMs = Date.parse(session?.pauseStartedAt || '')
+  if (
+    !session?.clockOutAt
+    && Number.isFinite(activePauseStartMs)
+    && activePauseStartMs < endMs
+  ) {
+    pausedIntervals.push({
+      startMs: Math.max(startMs, activePauseStartMs),
+      endMs,
+    })
+  }
+
+  const mergedPausedIntervals = mergeIntervals(pausedIntervals)
+  const activeIntervals = []
+  let cursorMs = startMs
+  mergedPausedIntervals.forEach((pauseInterval) => {
+    if (pauseInterval.startMs > cursorMs) {
+      activeIntervals.push({
+        startMs: cursorMs,
+        endMs: pauseInterval.startMs,
+      })
+    }
+    cursorMs = Math.max(cursorMs, pauseInterval.endMs)
+  })
+  if (cursorMs < endMs) {
+    activeIntervals.push({
+      startMs: cursorMs,
+      endMs,
+    })
+  }
+  return activeIntervals
+}
+
+const getWorkSessionStatus = (session = {}) => {
+  if (session?.clockOutAt) return 'Completed'
+  if (session?.pauseStartedAt) return 'Paused'
+  return 'Active'
+}
+
+const getAdminWorkSessionsFromStorage = () => {
+  const storedSessions = safeParseJson(localStorage.getItem(ADMIN_WORK_SESSIONS_STORAGE_KEY), [])
+  if (!Array.isArray(storedSessions)) return []
+  return storedSessions
+    .map((session, index) => {
+      const clockInAt = normalizeIsoTimestamp(session?.clockInAt || session?.startedAt || session?.timestamp || '')
+      if (!clockInAt) return null
+      const clockOutAt = normalizeIsoTimestamp(session?.clockOutAt || session?.endedAt || '')
+      const normalizedAdminLevel = normalizeAdminLevel(session?.adminLevel || ADMIN_LEVELS.SUPER)
+      const pauseStartedAtRaw = normalizeIsoTimestamp(session?.pauseStartedAt || '')
+      const pauseStartedAtMs = Date.parse(pauseStartedAtRaw || '')
+      const clockInMs = Date.parse(clockInAt)
+      const clockOutMs = Date.parse(clockOutAt || '')
+      const hasOpenPause = Number.isFinite(pauseStartedAtMs)
+        && pauseStartedAtMs >= clockInMs
+        && (!clockOutAt || pauseStartedAtMs < clockOutMs)
+      return {
+        id: session?.id || `WORK-${index + 1}-${Date.parse(clockInAt)}`,
+        adminName: String(session?.adminName || 'Admin User').trim() || 'Admin User',
+        adminEmail: String(session?.adminEmail || '').trim().toLowerCase(),
+        adminLevel: normalizedAdminLevel,
+        adminLevelLabel: getAdminLevelLabel(normalizedAdminLevel),
+        clockInAt,
+        clockOutAt: clockOutAt && Date.parse(clockOutAt) >= Date.parse(clockInAt) ? clockOutAt : '',
+        pauseSegments: normalizeWorkPauseSegments(session?.pauseSegments),
+        pauseStartedAt: hasOpenPause ? pauseStartedAtRaw : '',
+        pauseReason: hasOpenPause ? (String(session?.pauseReason || '').trim() || 'pause') : '',
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => (Date.parse(right.clockInAt) || 0) - (Date.parse(left.clockInAt) || 0))
+}
+
+const writeAdminWorkSessionsToStorage = (sessions = []) => {
+  localStorage.setItem(ADMIN_WORK_SESSIONS_STORAGE_KEY, JSON.stringify(Array.isArray(sessions) ? sessions : []))
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(ADMIN_WORK_SESSIONS_SYNC_EVENT))
+  }
+}
+
+const getWorkSessionDurationMs = (session = {}, nowMs = Date.now()) => {
+  const activeIntervals = getWorkSessionActiveIntervals(session, nowMs)
+  const grossActiveMs = activeIntervals.reduce(
+    (totalMs, interval) => totalMs + (interval.endMs - interval.startMs),
+    0,
+  )
+  const breakOverlapMs = activeIntervals.reduce(
+    (totalMs, interval) => totalMs + getBreakOverlapMsForInterval(interval.startMs, interval.endMs),
+    0,
+  )
+  return Math.max(0, grossActiveMs - breakOverlapMs)
+}
+
+const formatWorkDuration = (durationMs = 0) => {
+  const totalMinutes = Math.max(0, Math.floor(Number(durationMs || 0) / 60000))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
+
+const getActiveAdminWorkSessionForEmail = (sessions = [], adminEmail = '') => {
+  const normalizedEmail = String(adminEmail || '').trim().toLowerCase()
+  if (!normalizedEmail) return null
+  const activeSessions = (Array.isArray(sessions) ? sessions : [])
+    .filter((session) => (
+      !session?.clockOutAt
+      && String(session?.adminEmail || '').trim().toLowerCase() === normalizedEmail
+    ))
+    .sort((left, right) => (Date.parse(right?.clockInAt || '') || 0) - (Date.parse(left?.clockInAt || '') || 0))
+  return activeSessions[0] || null
+}
+
+const readAccountCreatedAtFallbackMap = () => {
+  const parsed = safeParseJson(localStorage.getItem(ACCOUNT_CREATED_AT_FALLBACK_STORAGE_KEY), {})
+  if (!parsed || typeof parsed !== 'object') return {}
+  return parsed
+}
+
+const writeAccountCreatedAtFallbackMap = (map = {}) => {
+  localStorage.setItem(ACCOUNT_CREATED_AT_FALLBACK_STORAGE_KEY, JSON.stringify(map))
+}
+
+const resolveAccountCreatedAtIso = (account = {}, normalizedEmail = '', fallbackMap = {}) => {
+  const candidates = [
+    account.createdAt,
+    account.createdAtIso,
+    account.dateCreated,
+    account.registeredAt,
+  ]
+  const fromAccount = candidates.find((value) => Number.isFinite(Date.parse(value || '')))
+  if (fromAccount) return new Date(fromAccount).toISOString()
+  if (normalizedEmail && Number.isFinite(Date.parse(fallbackMap[normalizedEmail] || ''))) {
+    return new Date(fallbackMap[normalizedEmail]).toISOString()
+  }
+  if (!normalizedEmail) return ''
+  const now = new Date().toISOString()
+  fallbackMap[normalizedEmail] = now
+  return now
 }
 
 const toDateTimeLocalValue = (value = '') => {
@@ -344,7 +630,7 @@ const normalizeSentNotification = (notification = {}, index = 0) => ({
 
 const readAdminSentNotificationsFromStorage = () => {
   const stored = safeParseJson(localStorage.getItem(ADMIN_SENT_NOTIFICATIONS_STORAGE_KEY), null)
-  const source = Array.isArray(stored) ? stored : mockSentNotifications
+  const source = Array.isArray(stored) ? stored : []
   return source.map((notification, index) => normalizeSentNotification(notification, index))
 }
 
@@ -504,8 +790,6 @@ const getNotificationRecipientsDirectory = () => {
     byEmail.set(normalized.email, normalized)
   }
 
-  mockUsers.forEach((user) => pushRecipient(user))
-
   const rawAccounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
   if (Array.isArray(rawAccounts)) {
     rawAccounts.forEach((account, index) => {
@@ -621,7 +905,6 @@ const deliverNotificationEmail = async ({
     })
     return response.ok
   } catch {
-    // Fallback to local demo flow when backend email endpoint is unavailable.
     return false
   }
 }
@@ -671,8 +954,20 @@ const dispatchAdminNotification = async ({
   )
   const emailSuccessCount = emailResults.filter(Boolean).length
   const emailFailureCount = Math.max(0, recipients.length - emailSuccessCount)
+  if (emailSuccessCount <= 0) {
+    return {
+      ok: false,
+      reason: 'email-delivery-failed',
+      recipients,
+      recipientCount: recipients.length,
+      sentNotification: null,
+      emailSuccessCount,
+      emailFailureCount,
+    }
+  }
 
   recipients.forEach((recipient, index) => {
+    if (!emailResults[index]) return
     const briefEntry = {
       id: `CBN-${Date.now().toString(36).toUpperCase()}-${index}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`,
       type: 'admin-notification',
@@ -886,40 +1181,12 @@ const isActionRequiredStatus = (status) => (
   normalizeComplianceStatus(status, '') === COMPLIANCE_STATUS.ACTION
 )
 
-const createClientDocumentFallback = (client) => {
-  const ownerName = client?.primaryContact || client?.settings?.fullName || 'Client User'
-  const businessName = client?.businessName || 'Client Business'
-
-  const expenses = expenseDocumentSeed.map((item, index) => ({
-    ...item,
-    id: `${client?.id || 'CL'}-EXP-${index + 1}`,
-    user: ownerName,
-    businessName,
-    category: 'Expense',
-  }))
-  const sales = salesDocumentSeed.map((item, index) => ({
-    ...item,
-    id: `${client?.id || 'CL'}-SAL-${index + 1}`,
-    user: ownerName,
-    businessName,
-    category: 'Sales',
-  }))
-  const bankStatements = bankStatementDocumentSeed.map((item, index) => ({
-    ...item,
-    id: `${client?.id || 'CL'}-BNK-${index + 1}`,
-    user: ownerName,
-    businessName,
-    category: 'Bank Statement',
-  }))
-  const uploadHistory = uploadHistoryData.map((item, index) => ({
-    ...item,
-    id: `${client?.id || 'CL'}-UPL-${index + 1}`,
-    user: ownerName,
-    businessName,
-  }))
-
-  return { expenses, sales, bankStatements, uploadHistory }
-}
+const createClientDocumentFallback = () => ({
+  expenses: [],
+  sales: [],
+  bankStatements: [],
+  uploadHistory: [],
+})
 
 const readClientDocumentBundle = (client) => {
   const email = (client?.email || '').trim().toLowerCase()
@@ -971,29 +1238,7 @@ const readClientActivityLogs = (client) => {
     timestamp: formatTimestamp(entry?.timestamp),
     _sortMs: Date.parse(entry?.timestamp || '') || 0,
   })).sort((left, right) => right._sortMs - left._sortMs)
-
-  if (normalizedLogs.length > 0) return normalizedLogs
-
-  return [
-    {
-      id: `${client?.id || 'CL'}-LOG-CREATED`,
-      action: 'Account initialized',
-      details: 'Client profile was provisioned for onboarding.',
-      actorName: client?.primaryContact || 'Client User',
-      actorRole: 'system',
-      timestamp: client?.dateCreated || '--',
-      _sortMs: Date.parse(client?.dateCreated || '') || 0,
-    },
-    {
-      id: `${client?.id || 'CL'}-LOG-STATUS`,
-      action: 'Compliance status',
-      details: `Current compliance state: ${client?.verificationStatus || COMPLIANCE_STATUS.PENDING}.`,
-      actorName: 'System',
-      actorRole: 'system',
-      timestamp: formatTimestamp(new Date().toISOString()),
-      _sortMs: Date.now(),
-    },
-  ]
+  return normalizedLogs
 }
 
 const toTimestamp = (value) => {
@@ -1004,6 +1249,57 @@ const toTimestamp = (value) => {
 const normalizeDocumentType = (row = {}) => (
   (row.extension || row.type || row.filename?.split('.').pop() || 'FILE').toUpperCase()
 )
+
+const MIME_TYPE_BY_EXTENSION = {
+  pdf: 'application/pdf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  json: 'application/json',
+  md: 'text/markdown',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+}
+
+const getDocumentMimeType = (document = {}) => {
+  const explicitMimeType = String(document?.mimeType || document?.type || '').trim()
+  if (explicitMimeType) return explicitMimeType
+  const extension = String(document?.extension || document?.filename?.split('.').pop() || '')
+    .trim()
+    .toLowerCase()
+  return MIME_TYPE_BY_EXTENSION[extension] || 'application/octet-stream'
+}
+
+const buildDocumentAttachmentPayload = (document = {}) => {
+  const name = String(document?.filename || 'Document').trim() || 'Document'
+  const type = getDocumentMimeType(document)
+  const previewUrl = String(document?.previewUrl || '').trim()
+  const resolvedPreviewDataUrl = previewUrl.startsWith('data:') ? previewUrl : ''
+  const ownerEmail = String(document?.source?.clientEmail || '').trim().toLowerCase()
+  const fileId = String(document?.fileId || document?.source?.fileId || '').trim()
+  const fallbackCacheKey = buildFileCacheKey({
+    ownerEmail,
+    fileId,
+  })
+  return {
+    name,
+    type,
+    size: Number(document?.size || 0),
+    cacheKey: String(document?.fileCacheKey || document?.source?.fileCacheKey || fallbackCacheKey || '').trim(),
+    previewDataUrl: resolvedPreviewDataUrl,
+    directPreviewUrl: previewUrl,
+  }
+}
 
 const flattenDocumentRows = (rows = []) => {
   const safeRows = Array.isArray(rows) ? rows : []
@@ -1034,6 +1330,12 @@ const buildReviewFileSnapshot = (row = {}, nextStatus = DOCUMENT_REVIEW_STATUS.P
 const normalizeReviewDocumentRow = (client, bucketKey, row, index) => ({
   id: `${client.email || 'client'}:${bucketKey}:${row.id || row.fileId || index}`,
   filename: row.filename || 'Document',
+  fileId: row.fileId || '',
+  fileCacheKey: row.fileCacheKey || '',
+  previewUrl: row.previewUrl || '',
+  mimeType: row.mimeType || '',
+  size: Number(row.size || 0),
+  rawFile: row.rawFile || null,
   category: row.category || (bucketKey === 'bankStatements' ? 'Bank Statement' : bucketKey === 'sales' ? 'Sales' : 'Expense'),
   user: row.user || client.primaryContact || 'Client User',
   businessName: client.businessName || '--',
@@ -1058,11 +1360,13 @@ const normalizeReviewDocumentRow = (client, bucketKey, row, index) => ({
     filename: row.filename || '',
     date: row.date || '',
     category: row.category || '',
+    fileCacheKey: row.fileCacheKey || '',
   },
 })
 
-const readAllDocumentsForReview = () => {
-  const clients = readClientRows()
+const readAllDocumentsForReview = (adminAccount = null) => {
+  const allClients = readClientRows()
+  const clients = filterClientsForAdminScope(allClients, adminAccount || {})
   const documents = []
   clients.forEach((client) => {
     const bundle = readClientDocumentBundle(client)
@@ -1078,13 +1382,7 @@ const readAllDocumentsForReview = () => {
     })
   })
   if (documents.length > 0) return documents
-  return mockDocuments.map((row, index) => ({
-    ...row,
-    status: normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW),
-    source: null,
-    extension: normalizeDocumentType(row),
-    id: row.id || `MOCK-${index + 1}`,
-  }))
+  return []
 }
 
 const matchDocumentRow = (row, source = {}) => (
@@ -1266,10 +1564,61 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
 const readClientRows = () => {
   const rawAccounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
   if (!Array.isArray(rawAccounts)) return []
+  const createdAtFallbackMap = readAccountCreatedAtFallbackMap()
+  let didUpdateFallbackMap = false
+  let didUpdateAccounts = false
 
-  const clientAccounts = rawAccounts.filter((account) => (
+  const normalizedAccounts = rawAccounts.map((account) => {
+    const normalizedEmail = account?.email?.trim()?.toLowerCase() || ''
+    const resolvedCreatedAtIso = resolveAccountCreatedAtIso(account, normalizedEmail, createdAtFallbackMap)
+    if (normalizedEmail && resolvedCreatedAtIso && createdAtFallbackMap[normalizedEmail] !== resolvedCreatedAtIso) {
+      createdAtFallbackMap[normalizedEmail] = resolvedCreatedAtIso
+      didUpdateFallbackMap = true
+    }
+    const accountCreatedAt = account?.createdAt || resolvedCreatedAtIso
+    if (accountCreatedAt && account?.createdAt !== accountCreatedAt) {
+      didUpdateAccounts = true
+      return {
+        ...account,
+        createdAt: accountCreatedAt,
+      }
+    }
+    return account
+  })
+  if (didUpdateFallbackMap) writeAccountCreatedAtFallbackMap(createdAtFallbackMap)
+  if (didUpdateAccounts) {
+    localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(normalizedAccounts))
+  }
+
+  const clientAccounts = normalizedAccounts.filter((account) => (
     normalizeRoleWithLegacyFallback(account?.role, account?.email || '') === 'client'
   ))
+  const assignmentByClientEmail = new Map()
+  readClientAssignmentsFromStorage().forEach((entry) => {
+    const normalizedClientEmail = (entry?.clientEmail || '').trim().toLowerCase()
+    if (!normalizedClientEmail) return
+    const existing = assignmentByClientEmail.get(normalizedClientEmail) || []
+    assignmentByClientEmail.set(normalizedClientEmail, [...existing, entry])
+  })
+  const areaAdminDirectoryByEmail = new Map(
+    normalizedAccounts
+      .filter((account) => (
+        normalizeRoleWithLegacyFallback(account?.role, account?.email || '') === 'admin'
+        && normalizeAdminLevel(account?.adminLevel) === ADMIN_LEVELS.AREA_ACCOUNTANT
+      ))
+      .map((account) => {
+        const normalizedEmail = (account?.email || '').trim().toLowerCase()
+        return [
+          normalizedEmail,
+          {
+            email: normalizedEmail,
+            fullName: account?.fullName || account?.email || 'Area Accountant',
+            status: account?.status === 'suspended' ? 'suspended' : 'active',
+          },
+        ]
+      })
+      .filter(([email]) => Boolean(email)),
+  )
 
   return clientAccounts.map((account, index) => {
     const normalizedEmail = account?.email?.trim()?.toLowerCase() || ''
@@ -1281,6 +1630,18 @@ const readClientRows = () => {
     const profilePhoto = getScopedStorageString('profilePhoto', normalizedEmail)
     const companyLogo = getScopedStorageString('companyLogo', normalizedEmail)
     const createdAt = account?.createdAt || account?.dateCreated || ''
+    const assignments = assignmentByClientEmail.get(normalizedEmail) || []
+    const assignedAreaAccountantEmails = [...new Set(
+      assignments
+        .map((entry) => (entry?.assignedAccountantEmail || '').trim().toLowerCase())
+        .filter(Boolean),
+    )]
+    const assignedAreaAccountantNames = assignedAreaAccountantEmails.map((email) => (
+      areaAdminDirectoryByEmail.get(email)?.fullName || email
+    ))
+    const latestAssignment = assignments
+      .filter((entry) => Number.isFinite(Date.parse(entry?.assignedAt || '')))
+      .sort((left, right) => Date.parse(right?.assignedAt || '') - Date.parse(left?.assignedAt || ''))[0] || null
     const onboardingCompleted = Boolean(onboarding?.completed)
     const onboardingSkipped = Boolean(onboarding?.skipped)
     const verificationPending = onboarding?.verificationPending !== undefined
@@ -1309,6 +1670,12 @@ const readClientRows = () => {
       dateCreated: createdAt ? formatTimestamp(createdAt) : '--',
       clientStatus: accountSuspended ? 'Suspended' : 'Active',
       suspensionMessage: statusControl?.suspensionMessage || '',
+      assignedAreaAccountantEmail: assignedAreaAccountantEmails[0] || '',
+      assignedAreaAccountantEmails,
+      assignedAreaAccountantName: assignedAreaAccountantNames.join(', '),
+      assignedAreaAccountantNames,
+      assignedAreaAssignedAt: latestAssignment?.assignedAt || '',
+      assignedAreaAssignedBy: latestAssignment?.assignedBy || '',
       rawAccount: account,
       settings,
       onboarding,
@@ -1328,6 +1695,10 @@ const getActivityLogsFromStorage = () => {
     .map((log, index) => ({
       id: log.id || `LOG-STORED-${index}`,
       adminName: log.adminName || 'Admin User',
+      adminEmail: log.adminEmail || '',
+      adminLevel: normalizeAdminLevel(log.adminLevel || ADMIN_LEVELS.SUPER),
+      adminLevelLabel: getAdminLevelLabel(log.adminLevel || ADMIN_LEVELS.SUPER),
+      impersonatedBy: log.impersonatedBy || '',
       action: log.action || 'Admin action',
       affectedUser: log.affectedUser || '--',
       details: log.details || '--',
@@ -1342,7 +1713,179 @@ const hasAnyPermission = (account, permissionIds = []) => {
   return permissionIds.some((permissionId) => hasAdminPermission(account, permissionId))
 }
 
+const hasLeadCategoryMatch = (lead = {}, category = '') => {
+  const normalizedCategory = String(category || '').trim()
+  if (!normalizedCategory) return false
+  const categories = [
+    ...(Array.isArray(lead?.leadCategories) ? lead.leadCategories : []),
+    lead?.leadCategory,
+  ]
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean)
+  return categories.includes(normalizedCategory)
+}
+
+const buildAdminDashboardSnapshot = (adminAccount = null) => {
+  const normalizedAdmin = normalizeAdminAccount({
+    ...DEFAULT_ADMIN_ACCOUNT,
+    role: 'admin',
+    ...(adminAccount || {}),
+  })
+  const nowMs = Date.now()
+  const todayKey = toLocalDateKey(new Date(nowMs).toISOString())
+  const clients = filterClientsForAdminScope(readClientRows(), normalizedAdmin)
+  const clientEmailSet = new Set(
+    clients
+      .map((client) => String(client?.email || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const documents = readAllDocumentsForReview(normalizedAdmin)
+  const supportSnapshot = getSupportCenterSnapshot()
+  const tickets = Array.isArray(supportSnapshot?.tickets) ? supportSnapshot.tickets : []
+  const leads = Array.isArray(supportSnapshot?.leads) ? supportSnapshot.leads : []
+  const workSessions = getAdminWorkSessionsFromStorage()
+  const activityLogs = getActivityLogsFromStorage()
+  const inviteEntries = safeParseJson(localStorage.getItem(ADMIN_INVITES_STORAGE_KEY), [])
+  const pendingInvites = (Array.isArray(inviteEntries) ? inviteEntries : [])
+    .map((invite) => normalizeAdminInvite(invite))
+    .filter((invite) => isAdminInvitePending(invite))
+  const scheduledNotifications = readAdminScheduledNotificationsFromStorage()
+  const notificationDrafts = readAdminNotificationDraftsFromStorage()
+  const trashEntries = readAdminTrashEntriesFromStorage()
+
+  const openTickets = tickets.filter((ticket) => ticket.status === SUPPORT_TICKET_STATUS.OPEN).length
+  const assignedTickets = tickets.filter((ticket) => ticket.status === SUPPORT_TICKET_STATUS.ASSIGNED).length
+  const resolvedTickets = tickets.filter((ticket) => ticket.status === SUPPORT_TICKET_STATUS.RESOLVED).length
+  const unresolvedTickets = tickets.length - resolvedTickets
+  const unreadSupportCount = tickets.reduce((total, ticket) => total + Number(ticket?.unreadByAdmin || 0), 0)
+  const unattendedTickets = tickets.filter((ticket) => (
+    ticket.status === SUPPORT_TICKET_STATUS.OPEN
+    && Number(ticket?.unreadByAdmin || 0) > 0
+  )).length
+
+  const inquiryLeadCount = leads.filter((lead) => hasLeadCategoryMatch(lead, LEAD_CATEGORY.INQUIRY_FOLLOW_UP)).length
+  const newsletterLeadCount = leads.filter((lead) => hasLeadCategoryMatch(lead, LEAD_CATEGORY.NEWSLETTER_SUBSCRIBER)).length
+
+  const normalizedDocumentStatus = (status) => normalizeDocumentReviewStatus(status, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+  const pendingDocuments = documents.filter((document) => normalizedDocumentStatus(document.status) === DOCUMENT_REVIEW_STATUS.PENDING_REVIEW).length
+  const infoRequestedDocuments = documents.filter((document) => normalizedDocumentStatus(document.status) === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED).length
+  const rejectedDocuments = documents.filter((document) => normalizedDocumentStatus(document.status) === DOCUMENT_REVIEW_STATUS.REJECTED).length
+  const approvedDocuments = documents.filter((document) => normalizedDocumentStatus(document.status) === DOCUMENT_REVIEW_STATUS.APPROVED).length
+  const approvedTodayDocuments = documents.filter((document) => (
+    normalizedDocumentStatus(document.status) === DOCUMENT_REVIEW_STATUS.APPROVED
+    && toLocalDateKey(document?.approvedAtIso || document?.date || '') === todayKey
+  )).length
+
+  const scopedAssignments = readClientAssignmentsFromStorage().filter((assignment) => (
+    clientEmailSet.has(String(assignment?.clientEmail || '').trim().toLowerCase())
+  ))
+  const assignmentByClientEmail = new Map()
+  scopedAssignments.forEach((assignment) => {
+    const normalizedClientEmail = String(assignment?.clientEmail || '').trim().toLowerCase()
+    const normalizedAssignedEmail = String(assignment?.assignedAccountantEmail || '').trim().toLowerCase()
+    if (!normalizedClientEmail || !normalizedAssignedEmail) return
+    if (!assignmentByClientEmail.has(normalizedClientEmail)) {
+      assignmentByClientEmail.set(normalizedClientEmail, new Set())
+    }
+    assignmentByClientEmail.get(normalizedClientEmail).add(normalizedAssignedEmail)
+  })
+  const multiAssignedClientCount = [...assignmentByClientEmail.values()].filter((assignedSet) => assignedSet.size > 1).length
+  const unassignedClientCount = clients.filter((client) => (
+    !assignmentByClientEmail.has(String(client?.email || '').trim().toLowerCase())
+  )).length
+
+  const openSessions = workSessions.filter((session) => !session?.clockOutAt)
+  const activeSessions = openSessions.filter((session) => !session?.pauseStartedAt)
+  const pausedSessions = openSessions.filter((session) => Boolean(session?.pauseStartedAt))
+  const activeWorkerCount = new Set(activeSessions.map((session) => session.adminEmail || session.adminName).filter(Boolean)).size
+  const pausedWorkerCount = new Set(pausedSessions.map((session) => session.adminEmail || session.adminName).filter(Boolean)).size
+  const openWorkerCount = new Set(openSessions.map((session) => session.adminEmail || session.adminName).filter(Boolean)).size
+  const todayWorkSessions = workSessions.filter((session) => toLocalDateKey(session?.clockInAt || '') === todayKey)
+  const todayTrackedDurationMs = todayWorkSessions.reduce(
+    (total, session) => total + getWorkSessionDurationMs(session, nowMs),
+    0,
+  )
+  const normalizedAdminEmail = String(normalizedAdmin?.email || '').trim().toLowerCase()
+  const personalTodayTrackedDurationMs = todayWorkSessions
+    .filter((session) => String(session?.adminEmail || '').trim().toLowerCase() === normalizedAdminEmail)
+    .reduce((total, session) => total + getWorkSessionDurationMs(session, nowMs), 0)
+  const personalActiveSession = getActiveAdminWorkSessionForEmail(workSessions, normalizedAdminEmail)
+  const personalWorkStatus = personalActiveSession
+    ? (personalActiveSession.pauseStartedAt ? 'Paused' : 'Active')
+    : 'Clocked Out'
+
+  const operationsLogCount = activityLogs.filter((log) => isOperationsAdminLevel(log?.adminLevel)).length
+  const technicalLogCount = activityLogs.filter((log) => isTechnicalAdminLevel(log?.adminLevel)).length
+  const superLogCount = activityLogs.filter((log) => isSuperAdminLevel(log?.adminLevel)).length
+  const todayStartMs = new Date(nowMs)
+  todayStartMs.setHours(0, 0, 0, 0)
+  const todayActivityCount = activityLogs.filter((log) => Number(log?.__sortTs || 0) >= todayStartMs.getTime()).length
+
+  const pendingInviteCount = pendingInvites.length
+  const expiringSoonInviteCount = pendingInvites.filter((invite) => {
+    const expiryMs = Date.parse(invite?.expiresAt || '')
+    return Number.isFinite(expiryMs) && expiryMs >= nowMs && (expiryMs - nowMs) <= DASHBOARD_INVITE_EXPIRING_SOON_MS
+  }).length
+  const scheduledPendingCount = scheduledNotifications.filter((entry) => entry?.status === 'Scheduled').length
+  const scheduledDueSoonCount = scheduledNotifications.filter((entry) => {
+    if (entry?.status !== 'Scheduled') return false
+    const scheduledMs = Date.parse(entry?.scheduledForIso || '')
+    return Number.isFinite(scheduledMs) && scheduledMs >= nowMs && (scheduledMs - nowMs) <= DASHBOARD_SCHEDULED_SOON_MS
+  }).length
+
+  return {
+    clients,
+    totalClients: clients.length,
+    pendingComplianceClients: clients.filter((client) => normalizeComplianceStatus(client?.verificationStatus, '') === COMPLIANCE_STATUS.PENDING).length,
+    actionRequiredClients: clients.filter((client) => normalizeComplianceStatus(client?.verificationStatus, '') === COMPLIANCE_STATUS.ACTION).length,
+    unassignedClientCount,
+    multiAssignedClientCount,
+    totalAssignments: scopedAssignments.length,
+    documents,
+    totalDocuments: documents.length,
+    pendingDocuments,
+    infoRequestedDocuments,
+    rejectedDocuments,
+    approvedDocuments,
+    approvedTodayDocuments,
+    openTickets,
+    assignedTickets,
+    resolvedTickets,
+    unresolvedTickets,
+    unreadSupportCount,
+    unattendedTickets,
+    totalLeads: leads.length,
+    inquiryLeadCount,
+    newsletterLeadCount,
+    activeWorkerCount,
+    pausedWorkerCount,
+    openWorkerCount,
+    todayTrackedDurationMs,
+    personalTodayTrackedDurationMs,
+    personalWorkStatus,
+    openWorkSessionCount: openSessions.length,
+    todayWorkSessionCount: todayWorkSessions.length,
+    operationsLogCount,
+    technicalLogCount,
+    superLogCount,
+    activityLogCount: activityLogs.length,
+    todayActivityCount,
+    recentActivityLogs: activityLogs.slice(0, 5),
+    pendingInviteCount,
+    expiringSoonInviteCount,
+    scheduledPendingCount,
+    scheduledDueSoonCount,
+    draftNotificationCount: notificationDrafts.length,
+    trashCount: trashEntries.length,
+  }
+}
+
 const canAccessAdminPage = (pageId, account) => {
+  const levelRestrictions = ADMIN_PAGE_LEVEL_RULES[pageId]
+  if (Array.isArray(levelRestrictions) && levelRestrictions.length > 0) {
+    const normalizedAdminLevel = normalizeAdminLevel(account?.adminLevel || ADMIN_LEVELS.SUPER)
+    if (!levelRestrictions.includes(normalizedAdminLevel)) return false
+  }
   const requiredPermissions = ADMIN_PAGE_PERMISSION_RULES[pageId]
   if (!requiredPermissions) return true
   return hasAnyPermission(account, requiredPermissions)
@@ -1369,28 +1912,50 @@ function AdminSidebar({
   const [trashCount, setTrashCount] = useState(() => readAdminTrashEntriesFromStorage().length)
 
   const navItems = [
-    { id: 'admin-dashboard', label: 'Admin Dashboard', icon: LayoutDashboard, badgeCount: 0, badgeTone: 'neutral' },
-    { id: 'admin-documents', label: 'Document Review', icon: FileText, badgeCount: 0, badgeTone: 'neutral' },
-    { id: 'admin-leads', label: 'Leads', icon: UsersRound, badgeCount: leadCount, badgeTone: 'neutral' },
-    { id: 'admin-communications', label: 'Communications', icon: Mail, badgeCount: supportUnreadCount, badgeTone: 'alert' },
-    { id: 'admin-notifications', label: 'Send Notification', icon: Send, badgeCount: 0, badgeTone: 'neutral' },
-    { id: 'admin-clients', label: 'Client Management', icon: Users, badgeCount: 0, badgeTone: 'neutral' },
+    { id: 'admin-dashboard', label: 'Admin Dashboard', icon: LayoutDashboard, badgeCount: 0, badgeTone: 'neutral', section: 'core' },
+    { id: 'admin-documents', label: 'Document Review', icon: FileText, badgeCount: 0, badgeTone: 'neutral', section: 'operations' },
+    { id: 'admin-clients', label: 'Client Management', icon: Users, badgeCount: 0, badgeTone: 'neutral', section: 'operations' },
+    { id: 'admin-work-hours', label: 'Work Hours', icon: Clock, badgeCount: 0, badgeTone: 'neutral', section: 'operations' },
+    { id: 'admin-leads', label: 'Leads', icon: UsersRound, badgeCount: leadCount, badgeTone: 'neutral', section: 'technical' },
+    { id: 'admin-communications', label: 'Communications', icon: Mail, badgeCount: supportUnreadCount, badgeTone: 'alert', section: 'technical' },
+    { id: 'admin-notifications', label: 'Send Notification', icon: Send, badgeCount: 0, badgeTone: 'neutral', section: 'technical' },
   ]
 
   const footerNavItems = [
-    { id: 'admin-activity', label: 'Activity Log', icon: Activity, badgeCount: 0, badgeTone: 'neutral' },
-    { id: 'admin-trash', label: 'Trash', icon: Trash2, badgeCount: trashCount, badgeTone: 'neutral' },
-    { id: 'admin-settings', label: 'Admin Settings', icon: Settings, badgeCount: 0, badgeTone: 'neutral' },
+    { id: 'admin-activity', label: 'Activity Log', icon: Activity, badgeCount: 0, badgeTone: 'neutral', section: 'operations' },
+    { id: 'admin-trash', label: 'Trash', icon: Trash2, badgeCount: trashCount, badgeTone: 'neutral', section: 'technical' },
+    { id: 'admin-settings', label: 'Admin Settings', icon: Settings, badgeCount: 0, badgeTone: 'neutral', section: 'core' },
   ]
+  const sectionLabels = {
+    core: 'Workspace',
+    operations: 'Operations Section',
+    technical: 'Technical Section',
+    super: 'Super Admin Panel',
+  }
+  const sectionOrder = ['core', 'operations', 'technical', 'super']
 
   const displayAdmin = normalizeAdminAccount({
-    ...mockAdmin,
+    ...DEFAULT_ADMIN_ACCOUNT,
     role: 'admin',
     ...currentAdminAccount,
   })
-  const displayRoleLabel = getAdminLevelLabel(displayAdmin.adminLevel)
+  const displayRoleLabel = String(displayAdmin.roleInCompany || '').trim() || getAdminLevelLabel(displayAdmin.adminLevel)
   const visibleNavItems = navItems.filter((item) => canAccessAdminPage(item.id, displayAdmin))
   const visibleFooterNavItems = footerNavItems.filter((item) => canAccessAdminPage(item.id, displayAdmin))
+  const groupedMainNavItems = sectionOrder
+    .map((sectionKey) => ({
+      sectionKey,
+      label: sectionLabels[sectionKey],
+      items: visibleNavItems.filter((item) => item.section === sectionKey),
+    }))
+    .filter((entry) => entry.items.length > 0)
+  const groupedFooterNavItems = sectionOrder
+    .map((sectionKey) => ({
+      sectionKey,
+      label: sectionLabels[sectionKey],
+      items: visibleFooterNavItems.filter((item) => item.section === sectionKey),
+    }))
+    .filter((entry) => entry.items.length > 0)
   const handleNavSelect = (pageId) => {
     setActivePage(pageId)
     onCloseMobile?.()
@@ -1438,6 +2003,21 @@ function AdminSidebar({
       ? 'bg-error text-white'
       : 'bg-background border border-border-light text-text-secondary'
   )
+  const renderNavButton = (item) => (
+    <button
+      key={item.id}
+      onClick={() => handleNavSelect(item.id)}
+      className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
+    >
+      <item.icon className="w-5 h-5" />
+      <span className="flex-1 text-left truncate">{item.label}</span>
+      {(item.id === 'admin-leads' || item.id === 'admin-trash' || Number(item.badgeCount || 0) > 0) && (
+        <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-semibold ${getBadgeClasses(item.badgeTone)}`}>
+          {Number(item.badgeCount) > 99 ? '99+' : Number(item.badgeCount)}
+        </span>
+      )}
+    </button>
+  )
 
   return (
     <>
@@ -1461,20 +2041,15 @@ function AdminSidebar({
         </div>
 
         <nav className="flex-1 py-3 overflow-y-auto">
-          {visibleNavItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => handleNavSelect(item.id)}
-              className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
-            >
-              <item.icon className="w-5 h-5" />
-              <span className="flex-1 text-left truncate">{item.label}</span>
-              {(item.id === 'admin-leads' || Number(item.badgeCount || 0) > 0) && (
-                <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-semibold ${getBadgeClasses(item.badgeTone)}`}>
-                  {Number(item.badgeCount) > 99 ? '99+' : Number(item.badgeCount)}
-                </span>
+          {groupedMainNavItems.map((group) => (
+            <div key={`main-${group.sectionKey}`} className="mb-1">
+              {group.sectionKey !== 'core' && (
+                <p className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                  {group.label}
+                </p>
               )}
-            </button>
+              {group.items.map((item) => renderNavButton(item))}
+            </div>
           ))}
         </nav>
 
@@ -1483,20 +2058,13 @@ function AdminSidebar({
         </div>
 
         <div className="pb-3">
-          {visibleFooterNavItems.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => handleNavSelect(item.id)}
-              className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
-            >
-              <item.icon className="w-5 h-5" />
-              <span className="flex-1 text-left truncate">{item.label}</span>
-              {(item.id === 'admin-trash' || Number(item.badgeCount || 0) > 0) && (
-                <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-semibold ${getBadgeClasses(item.badgeTone)}`}>
-                  {Number(item.badgeCount) > 99 ? '99+' : Number(item.badgeCount)}
-                </span>
-              )}
-            </button>
+          {groupedFooterNavItems.map((group) => (
+            <div key={`footer-${group.sectionKey}`} className="mb-1">
+              <p className="px-4 py-2 text-[10px] font-semibold uppercase tracking-wide text-text-muted">
+                {group.label}
+              </p>
+              {group.items.map((item) => renderNavButton(item))}
+            </div>
           ))}
         </div>
 
@@ -1533,10 +2101,12 @@ function AdminTopBar({
   searchResults = [],
   onSearchResultSelect,
   onSearchResultsDismiss,
+  onAdminActionLog,
 }) {
   const [showNotifications, setShowNotifications] = useState(false)
   const notificationRef = useRef(null)
   const searchRef = useRef(null)
+  const inactivityLastActivityAtRef = useRef(Date.now())
   const unreadCount = notifications.filter(n => !n.read).length
   const topBarSearchListId = 'admin-topbar-search-suggestions'
   const resolvedSearchTerm = String(searchTerm || '')
@@ -1545,10 +2115,37 @@ function AdminTopBar({
   const resolvedSearchResults = Array.isArray(searchResults) ? searchResults : []
   const shouldShowSearchPanel = resolvedSearchState !== 'idle'
   const displayAdmin = normalizeAdminAccount({
-    ...mockAdmin,
+    ...DEFAULT_ADMIN_ACCOUNT,
     role: 'admin',
     ...currentAdminAccount,
   })
+  const displayRoleLabel = String(displayAdmin.roleInCompany || '').trim() || getAdminLevelLabel(displayAdmin.adminLevel)
+  const displayFirstName = String(displayAdmin.fullName || '').trim().split(/\s+/)[0]
+    || String(adminFirstName || '').trim()
+    || 'Administrator'
+  const [workSessions, setWorkSessions] = useState(() => getAdminWorkSessionsFromStorage())
+  const [workNowMs, setWorkNowMs] = useState(() => Date.now())
+  const normalizedAdminEmail = String(displayAdmin?.email || '').trim().toLowerCase()
+  const activeWorkSession = useMemo(
+    () => getActiveAdminWorkSessionForEmail(workSessions, normalizedAdminEmail),
+    [workSessions, normalizedAdminEmail],
+  )
+  const isActiveWorkSessionPaused = Boolean(
+    activeWorkSession?.pauseStartedAt && !activeWorkSession?.clockOutAt,
+  )
+  const workClockLabel = isActiveWorkSessionPaused
+    ? `Paused ${formatTimestamp(activeWorkSession?.pauseStartedAt)}`
+    : activeWorkSession
+      ? `Clocked In ${formatTimestamp(activeWorkSession.clockInAt)}`
+    : 'Not Clocked In'
+  const workClockDurationLabel = activeWorkSession
+    ? formatWorkDuration(getWorkSessionDurationMs(activeWorkSession, workNowMs))
+    : ''
+  const workClockStateNote = isActiveWorkSessionPaused
+    ? 'Inactive for 30+ mins. Click Resume to continue.'
+    : 'If clocked in before 1:00 PM, break 1:00 PM - 2:00 PM is credited.'
+
+  const syncWorkSessions = () => setWorkSessions(getAdminWorkSessionsFromStorage())
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -1562,6 +2159,148 @@ function AdminTopBar({
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [onSearchResultsDismiss])
+
+  useEffect(() => {
+    syncWorkSessions()
+    const handleStorage = (event) => {
+      if (!event.key || event.key === ADMIN_WORK_SESSIONS_STORAGE_KEY) {
+        syncWorkSessions()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncWorkSessions)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncWorkSessions)
+    }
+  }, [])
+
+  useEffect(() => {
+    const markActiveNow = () => {
+      inactivityLastActivityAtRef.current = Date.now()
+    }
+    markActiveNow()
+    ADMIN_WORK_ACTIVITY_EVENTS.forEach((eventName) => {
+      window.addEventListener(eventName, markActiveNow)
+    })
+    window.addEventListener('focus', markActiveNow)
+    document.addEventListener('visibilitychange', markActiveNow)
+    return () => {
+      ADMIN_WORK_ACTIVITY_EVENTS.forEach((eventName) => {
+        window.removeEventListener(eventName, markActiveNow)
+      })
+      window.removeEventListener('focus', markActiveNow)
+      document.removeEventListener('visibilitychange', markActiveNow)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!activeWorkSession || isActiveWorkSessionPaused) return undefined
+    const intervalId = window.setInterval(() => {
+      const idleForMs = Date.now() - inactivityLastActivityAtRef.current
+      if (idleForMs < ADMIN_WORK_INACTIVITY_PAUSE_MS) return
+      const sessions = getAdminWorkSessionsFromStorage()
+      const activeIndex = sessions.findIndex((session) => session.id === activeWorkSession.id)
+      if (activeIndex === -1) return
+      const targetSession = sessions[activeIndex]
+      if (targetSession?.clockOutAt || targetSession?.pauseStartedAt) return
+      const nowIso = new Date().toISOString()
+      sessions[activeIndex] = {
+        ...targetSession,
+        pauseStartedAt: nowIso,
+        pauseReason: 'inactivity',
+      }
+      writeAdminWorkSessionsToStorage(sessions)
+      setWorkNowMs(Date.now())
+      onAdminActionLog?.({
+        action: 'Work session auto-paused',
+        affectedUser: displayAdmin.fullName || 'Admin User',
+        details: `Auto-paused after 30 minutes inactivity at ${formatTimestamp(nowIso)}`,
+      })
+    }, 15000)
+    return () => window.clearInterval(intervalId)
+  }, [activeWorkSession?.id, isActiveWorkSessionPaused, onAdminActionLog, displayAdmin.fullName])
+
+  useEffect(() => {
+    if (!activeWorkSession || isActiveWorkSessionPaused) return undefined
+    const intervalId = window.setInterval(() => setWorkNowMs(Date.now()), 1000)
+    return () => window.clearInterval(intervalId)
+  }, [activeWorkSession?.id, isActiveWorkSessionPaused])
+
+  const handleWorkClockToggle = () => {
+    if (!normalizedAdminEmail) return
+    const nowIso = new Date().toISOString()
+    const sessions = getAdminWorkSessionsFromStorage()
+    const nextSessions = [...sessions]
+    const activeIndex = nextSessions.findIndex((session) => (
+      !session.clockOutAt && String(session.adminEmail || '').trim().toLowerCase() === normalizedAdminEmail
+    ))
+
+    if (activeIndex >= 0) {
+      const activeSession = nextSessions[activeIndex]
+      if (activeSession?.pauseStartedAt) {
+        const pausedStartedAtMs = Date.parse(activeSession.pauseStartedAt)
+        const resumedAtMs = Date.parse(nowIso)
+        const nextPauseSegments = Array.isArray(activeSession.pauseSegments)
+          ? [...activeSession.pauseSegments]
+          : []
+        if (Number.isFinite(pausedStartedAtMs) && Number.isFinite(resumedAtMs) && resumedAtMs > pausedStartedAtMs) {
+          nextPauseSegments.push({
+            startAt: activeSession.pauseStartedAt,
+            endAt: nowIso,
+            reason: activeSession.pauseReason || 'pause',
+          })
+        }
+        nextSessions[activeIndex] = {
+          ...activeSession,
+          pauseSegments: normalizeWorkPauseSegments(nextPauseSegments),
+          pauseStartedAt: '',
+          pauseReason: '',
+        }
+        writeAdminWorkSessionsToStorage(nextSessions)
+        inactivityLastActivityAtRef.current = Date.now()
+        setWorkNowMs(Date.now())
+        onAdminActionLog?.({
+          action: 'Resumed work session',
+          affectedUser: displayAdmin.fullName || 'Admin User',
+          details: `Resumed work session at ${formatTimestamp(nowIso)}`,
+        })
+        return
+      }
+      nextSessions[activeIndex] = {
+        ...activeSession,
+        clockOutAt: nowIso,
+      }
+      writeAdminWorkSessionsToStorage(nextSessions)
+      setWorkNowMs(Date.now())
+      onAdminActionLog?.({
+        action: 'Clocked out',
+        affectedUser: displayAdmin.fullName || 'Admin User',
+        details: `Ended work session at ${formatTimestamp(nowIso)}`,
+      })
+      return
+    }
+
+    nextSessions.unshift({
+      id: `WORK-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      adminName: displayAdmin.fullName || 'Admin User',
+      adminEmail: normalizedAdminEmail,
+      adminLevel: normalizeAdminLevel(displayAdmin.adminLevel || ADMIN_LEVELS.SUPER),
+      clockInAt: nowIso,
+      clockOutAt: '',
+      pauseSegments: [],
+      pauseStartedAt: '',
+      pauseReason: '',
+    })
+    writeAdminWorkSessionsToStorage(nextSessions)
+    inactivityLastActivityAtRef.current = Date.now()
+    setWorkNowMs(Date.now())
+    onAdminActionLog?.({
+      action: 'Clocked in',
+      affectedUser: displayAdmin.fullName || 'Admin User',
+      details: `Started work session at ${formatTimestamp(nowIso)}`,
+    })
+  }
 
   return (
     <header className="h-14 bg-white border-b border-border flex items-center justify-between px-3 sm:px-4 lg:px-6 sticky top-0 z-40 gap-2">
@@ -1636,7 +2375,30 @@ function AdminTopBar({
           </div>
         </div>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3">
+        <div className="hidden xl:block text-right mr-1">
+          <p className="text-[11px] font-medium text-text-primary">{workClockLabel}</p>
+          {activeWorkSession && (
+            <p className="text-[11px] text-success">Session: {workClockDurationLabel}</p>
+          )}
+          <p className={`text-[10px] mt-0.5 ${isActiveWorkSessionPaused ? 'text-warning' : 'text-text-muted'}`}>
+            {workClockStateNote}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={handleWorkClockToggle}
+          disabled={!normalizedAdminEmail}
+          className={`h-8 px-3 rounded-md text-xs font-semibold transition-colors whitespace-nowrap ${
+            isActiveWorkSessionPaused
+              ? 'bg-warning-bg text-warning hover:bg-warning/20'
+              : activeWorkSession
+              ? 'bg-error-bg text-error hover:bg-error/20'
+              : 'bg-primary-tint text-primary hover:bg-primary/15'
+          } disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          {isActiveWorkSessionPaused ? 'Resume' : (activeWorkSession ? 'Clock Out' : 'Clock In')}
+        </button>
         <div className="relative" ref={notificationRef}>
           <button 
             onClick={() => setShowNotifications(!showNotifications)}
@@ -1687,8 +2449,8 @@ function AdminTopBar({
           )}
         </div>
         <div className="pl-3 border-l border-border">
-          <p className="text-sm font-medium text-text-primary">{adminFirstName || 'Administrator'}</p>
-          <p className="text-[11px] text-text-muted">{getAdminLevelLabel(displayAdmin.adminLevel)}</p>
+          <p className="text-sm font-medium text-text-primary">{displayFirstName}</p>
+          <p className="text-[11px] text-text-muted">{displayRoleLabel}</p>
         </div>
       </div>
     </header>
@@ -1696,45 +2458,336 @@ function AdminTopBar({
 }
 
 // Admin Dashboard Page
-function AdminDashboardPage({ setActivePage }) {
-  const cards = [
-    { label: 'Total Clients', value: '42', icon: Users, tone: 'bg-info-bg text-primary' },
-    { label: 'Pending Verifications', value: '8', icon: AlertTriangle, tone: 'bg-warning-bg text-warning' },
-    { label: 'Approved Today', value: '14', icon: CheckCircle, tone: 'bg-success-bg text-success' },
-    { label: 'Open Tickets', value: '5', icon: FileText, tone: 'bg-error-bg text-error' },
+function AdminDashboardPage({ setActivePage, currentAdminAccount }) {
+  const normalizedAdmin = useMemo(() => normalizeAdminAccount({
+    ...DEFAULT_ADMIN_ACCOUNT,
+    role: 'admin',
+    ...currentAdminAccount,
+  }), [currentAdminAccount])
+  const [dashboard, setDashboard] = useState(() => buildAdminDashboardSnapshot(normalizedAdmin))
+
+  useEffect(() => {
+    const syncDashboard = () => setDashboard(buildAdminDashboardSnapshot(normalizedAdmin))
+    syncDashboard()
+    const supportUnsubscribe = subscribeSupportCenter(() => syncDashboard())
+    const intervalId = window.setInterval(syncDashboard, DASHBOARD_REFRESH_INTERVAL_MS)
+    window.addEventListener('storage', syncDashboard)
+    window.addEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncDashboard)
+    window.addEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, syncDashboard)
+    return () => {
+      supportUnsubscribe()
+      window.clearInterval(intervalId)
+      window.removeEventListener('storage', syncDashboard)
+      window.removeEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncDashboard)
+      window.removeEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, syncDashboard)
+    }
+  }, [normalizedAdmin])
+
+  const documentCoveragePercent = dashboard.totalDocuments > 0
+    ? Math.round((dashboard.approvedDocuments / dashboard.totalDocuments) * 100)
+    : 0
+  const kpiCards = [
+    {
+      label: 'Visible Clients',
+      value: dashboard.totalClients,
+      caption: `${dashboard.pendingComplianceClients} pending verification`,
+      icon: Users,
+      tone: 'bg-info-bg text-primary',
+      targetPage: 'admin-clients',
+    },
+    {
+      label: 'Pending Review',
+      value: dashboard.pendingDocuments,
+      caption: `${dashboard.infoRequestedDocuments} info requested`,
+      icon: FileText,
+      tone: 'bg-warning-bg text-warning',
+      targetPage: 'admin-documents',
+    },
+    {
+      label: 'Approved Today',
+      value: dashboard.approvedTodayDocuments,
+      caption: `${documentCoveragePercent}% document approval coverage`,
+      icon: CheckCircle,
+      tone: 'bg-success-bg text-success',
+      targetPage: 'admin-documents',
+    },
+    {
+      label: 'Support Unread',
+      value: dashboard.unreadSupportCount,
+      caption: `${dashboard.unresolvedTickets} unresolved tickets`,
+      icon: MessageSquare,
+      tone: 'bg-error-bg text-error',
+      targetPage: 'admin-communications',
+    },
+    {
+      label: 'Lead Pipeline',
+      value: dashboard.totalLeads,
+      caption: `${dashboard.inquiryLeadCount} inquiry / ${dashboard.newsletterLeadCount} newsletter`,
+      icon: UsersRound,
+      tone: 'bg-primary-tint text-primary',
+      targetPage: 'admin-leads',
+    },
+    {
+      label: 'Admins Clocked In',
+      value: dashboard.openWorkerCount,
+      caption: `${dashboard.activeWorkerCount} active, ${dashboard.pausedWorkerCount} paused`,
+      icon: Clock,
+      tone: 'bg-background text-text-primary',
+      targetPage: 'admin-work-hours',
+    },
+  ]
+  const priorityItems = [
+    {
+      label: 'Pending Document Reviews',
+      value: dashboard.pendingDocuments,
+      description: 'Files waiting for action.',
+      targetPage: 'admin-documents',
+    },
+    {
+      label: 'Unattended Support Tickets',
+      value: dashboard.unattendedTickets,
+      description: 'Open tickets with unread messages.',
+      targetPage: 'admin-communications',
+    },
+    {
+      label: 'Clients Without Assignment',
+      value: dashboard.unassignedClientCount,
+      description: 'No Area Accountant assigned yet.',
+      targetPage: 'admin-settings',
+    },
+    {
+      label: 'Invites Expiring Within 12h',
+      value: dashboard.expiringSoonInviteCount,
+      description: 'Pending admin invite links nearing expiry.',
+      targetPage: 'admin-settings',
+    },
   ]
 
   return (
     <div className="animate-fade-in">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-        <h2 className="text-2xl font-semibold text-text-primary">Admin Dashboard</h2>
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 mb-6">
+        <div>
+          <h2 className="text-2xl font-semibold text-text-primary">Admin Dashboard</h2>
+          <p className="text-sm text-text-muted mt-1">Live operations, technical, and support snapshot.</p>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-lg border border-border-light bg-white px-3 py-2">
+          <ShieldCheck className="w-4 h-4 text-primary" />
+          <span className="text-xs text-text-secondary">
+            Signed in as {normalizedAdmin.fullName || 'Admin User'} ({getAdminLevelLabel(normalizedAdmin.adminLevel)})
+          </span>
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-        {cards.map((card) => (
-          <div key={card.label} className="bg-white rounded-lg shadow-card p-4 flex items-start gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
+        {kpiCards.map((card) => (
+          <button
+            key={card.label}
+            type="button"
+            onClick={() => setActivePage(card.targetPage)}
+            className="bg-white rounded-lg shadow-card p-4 flex items-start gap-3 text-left hover:shadow-card-hover transition-shadow"
+          >
             <div className={`w-10 h-10 rounded-md flex items-center justify-center ${card.tone}`}>
               <card.icon className="w-5 h-5" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-2xl font-semibold text-text-primary leading-tight">{card.value}</p>
               <p className="text-xs text-text-secondary mt-1 uppercase tracking-wide">{card.label}</p>
+              <p className="text-xs text-text-muted mt-1">{card.caption}</p>
             </div>
-          </div>
+          </button>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <button onClick={() => setActivePage('admin-documents')} className="bg-white rounded-lg shadow-card p-5 text-left hover:shadow-card-hover transition-shadow">
-          <p className="text-base font-semibold text-text-primary">Document Review Center</p>
-          <p className="text-sm text-text-secondary mt-1">Review, approve, and manage uploaded documents.</p>
-          <span className="inline-flex items-center gap-1 text-primary text-sm mt-4">Open <ChevronRight className="w-4 h-4" /></span>
-        </button>
-        <button onClick={() => setActivePage('admin-communications')} className="bg-white rounded-lg shadow-card p-5 text-left hover:shadow-card-hover transition-shadow">
-          <p className="text-base font-semibold text-text-primary">Communications Center</p>
-          <p className="text-sm text-text-secondary mt-1">Manage sent notifications and message history.</p>
-          <span className="inline-flex items-center gap-1 text-primary text-sm mt-4">Open <ChevronRight className="w-4 h-4" /></span>
-        </button>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-text-primary">1. Priority Queue</h3>
+            <button type="button" onClick={() => setActivePage('admin-documents')} className="text-xs text-primary hover:underline">Open Review</button>
+          </div>
+          <div className="mt-4 space-y-3">
+            {priorityItems.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                onClick={() => setActivePage(item.targetPage)}
+                className="w-full rounded-md border border-border-light px-3 py-2 text-left hover:bg-background transition-colors"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-text-primary">{item.label}</p>
+                  <span className="text-sm font-semibold text-primary">{item.value}</span>
+                </div>
+                <p className="text-xs text-text-muted mt-1">{item.description}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-text-primary">2. Document Pipeline</h3>
+            <button type="button" onClick={() => setActivePage('admin-documents')} className="text-xs text-primary hover:underline">Open Documents</button>
+          </div>
+          <div className="mt-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text-secondary">Total Documents</span>
+              <span className="text-sm font-semibold text-text-primary">{dashboard.totalDocuments}</span>
+            </div>
+            <div className="h-2 rounded-full bg-background overflow-hidden">
+              <div className="h-full bg-primary" style={{ width: `${documentCoveragePercent}%` }} />
+            </div>
+            <p className="text-xs text-text-muted">{documentCoveragePercent}% approved coverage</p>
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <div className="rounded-md border border-border-light p-3">
+                <p className="text-xs text-text-muted uppercase tracking-wide">Pending</p>
+                <p className="text-base font-semibold text-warning mt-1">{dashboard.pendingDocuments}</p>
+              </div>
+              <div className="rounded-md border border-border-light p-3">
+                <p className="text-xs text-text-muted uppercase tracking-wide">Info Requested</p>
+                <p className="text-base font-semibold text-primary mt-1">{dashboard.infoRequestedDocuments}</p>
+              </div>
+              <div className="rounded-md border border-border-light p-3">
+                <p className="text-xs text-text-muted uppercase tracking-wide">Rejected</p>
+                <p className="text-base font-semibold text-error mt-1">{dashboard.rejectedDocuments}</p>
+              </div>
+              <div className="rounded-md border border-border-light p-3">
+                <p className="text-xs text-text-muted uppercase tracking-wide">Approved Today</p>
+                <p className="text-base font-semibold text-success mt-1">{dashboard.approvedTodayDocuments}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-text-primary">3. Support Funnel</h3>
+            <button type="button" onClick={() => setActivePage('admin-communications')} className="text-xs text-primary hover:underline">Open Inbox</button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Open</p>
+              <p className="text-base font-semibold text-warning mt-1">{dashboard.openTickets}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Assigned</p>
+              <p className="text-base font-semibold text-primary mt-1">{dashboard.assignedTickets}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Resolved</p>
+              <p className="text-base font-semibold text-success mt-1">{dashboard.resolvedTickets}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Unread</p>
+              <p className="text-base font-semibold text-error mt-1">{dashboard.unreadSupportCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Inquiry Leads</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.inquiryLeadCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Newsletter Leads</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.newsletterLeadCount}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-text-primary">4. Workforce Pulse</h3>
+            <button type="button" onClick={() => setActivePage('admin-work-hours')} className="text-xs text-primary hover:underline">Open Work Hours</button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Clocked In</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.openWorkerCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Active / Paused</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.activeWorkerCount} / {dashboard.pausedWorkerCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Today Work Time</p>
+              <p className="text-base font-semibold text-primary mt-1">{formatWorkDuration(dashboard.todayTrackedDurationMs)}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">My Work Status</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.personalWorkStatus}</p>
+              <p className="text-xs text-text-muted mt-1">{formatWorkDuration(dashboard.personalTodayTrackedDurationMs)} today</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-text-primary">5. Activity Pulse</h3>
+            <button type="button" onClick={() => setActivePage('admin-activity')} className="text-xs text-primary hover:underline">Open Activity Log</button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Operations</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.operationsLogCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Technical</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.technicalLogCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Super Admin</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.superLogCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Today</p>
+              <p className="text-base font-semibold text-primary mt-1">{dashboard.todayActivityCount}</p>
+            </div>
+          </div>
+          <div className="mt-4 space-y-2">
+            {dashboard.recentActivityLogs.length > 0 ? dashboard.recentActivityLogs.map((log) => (
+              <div key={log.id} className="rounded-md border border-border-light px-3 py-2">
+                <p className="text-sm font-medium text-text-primary">{log.action}</p>
+                <p className="text-xs text-text-muted mt-1">{log.adminName} / {log.timestamp}</p>
+              </div>
+            )) : (
+              <p className="text-sm text-text-muted">No activity logs yet.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-base font-semibold text-text-primary">6. System Queue</h3>
+            <button type="button" onClick={() => setActivePage('admin-settings')} className="text-xs text-primary hover:underline">Open Settings</button>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Pending Invites</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.pendingInviteCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Expiring Soon</p>
+              <p className="text-base font-semibold text-warning mt-1">{dashboard.expiringSoonInviteCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Draft Notifications</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.draftNotificationCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Scheduled (24h)</p>
+              <p className="text-base font-semibold text-primary mt-1">{dashboard.scheduledDueSoonCount}/{dashboard.scheduledPendingCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Trash Items</p>
+              <p className="text-base font-semibold text-text-primary mt-1">{dashboard.trashCount}</p>
+            </div>
+            <div className="rounded-md border border-border-light p-3">
+              <p className="text-xs text-text-muted uppercase tracking-wide">Multi-Assigned Clients</p>
+              <p className="text-base font-semibold text-success mt-1">{dashboard.multiAssignedClientCount}</p>
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <button type="button" onClick={() => setActivePage('admin-settings')} className="h-9 rounded-md border border-border text-xs font-medium text-text-primary hover:bg-background">Admin Settings</button>
+            <button type="button" onClick={() => setActivePage('admin-communications')} className="h-9 rounded-md border border-border text-xs font-medium text-text-primary hover:bg-background">Communications</button>
+            <button type="button" onClick={() => setActivePage('admin-trash')} className="h-9 rounded-md border border-border text-xs font-medium text-text-primary hover:bg-background">Trash</button>
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -1753,24 +2806,40 @@ function AdminClientsPage({
   onOpenClientUploadHistory,
 }) {
   const [clients, setClients] = useState(() => readClientRows())
+  const [clientAssignments, setClientAssignments] = useState(() => readClientAssignmentsFromStorage())
   const [searchTerm, setSearchTerm] = useState('')
   const [openActionMenuId, setOpenActionMenuId] = useState(null)
   const actionMenuRef = useRef(null)
+  const resolvedAdminAccount = normalizeAdminAccount({
+    role: 'admin',
+    ...currentAdminAccount,
+  })
+  const isSuperAdmin = resolvedAdminAccount?.adminLevel === ADMIN_LEVELS.SUPER
   const hasPermission = (permissionId) => (
-    currentAdminAccount?.adminLevel === 'senior' || hasAdminPermission(currentAdminAccount, permissionId)
+    isSuperAdmin || hasAdminPermission(resolvedAdminAccount, permissionId)
   )
 
   const canViewDocuments = hasPermission('view_documents')
+  const canViewUploadHistory = hasPermission('view_upload_history')
   const canSendNotifications = hasPermission('send_notifications')
   const canManageUsers = hasPermission('manage_users')
-  const canImpersonateClients = hasPermission('client_assistance')
-  const canViewBusinesses = hasPermission('view_businesses')
+  const canImpersonateClients = hasPermission('impersonate_clients')
+  const canViewBusinesses = hasPermission('view_businesses') || hasPermission('view_assigned_clients')
+  const canViewClientSettings = canViewBusinesses || hasPermission('view_client_settings') || hasPermission('edit_client_settings')
 
   useEffect(() => {
     const refreshClients = () => setClients(readClientRows())
     refreshClients()
-    window.addEventListener('storage', refreshClients)
-    return () => window.removeEventListener('storage', refreshClients)
+    const handleStorage = (event) => {
+      if (!event.key || event.key === ACCOUNTS_STORAGE_KEY) {
+        refreshClients()
+      }
+      if (!event.key || event.key === CLIENT_ASSIGNMENTS_STORAGE_KEY) {
+        setClientAssignments(readClientAssignmentsFromStorage())
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
   }, [])
 
   useEffect(() => {
@@ -1797,13 +2866,15 @@ function AdminClientsPage({
     return 'bg-info-bg text-primary'
   }
 
-  const filteredClients = clients.filter((client) => {
+  const scopedClients = filterClientsForAdminScope(clients, resolvedAdminAccount, clientAssignments)
+  const filteredClients = scopedClients.filter((client) => {
     const haystack = [
       client.businessName,
       client.cri,
       client.primaryContact,
       client.email,
       client.country,
+      client.assignedAreaAccountantName,
     ].join(' ').toLowerCase()
     return haystack.includes(searchTerm.trim().toLowerCase())
   })
@@ -1839,9 +2910,13 @@ function AdminClientsPage({
 
   const handleClientAction = (actionId, client) => {
     setOpenActionMenuId(null)
+    if (!canAdminAccessClientScope(resolvedAdminAccount, client?.email, clientAssignments)) {
+      safeToast('error', 'Insufficient Permissions')
+      return
+    }
 
     if (actionId === 'view-profile') {
-      if (!canViewBusinesses) {
+      if (!canViewClientSettings) {
         safeToast('error', 'Insufficient Permissions')
         return
       }
@@ -1863,7 +2938,7 @@ function AdminClientsPage({
       return
     }
     if (actionId === 'view-upload-history') {
-      if (!canViewDocuments) {
+      if (!canViewUploadHistory) {
         safeToast('error', 'Insufficient Permissions')
         return
       }
@@ -1928,9 +3003,9 @@ function AdminClientsPage({
   }
 
   const actionItemsForClient = (client) => ([
-    { id: 'view-profile', label: 'View / Edit Client Profile', disabled: !canViewBusinesses, disabledMessage: 'Insufficient Permissions' },
+    { id: 'view-profile', label: 'View Client Profile', disabled: !canViewClientSettings, disabledMessage: 'Insufficient Permissions' },
     { id: 'view-documents', label: 'View Documents', disabled: !canViewDocuments, disabledMessage: 'Insufficient Permissions' },
-    { id: 'view-upload-history', label: 'View Upload History', disabled: !canViewDocuments, disabledMessage: 'Insufficient Permissions' },
+    { id: 'view-upload-history', label: 'View Upload History', disabled: !canViewUploadHistory, disabledMessage: 'Insufficient Permissions' },
     { id: 'reset-password', label: 'Reset Password', disabled: !canManageUsers, disabledMessage: 'Insufficient Permissions' },
     { id: 'toggle-status', label: client.clientStatus === 'Suspended' ? 'Activate Account' : 'Suspend Account', disabled: !canManageUsers, disabledMessage: 'Insufficient Permissions' },
     { id: 'send-notification', label: 'Send Notification', disabled: !canSendNotifications, disabledMessage: 'Insufficient Permissions' },
@@ -1947,7 +3022,11 @@ function AdminClientsPage({
       <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between mb-6 gap-4">
         <div>
           <h2 className="text-2xl font-semibold text-text-primary">Client Management</h2>
-          <p className="text-sm text-text-muted mt-1">View, manage, and assist client accounts.</p>
+          <p className="text-sm text-text-muted mt-1">
+            {normalizeAdminLevel(resolvedAdminAccount.adminLevel) === ADMIN_LEVELS.AREA_ACCOUNTANT
+              ? 'View and review clients assigned to your Area Accountant account.'
+              : 'View, manage, and assist client accounts.'}
+          </p>
         </div>
         <div className="w-full lg:w-80 relative">
           <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
@@ -1971,7 +3050,9 @@ function AdminClientsPage({
       <div className="md:hidden space-y-3">
         {filteredClients.length === 0 && (
           <div className="bg-white rounded-lg shadow-card border border-border-light px-4 py-8 text-center text-sm text-text-muted">
-            No client accounts found.
+            {normalizeAdminLevel(resolvedAdminAccount.adminLevel) === ADMIN_LEVELS.AREA_ACCOUNTANT
+              ? 'No assigned client accounts found.'
+              : 'No client accounts found.'}
           </div>
         )}
         {filteredClients.map((client) => (
@@ -1989,6 +3070,7 @@ function AdminClientsPage({
               <p><span className="text-text-muted">Contact:</span> {client.primaryContact}</p>
               <p><span className="text-text-muted">Email:</span> {client.email}</p>
               <p><span className="text-text-muted">Country:</span> {client.country}</p>
+              <p><span className="text-text-muted">Assigned Area:</span> {client.assignedAreaAccountantName || '--'}</p>
               <p><span className="text-text-muted">Created:</span> {client.dateCreated}</p>
             </div>
             <details className="mt-3">
@@ -2033,6 +3115,7 @@ function AdminClientsPage({
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">CRI</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Primary Contact</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Email</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Assigned Area</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Country</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Compliance State</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Onboarding Status</th>
@@ -2044,8 +3127,10 @@ function AdminClientsPage({
           <tbody>
             {filteredClients.length === 0 && (
               <tr>
-                <td colSpan={10} className="px-4 py-8 text-center text-sm text-text-muted">
-                  No client accounts found.
+                <td colSpan={11} className="px-4 py-8 text-center text-sm text-text-muted">
+                  {normalizeAdminLevel(resolvedAdminAccount.adminLevel) === ADMIN_LEVELS.AREA_ACCOUNTANT
+                    ? 'No assigned client accounts found.'
+                    : 'No client accounts found.'}
                 </td>
               </tr>
             )}
@@ -2055,6 +3140,7 @@ function AdminClientsPage({
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{client.cri}</td>
                 <td className="px-4 py-3.5 text-sm text-text-primary">{client.primaryContact}</td>
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{client.email}</td>
+                <td className="px-4 py-3.5 text-sm text-text-secondary">{client.assignedAreaAccountantName || '--'}</td>
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{client.country}</td>
                 <td className="px-4 py-3.5 text-sm">
                   <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getStatusBadge(client.verificationStatus)}`}>
@@ -2143,13 +3229,30 @@ function AdminClientPageHeader({ client, title, subtitle, setActivePage }) {
   )
 }
 
-function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActionLog }) {
+function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActionLog, currentAdminAccount }) {
   const [clientSnapshot, setClientSnapshot] = useState(client)
 
   useEffect(() => {
     setClientSnapshot(client)
   }, [client])
   const safeClient = clientSnapshot || client || null
+  const resolvedAdminAccount = normalizeAdminAccount({
+    role: 'admin',
+    ...currentAdminAccount,
+  })
+  const isSuperAdmin = resolvedAdminAccount.adminLevel === ADMIN_LEVELS.SUPER
+  const canViewClientProfile = (
+    isSuperAdmin
+    || hasAdminPermission(resolvedAdminAccount, 'view_businesses')
+    || hasAdminPermission(resolvedAdminAccount, 'view_assigned_clients')
+    || hasAdminPermission(resolvedAdminAccount, 'view_client_settings')
+    || hasAdminPermission(resolvedAdminAccount, 'edit_client_settings')
+  )
+  const canEditClientSettings = (
+    isSuperAdmin
+    || hasAdminPermission(resolvedAdminAccount, 'edit_client_settings')
+    || hasAdminPermission(resolvedAdminAccount, 'manage_technical_client_config')
+  )
   const normalizedEmail = (safeClient?.email || '').trim().toLowerCase()
   const settings = getScopedStorageObject('settingsFormData', normalizedEmail)
   const onboarding = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
@@ -2252,8 +3355,26 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       </div>
     )
   }
+  if (!canViewClientProfile || !canAdminAccessClientScope(resolvedAdminAccount, normalizedEmail)) {
+    return (
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
+        <p className="text-sm text-text-secondary">You do not have access to this client profile.</p>
+        <button
+          type="button"
+          onClick={() => setActivePage?.('admin-clients')}
+          className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+        >
+          Return to Client Management
+        </button>
+      </div>
+    )
+  }
 
   const saveVerificationStatus = (forcedStatus) => {
+    if (!canEditClientSettings) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
     if (!normalizedEmail) return
     const nextVerificationStatus = normalizeComplianceStatus(forcedStatus || verificationStatusDraft, COMPLIANCE_STATUS.PENDING)
     const nextSuspensionMessage = isActionRequiredStatus(nextVerificationStatus) ? suspensionMessage.trim() : ''
@@ -2309,6 +3430,10 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   }
 
   const saveProfileChanges = () => {
+    if (!canEditClientSettings) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
     if (!normalizedEmail) return
     const nextPrimaryContact = toTrimmedValue(profileDraft.primaryContact)
     const nextBusinessName = toTrimmedValue(profileDraft.businessName)
@@ -2412,6 +3537,10 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   }
 
   const saveIdentityAssets = () => {
+    if (!canEditClientSettings) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
     if (!normalizedEmail) return
     setIsSavingIdentityAssets(true)
     try {
@@ -2507,6 +3636,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             <select
               value={verificationStatusDraft}
               onChange={(event) => setVerificationStatusDraft(event.target.value)}
+              disabled={!canEditClientSettings}
               className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             >
               {COMPLIANCE_STATUS_OPTIONS.map((statusLabel) => (
@@ -2521,7 +3651,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
               onChange={(event) => setSuspensionMessage(event.target.value)}
               placeholder="Document the required action for this client."
               className="w-full h-20 px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary resize-none"
-              disabled={!isActionRequiredStatus(verificationStatusDraft)}
+              disabled={!canEditClientSettings || !isActionRequiredStatus(verificationStatusDraft)}
             />
           </div>
         </div>
@@ -2529,7 +3659,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
           <button
             type="button"
             onClick={() => saveVerificationStatus(COMPLIANCE_STATUS.FULL)}
-            disabled={isSavingVerificationStatus}
+            disabled={!canEditClientSettings || isSavingVerificationStatus}
             className="h-10 px-4 mr-2 border border-success text-success rounded-md text-sm font-semibold hover:bg-success-bg transition-colors disabled:opacity-60"
           >
             Mark Full Compliance
@@ -2537,12 +3667,15 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
           <button
             type="button"
             onClick={saveVerificationStatus}
-            disabled={isSavingVerificationStatus}
+            disabled={!canEditClientSettings || isSavingVerificationStatus}
             className="h-10 px-4 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-60"
           >
             {isSavingVerificationStatus ? 'Saving...' : 'Save Compliance State'}
           </button>
         </div>
+        {!canEditClientSettings && (
+          <p className="text-xs text-text-muted mt-3">View-only mode. This role cannot edit client settings.</p>
+        )}
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light p-6 mb-6">
@@ -2551,7 +3684,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             <h3 className="text-base font-semibold text-text-primary">Profile & Identity Assets</h3>
             <p className="text-sm text-text-muted mt-1">Manage client images and verification document references.</p>
           </div>
-          {!isEditingIdentityAssets ? (
+          {!isEditingIdentityAssets && canEditClientSettings ? (
             <button
               type="button"
               onClick={() => setIsEditingIdentityAssets(true)}
@@ -2560,7 +3693,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
               <Edit2 className="w-4 h-4" />
               Edit Assets
             </button>
-          ) : (
+          ) : isEditingIdentityAssets && canEditClientSettings ? (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -2587,10 +3720,12 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 {isSavingIdentityAssets ? 'Saving...' : 'Save Assets'}
               </button>
             </div>
+          ) : (
+            <span className="text-xs text-text-muted">View only</span>
           )}
         </div>
 
-        {isEditingIdentityAssets ? (
+        {isEditingIdentityAssets && canEditClientSettings ? (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
               <div className="rounded-md border border-border-light bg-background p-4">
@@ -2705,7 +3840,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             <h3 className="text-base font-semibold text-text-primary">Client Information</h3>
             <p className="text-sm text-text-muted mt-1">Edit client identity and business metadata from here.</p>
           </div>
-          {!isEditingProfile ? (
+          {!isEditingProfile && canEditClientSettings ? (
             <button
               type="button"
               onClick={() => setIsEditingProfile(true)}
@@ -2714,7 +3849,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
               <Edit2 className="w-4 h-4" />
               Edit Profile
             </button>
-          ) : (
+          ) : isEditingProfile && canEditClientSettings ? (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -2753,10 +3888,12 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 {isSavingProfile ? 'Saving...' : 'Save Changes'}
               </button>
             </div>
+          ) : (
+            <span className="text-xs text-text-muted">View only</span>
           )}
         </div>
 
-        {isEditingProfile ? (
+        {isEditingProfile && canEditClientSettings ? (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
             <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Primary Contact</label>
@@ -2906,6 +4043,17 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
   const [sortOrder, setSortOrder] = useState('desc')
   const [documentBundle, setDocumentBundle] = useState(() => readClientDocumentBundle(client))
   const safeClient = client || null
+  const resolvedAdminAccount = normalizeAdminAccount({
+    role: 'admin',
+    ...currentAdminAccount,
+  })
+  const isSuperAdmin = resolvedAdminAccount.adminLevel === ADMIN_LEVELS.SUPER
+  const canReviewDocuments = (
+    isSuperAdmin
+    || hasAdminPermission(resolvedAdminAccount, 'approve_documents')
+    || hasAdminPermission(resolvedAdminAccount, 'reject_documents')
+  )
+  const canRequestInfo = isSuperAdmin || hasAdminPermission(resolvedAdminAccount, 'request_info_documents')
 
   useEffect(() => {
     if (!safeClient) return
@@ -2926,8 +4074,22 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       </div>
     )
   }
+  if (!canAdminAccessClientScope(resolvedAdminAccount, safeClient.email)) {
+    return (
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
+        <p className="text-sm text-text-secondary">You do not have access to this client document vault.</p>
+        <button
+          type="button"
+          onClick={() => setActivePage?.('admin-clients')}
+          className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+        >
+          Return to Client Management
+        </button>
+      </div>
+    )
+  }
 
-  const canUnlockApproved = currentAdminAccount?.adminLevel === 'senior'
+  const canUnlockApproved = isSuperAdmin
   const adminActorName = currentAdminAccount?.fullName || 'Admin User'
   const documents = documentBundle
   const recordsByCategory = {
@@ -2977,8 +4139,19 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
   }
 
   const handleDocumentStatusChange = (row, nextStatus) => {
+    if (!canReviewDocuments) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
     const currentStatus = normalizeDocumentReviewStatus(row.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
     const normalizedNextStatus = normalizeDocumentReviewStatus(nextStatus, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+    if (
+      normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+      && !canRequestInfo
+    ) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
     if (normalizedNextStatus === currentStatus) return
 
     let notes = row.notes || ''
@@ -2988,7 +4161,7 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       && normalizedNextStatus === DOCUMENT_REVIEW_STATUS.PENDING_REVIEW
     ) {
       if (!canUnlockApproved) {
-        showToast?.('error', 'Only a senior admin can unlock an approved file.')
+        showToast?.('error', 'Only a super admin can unlock an approved file.')
         return
       }
       const input = window.prompt('Provide unlock reason (required)', '')
@@ -3116,6 +4289,11 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light overflow-hidden">
+        {!canReviewDocuments && (
+          <div className="px-4 py-3 border-b border-border-light bg-[#FCFDFF] text-xs text-text-muted">
+            View-only mode. This role can review document details but cannot change review status.
+          </div>
+        )}
         <table className="w-full">
           <thead>
             <tr className="bg-[#F9FAFB]">
@@ -3162,12 +4340,13 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
                   <select
                     value={normalizedStatus}
                     onChange={(event) => handleDocumentStatusChange(row, event.target.value)}
+                    disabled={!canReviewDocuments}
                     className="h-8 px-2.5 border border-border rounded-md text-xs focus:outline-none focus:border-primary"
                   >
                     <option value={DOCUMENT_REVIEW_STATUS.PENDING_REVIEW}>Pending Review</option>
                     <option value={DOCUMENT_REVIEW_STATUS.APPROVED}>Approved</option>
                     <option value={DOCUMENT_REVIEW_STATUS.REJECTED}>Rejected</option>
-                    <option value={DOCUMENT_REVIEW_STATUS.INFO_REQUESTED}>Info Requested</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.INFO_REQUESTED} disabled={!canRequestInfo}>Info Requested</option>
                   </select>
                 </td>
               </tr>
@@ -3180,18 +4359,36 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
   )
 }
 
-function AdminClientUploadHistoryPage({ client, setActivePage }) {
+function AdminClientUploadHistoryPage({ client, setActivePage, currentAdminAccount }) {
   const [searchTerm, setSearchTerm] = useState('')
   const [filterDate, setFilterDate] = useState('')
   const [filterType, setFilterType] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
   const [sortBy, setSortBy] = useState('date')
   const [sortOrder, setSortOrder] = useState('desc')
+  const resolvedAdminAccount = normalizeAdminAccount({
+    role: 'admin',
+    ...currentAdminAccount,
+  })
 
   if (!client) {
     return (
       <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
         <p className="text-sm text-text-secondary">Select a client from Client Management to view upload history.</p>
+        <button
+          type="button"
+          onClick={() => setActivePage?.('admin-clients')}
+          className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+        >
+          Return to Client Management
+        </button>
+      </div>
+    )
+  }
+  if (!canAdminAccessClientScope(resolvedAdminAccount, client.email)) {
+    return (
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
+        <p className="text-sm text-text-secondary">You do not have access to this client upload history.</p>
         <button
           type="button"
           onClick={() => setActivePage?.('admin-clients')}
@@ -3361,7 +4558,20 @@ function AdminClientUploadHistoryPage({ client, setActivePage }) {
 
 // Document Review Center with Preview Panel
 function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlowRuntimeWatch }) {
-  const [documents, setDocuments] = useState(() => readAllDocumentsForReview())
+  const resolvedAdminAccount = normalizeAdminAccount({
+    role: 'admin',
+    ...currentAdminAccount,
+  })
+  const isSuperAdmin = resolvedAdminAccount.adminLevel === ADMIN_LEVELS.SUPER
+  const canReviewDocuments = (
+    isSuperAdmin
+    || hasAdminPermission(resolvedAdminAccount, 'approve_documents')
+    || hasAdminPermission(resolvedAdminAccount, 'reject_documents')
+  )
+  const canRequestInfo = isSuperAdmin || hasAdminPermission(resolvedAdminAccount, 'request_info_documents')
+  const canCommentDocuments = isSuperAdmin || hasAdminPermission(resolvedAdminAccount, 'comment_documents')
+  const currentAdminCommentId = (resolvedAdminAccount.email || resolvedAdminAccount.id || '').trim().toLowerCase()
+  const [documents, setDocuments] = useState(() => readAllDocumentsForReview(resolvedAdminAccount))
   const [selectedDocument, setSelectedDocument] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
   const [filterStatus, setFilterStatus] = useState('All')
@@ -3370,19 +4580,26 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   const [sortOrder, setSortOrder] = useState('desc')
   const [zoom, setZoom] = useState(100)
   const [showFullscreen, setShowFullscreen] = useState(false)
-  const [comments, setComments] = useState(initialComments)
+  const [comments, setComments] = useState({})
   const [newComment, setNewComment] = useState('')
   const [editingComment, setEditingComment] = useState(null)
   const [editedCommentText, setEditedCommentText] = useState('')
   const [rejectionReason, setRejectionReason] = useState('')
   const [showRejectionModal, setShowRejectionModal] = useState(false)
   const [isProcessingReviewAction, setIsProcessingReviewAction] = useState(false)
-  const canUnlockApproved = currentAdminAccount?.adminLevel === 'senior'
+  const [selectedDocumentPreview, setSelectedDocumentPreview] = useState(null)
+  const [isSelectedDocumentPreviewLoading, setIsSelectedDocumentPreviewLoading] = useState(false)
+  const [selectedDocumentPreviewError, setSelectedDocumentPreviewError] = useState('')
+  const selectedDocumentPreviewCleanupRef = useRef({
+    objectUrl: '',
+    shouldRevoke: false,
+  })
+  const canUnlockApproved = isSuperAdmin
   const adminActorName = currentAdminAccount?.fullName || 'Admin User'
 
   useEffect(() => {
     const syncFromStorage = () => {
-      const nextRows = readAllDocumentsForReview()
+      const nextRows = readAllDocumentsForReview(resolvedAdminAccount)
       setDocuments(nextRows)
       setSelectedDocument((prev) => {
         if (!prev) return prev
@@ -3396,7 +4613,107 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
       window.removeEventListener('storage', syncFromStorage)
       window.clearInterval(intervalId)
     }
+  }, [resolvedAdminAccount.adminLevel, resolvedAdminAccount.email])
+
+  const clearSelectedDocumentPreview = () => {
+    const { objectUrl, shouldRevoke } = selectedDocumentPreviewCleanupRef.current || {}
+    if (shouldRevoke && objectUrl) {
+      try {
+        URL.revokeObjectURL(objectUrl)
+      } catch {
+        // ignore object-url cleanup failures
+      }
+    }
+    selectedDocumentPreviewCleanupRef.current = {
+      objectUrl: '',
+      shouldRevoke: false,
+    }
+    setSelectedDocumentPreview(null)
+    setSelectedDocumentPreviewError('')
+    setIsSelectedDocumentPreviewLoading(false)
+  }
+
+  useEffect(() => () => {
+    const { objectUrl, shouldRevoke } = selectedDocumentPreviewCleanupRef.current || {}
+    if (shouldRevoke && objectUrl) {
+      try {
+        URL.revokeObjectURL(objectUrl)
+      } catch {
+        // ignore object-url cleanup failures
+      }
+    }
   }, [])
+
+  useEffect(() => {
+    let isCancelled = false
+    const loadSelectedDocumentPreview = async () => {
+      clearSelectedDocumentPreview()
+      if (!selectedDocument) return
+      setIsSelectedDocumentPreviewLoading(true)
+      const attachmentPayload = buildDocumentAttachmentPayload(selectedDocument)
+      const previewResult = await buildSupportAttachmentPreview({
+        name: attachmentPayload.name,
+        type: attachmentPayload.type,
+        size: attachmentPayload.size,
+        cacheKey: attachmentPayload.cacheKey,
+        previewDataUrl: attachmentPayload.previewDataUrl,
+      })
+      if (isCancelled) return
+
+      if (previewResult.ok) {
+        setSelectedDocumentPreview(previewResult)
+        selectedDocumentPreviewCleanupRef.current = {
+          objectUrl: previewResult.objectUrl || '',
+          shouldRevoke: Boolean(previewResult.objectUrl),
+        }
+        setSelectedDocumentPreviewError(previewResult.message || '')
+        setIsSelectedDocumentPreviewLoading(false)
+        return
+      }
+
+      if (attachmentPayload.directPreviewUrl) {
+        setSelectedDocumentPreview({
+          ok: true,
+          kind: getSupportAttachmentKind(attachmentPayload.type, attachmentPayload.name),
+          name: attachmentPayload.name,
+          type: attachmentPayload.type,
+          size: attachmentPayload.size,
+          objectUrl: attachmentPayload.directPreviewUrl,
+          message: previewResult.message || '',
+        })
+        selectedDocumentPreviewCleanupRef.current = {
+          objectUrl: '',
+          shouldRevoke: false,
+        }
+        setSelectedDocumentPreviewError(previewResult.message || '')
+        setIsSelectedDocumentPreviewLoading(false)
+        return
+      }
+
+      setSelectedDocumentPreview(null)
+      selectedDocumentPreviewCleanupRef.current = {
+        objectUrl: '',
+        shouldRevoke: false,
+      }
+      setSelectedDocumentPreviewError(previewResult.message || 'Preview is unavailable for this file.')
+      setIsSelectedDocumentPreviewLoading(false)
+    }
+
+    void loadSelectedDocumentPreview()
+    return () => {
+      isCancelled = true
+    }
+  }, [
+    selectedDocument?.id,
+    selectedDocument?.previewUrl,
+    selectedDocument?.fileCacheKey,
+    selectedDocument?.fileId,
+    selectedDocument?.source?.clientEmail,
+    selectedDocument?.extension,
+    selectedDocument?.filename,
+    selectedDocument?.size,
+    selectedDocument?.mimeType,
+  ])
 
   const filteredDocuments = documents
     .filter((doc) => {
@@ -3440,25 +4757,33 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   }
 
   const handleSelectDocument = (doc) => {
+    clearSelectedDocumentPreview()
     setSelectedDocument(doc)
     setZoom(100)
+    setShowFullscreen(false)
   }
 
   const handleClosePreview = () => {
+    clearSelectedDocumentPreview()
     setSelectedDocument(null)
     setNewComment('')
     setEditingComment(null)
     setRejectionReason('')
+    setShowFullscreen(false)
   }
 
   const handleAddComment = () => {
+    if (!canCommentDocuments) {
+      showToast('error', 'Insufficient Permissions')
+      return
+    }
     if (!newComment.trim() || !selectedDocument) return
 
     const comment = {
       id: `CMT-${Date.now()}`,
-      adminId: mockAdmin.id,
-      adminName: mockAdmin.fullName,
-      adminRole: mockAdmin.role,
+      adminId: currentAdminCommentId || resolvedAdminAccount.id || 'admin-user',
+      adminName: resolvedAdminAccount.fullName || 'Admin User',
+      adminRole: getAdminLevelLabel(resolvedAdminAccount.adminLevel),
       text: newComment.trim(),
       timestamp: new Date().toLocaleString('en-US', { month: 'short', day: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true }),
       isEdited: false,
@@ -3475,7 +4800,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   const handleEditComment = (commentId) => {
     const docComments = comments[selectedDocument.id] || []
     const comment = docComments.find(c => c.id === commentId)
-    if (comment && comment.adminId === mockAdmin.id) {
+    if (comment && String(comment.adminId || '').trim().toLowerCase() === currentAdminCommentId) {
       setEditingComment(commentId)
       setEditedCommentText(comment.text)
     }
@@ -3498,7 +4823,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   const handleDeleteComment = (commentId) => {
     const docComments = comments[selectedDocument.id] || []
     const comment = docComments.find(c => c.id === commentId)
-    if (comment && comment.adminId === mockAdmin.id) {
+    if (comment && String(comment.adminId || '').trim().toLowerCase() === currentAdminCommentId) {
       setComments(prev => ({
         ...prev,
         [selectedDocument.id]: prev[selectedDocument.id].filter(c => c.id !== commentId)
@@ -3522,7 +4847,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
         showToast('error', 'Unable to update document status.')
         return
       }
-      const nextRows = readAllDocumentsForReview()
+      const nextRows = readAllDocumentsForReview(resolvedAdminAccount)
       setDocuments(nextRows)
       const nextSelected = nextRows.find((row) => row.id === selectedDocument.id)
       setSelectedDocument(nextSelected || null)
@@ -3536,6 +4861,10 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   }
 
   const handleApprove = () => {
+    if (!canReviewDocuments) {
+      showToast('error', 'Insufficient Permissions')
+      return
+    }
     if (!selectedDocument) return
     void runReviewAction(() => {
       applyReviewStatus(DOCUMENT_REVIEW_STATUS.APPROVED)
@@ -3544,12 +4873,16 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   }
 
   const handleMarkPending = () => {
+    if (!canReviewDocuments) {
+      showToast('error', 'Insufficient Permissions')
+      return
+    }
     if (!selectedDocument) return
     const currentStatus = normalizeDocumentReviewStatus(selectedDocument.status || DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
     let unlockReason = ''
     if (currentStatus === DOCUMENT_REVIEW_STATUS.APPROVED) {
       if (!canUnlockApproved) {
-        showToast('error', 'Only a senior admin can unlock an approved file.')
+        showToast('error', 'Only a super admin can unlock an approved file.')
         return
       }
       const input = window.prompt('Provide unlock reason (required)', '')
@@ -3567,6 +4900,10 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   }
 
   const handleReject = () => {
+    if (!canReviewDocuments) {
+      showToast('error', 'Insufficient Permissions')
+      return
+    }
     if (!selectedDocument || !rejectionReason.trim()) return
     void runReviewAction(() => {
       applyReviewStatus(DOCUMENT_REVIEW_STATUS.REJECTED, rejectionReason.trim())
@@ -3577,6 +4914,10 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   }
 
   const handleRequestInfo = () => {
+    if (!canRequestInfo) {
+      showToast('error', 'Insufficient Permissions')
+      return
+    }
     if (!selectedDocument) return
     const message = window.prompt('Provide an information request message', selectedDocument.notes || '')
     if (message === null) return
@@ -3588,6 +4929,52 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
       applyReviewStatus(DOCUMENT_REVIEW_STATUS.INFO_REQUESTED, message.trim())
       showToast('success', 'Information request sent to user.')
     }, 'Sending information request...')
+  }
+
+  const handleDownloadSelectedDocument = async () => {
+    if (!selectedDocument) return
+    const attachmentPayload = buildDocumentAttachmentPayload(selectedDocument)
+    const downloadName = buildClientDownloadFilename({
+      businessName: selectedDocument.businessName || '',
+      fileName: selectedDocument.filename || attachmentPayload.name || 'document',
+      fallbackFileName: 'document',
+    })
+    try {
+      const blob = await getSupportAttachmentBlob({
+        cacheKey: attachmentPayload.cacheKey,
+        previewDataUrl: attachmentPayload.previewDataUrl,
+      })
+      if (blob instanceof Blob) {
+        const objectUrl = URL.createObjectURL(blob)
+        const anchor = document.createElement('a')
+        anchor.href = objectUrl
+        anchor.download = downloadName
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+        return
+      }
+
+      const directUrl = (
+        selectedDocumentPreview?.objectUrl
+        || attachmentPayload.directPreviewUrl
+        || ''
+      ).trim()
+      if (!directUrl) {
+        showToast('error', 'Download URL is not available for this file.')
+        return
+      }
+      const anchor = document.createElement('a')
+      anchor.href = directUrl
+      anchor.download = downloadName
+      anchor.rel = 'noreferrer'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+    } catch {
+      showToast('error', 'Unable to download this file.')
+    }
   }
 
   const handleZoomIn = () => setZoom(prev => Math.min(prev + 25, 200))
@@ -3610,6 +4997,33 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
       default: return 'text-text-secondary'
     }
   }
+
+  const previewKind = selectedDocumentPreview?.kind || ''
+  const previewObjectUrl = selectedDocumentPreview?.objectUrl || ''
+  const previewText = selectedDocumentPreview?.text || ''
+  const previewRows = Array.isArray(selectedDocumentPreview?.rows) ? selectedDocumentPreview.rows : []
+  const previewSheetName = selectedDocumentPreview?.sheetName || 'Sheet1'
+  const previewIsTruncated = Boolean(selectedDocumentPreview?.truncated)
+  const previewMessage = selectedDocumentPreview?.message || selectedDocumentPreviewError
+  const showImagePreview = Boolean(previewObjectUrl) && previewKind === 'image'
+  const showPdfPreview = Boolean(previewObjectUrl) && previewKind === 'pdf'
+  const showVideoPreview = Boolean(previewObjectUrl) && previewKind === 'video'
+  const showAudioPreview = Boolean(previewObjectUrl) && previewKind === 'audio'
+  const showTextPreview = ['text', 'word', 'presentation'].includes(previewKind) && typeof previewText === 'string'
+  const showSpreadsheetPreview = previewKind === 'spreadsheet' && Array.isArray(previewRows)
+  const showGenericObjectPreview = Boolean(previewObjectUrl)
+    && !showImagePreview
+    && !showPdfPreview
+    && !showVideoPreview
+    && !showAudioPreview
+  const shouldShowPreviewFallback = !isSelectedDocumentPreviewLoading
+    && !showImagePreview
+    && !showPdfPreview
+    && !showVideoPreview
+    && !showAudioPreview
+    && !showTextPreview
+    && !showSpreadsheetPreview
+    && !showGenericObjectPreview
 
   return (
     <div className="animate-fade-in">
@@ -3739,14 +5153,109 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
             <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
               {/* Left: Document Viewer */}
               <div className="flex-1 bg-[#F9FAFB] p-6 overflow-auto">
-                <div className="bg-white rounded-lg shadow-card p-8 min-h-[500px] flex items-center justify-center">
-                  <div className="text-center">
-                    <FileText className="w-16 h-16 text-text-muted mx-auto mb-4" />
-                    <p className="text-text-secondary">Preview not available. Please download to view.</p>
-                    <button className="mt-4 h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors inline-flex items-center gap-2">
-                      <Download className="w-4 h-4" />
-                      Download Document
-                    </button>
+                <div className="bg-white rounded-lg shadow-card p-4 min-h-[500px]">
+                  <div className="h-full rounded-md border border-border-light bg-white overflow-auto">
+                    {isSelectedDocumentPreviewLoading && (
+                      <div className="h-full min-h-[420px] flex items-center justify-center">
+                        <DotLottiePreloader size={180} label="Loading preview..." labelClassName="text-xs text-text-muted" />
+                      </div>
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showImagePreview && (
+                      <div className="p-3 flex items-center justify-center min-h-[420px]">
+                        <img
+                          src={previewObjectUrl}
+                          alt={selectedDocument.filename || 'Document preview'}
+                          className="max-w-full max-h-[72vh] rounded-md border border-border-light"
+                          style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}
+                        />
+                      </div>
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showPdfPreview && (
+                      <iframe
+                        title={selectedDocument.filename || 'Document preview'}
+                        src={previewObjectUrl}
+                        className="w-full h-[72vh]"
+                        style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}
+                      />
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showVideoPreview && (
+                      <div className="p-3">
+                        <video controls src={previewObjectUrl} className="w-full max-h-[72vh] rounded-md border border-border-light bg-black" />
+                      </div>
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showAudioPreview && (
+                      <div className="p-4">
+                        <audio controls src={previewObjectUrl} className="w-full" />
+                      </div>
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showTextPreview && (
+                      <pre
+                        className="p-4 text-sm text-text-primary whitespace-pre-wrap break-words"
+                        style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top left' }}
+                      >
+                        {previewText || '(No text content found)'}
+                      </pre>
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showSpreadsheetPreview && (
+                      <div className="overflow-auto">
+                        <div className="px-3 py-2 border-b border-border-light bg-background text-xs text-text-secondary">
+                          Sheet: {previewSheetName}
+                        </div>
+                        {previewRows.length === 0 ? (
+                          <div className="px-3 py-4 text-sm text-text-muted">No spreadsheet rows available.</div>
+                        ) : (
+                          <table className="min-w-full text-xs sm:text-sm">
+                            <tbody>
+                              {previewRows.map((row, rowIndex) => (
+                                <tr key={`review-sheet-row-${rowIndex}`} className="border-b border-border-light">
+                                  {row.map((cell, cellIndex) => (
+                                    <td key={`review-sheet-cell-${rowIndex}-${cellIndex}`} className="px-2 py-1.5 text-text-primary align-top whitespace-pre-wrap break-words max-w-[240px]">
+                                      {cell}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                        {previewIsTruncated && (
+                          <div className="px-3 py-2 text-xs text-text-muted border-t border-border-light bg-background">
+                            Preview truncated to the first rows.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {!isSelectedDocumentPreviewLoading && showGenericObjectPreview && (
+                      <div className="p-4">
+                        <p className="text-sm text-text-secondary">{previewMessage || 'Preview is limited for this file type.'}</p>
+                        <a
+                          href={previewObjectUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-2 inline-flex items-center gap-1.5 text-primary hover:underline text-sm"
+                        >
+                          Open in new tab
+                        </a>
+                      </div>
+                    )}
+                    {shouldShowPreviewFallback && (
+                      <div className="h-full min-h-[420px] flex items-center justify-center p-6">
+                        <div className="text-center">
+                          <FileText className="w-14 h-14 text-text-muted mx-auto mb-3" />
+                          <p className="text-sm text-text-secondary">
+                            {previewMessage || 'Preview is unavailable for this file type.'}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadSelectedDocument()}
+                            className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors inline-flex items-center gap-2"
+                          >
+                            <Download className="w-4 h-4" />
+                            Download Document
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3800,6 +5309,9 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
 
                 {/* Action Buttons */}
                 <div className="mt-6 pt-4 border-t border-border-light space-y-2">
+                  {!canReviewDocuments && (
+                    <p className="text-xs text-text-muted mb-2">View-only mode. This role cannot approve, reject, or change review state.</p>
+                  )}
                   <div className="flex items-center gap-2 mb-4">
                     <button onClick={handleZoomOut} className="p-2 hover:bg-background rounded-md transition-colors" title="Zoom Out">
                       <ZoomOut className="w-4 h-4 text-text-secondary" />
@@ -3809,7 +5321,12 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                       <ZoomIn className="w-4 h-4 text-text-secondary" />
                     </button>
                     <div className="flex-1"></div>
-                    <button className="p-2 hover:bg-background rounded-md transition-colors" title="Download">
+                    <button
+                      type="button"
+                      onClick={() => void handleDownloadSelectedDocument()}
+                      className="p-2 hover:bg-background rounded-md transition-colors"
+                      title="Download"
+                    >
                       <Download className="w-4 h-4 text-text-secondary" />
                     </button>
                     <button onClick={() => setShowFullscreen(true)} className="p-2 hover:bg-background rounded-md transition-colors" title="Fullscreen">
@@ -3820,7 +5337,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={handleApprove}
-                      disabled={isProcessingReviewAction}
+                      disabled={!canReviewDocuments || isProcessingReviewAction}
                       className="h-9 bg-success text-white rounded-md text-sm font-medium hover:bg-success/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <CheckCircle className="w-4 h-4" />
@@ -3828,7 +5345,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                     </button>
                     <button
                       onClick={() => setShowRejectionModal(true)}
-                      disabled={isProcessingReviewAction}
+                      disabled={!canReviewDocuments || isProcessingReviewAction}
                       className="h-9 bg-error text-white rounded-md text-sm font-medium hover:bg-error/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <XCircle className="w-4 h-4" />
@@ -3836,7 +5353,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                     </button>
                     <button
                       onClick={handleRequestInfo}
-                      disabled={isProcessingReviewAction}
+                      disabled={!canRequestInfo || isProcessingReviewAction}
                       className="h-9 bg-warning text-white rounded-md text-sm font-medium hover:bg-warning/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <HelpCircle className="w-4 h-4" />
@@ -3844,7 +5361,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                     </button>
                     <button
                       onClick={handleMarkPending}
-                      disabled={isProcessingReviewAction}
+                      disabled={!canReviewDocuments || isProcessingReviewAction}
                       className="h-9 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <Clock className="w-4 h-4" />
@@ -3866,7 +5383,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                             <span className="text-sm font-medium text-text-primary">{comment.adminName}</span>
                             <span className="text-xs text-text-muted">({comment.adminRole})</span>
                           </div>
-                          {comment.adminId === mockAdmin.id && (
+                          {String(comment.adminId || '').trim().toLowerCase() === currentAdminCommentId && (
                             <div className="flex items-center gap-1">
                               <button 
                                 onClick={() => handleEditComment(comment.id)}
@@ -3921,12 +5438,13 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                     <textarea
                       value={newComment}
                       onChange={(e) => setNewComment(e.target.value)}
-                      placeholder="Add a comment..."
+                      placeholder={canCommentDocuments ? 'Add a comment...' : 'This role cannot post comments.'}
+                      disabled={!canCommentDocuments}
                       className="w-full h-20 p-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary resize-none"
                     />
                     <button 
                       onClick={handleAddComment}
-                      disabled={!newComment.trim()}
+                      disabled={!canCommentDocuments || !newComment.trim()}
                       className="mt-2 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
                     >
                       <Send className="w-4 h-4" />
@@ -3990,9 +5508,33 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
           >
             <X className="w-6 h-6" />
           </button>
-          <div className="text-white text-center">
-            <FileText className="w-24 h-24 mx-auto mb-4 opacity-50" />
-            <p>Fullscreen preview mode</p>
+          <div className="w-full h-full p-12 overflow-auto">
+            {showImagePreview && (
+              <img
+                src={previewObjectUrl}
+                alt={selectedDocument?.filename || 'Document preview'}
+                className="max-w-full max-h-full mx-auto"
+                style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top center' }}
+              />
+            )}
+            {showPdfPreview && (
+              <iframe
+                title={selectedDocument?.filename || 'Document preview fullscreen'}
+                src={previewObjectUrl}
+                className="w-full h-full"
+              />
+            )}
+            {showTextPreview && (
+              <pre className="text-white whitespace-pre-wrap break-words" style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top left' }}>
+                {previewText || '(No text content found)'}
+              </pre>
+            )}
+            {!showImagePreview && !showPdfPreview && !showTextPreview && (
+              <div className="text-white text-center mt-24">
+                <FileText className="w-24 h-24 mx-auto mb-4 opacity-50" />
+                <p>{previewMessage || 'Fullscreen preview is unavailable for this file type.'}</p>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -4162,6 +5704,32 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
       .join(', ')
   }
 
+  const handleExportLeadsToExcel = () => {
+    if (filteredLeads.length === 0) {
+      showToast?.('error', 'No leads available to export.')
+      return
+    }
+    const exportRows = filteredLeads.map((lead, index) => ({
+      'S/N': index + 1,
+      Type: 'Lead',
+      Category: formatLeadCategory(lead.leadCategory, lead.leadCategories),
+      'Full Name': lead.fullName || '',
+      Email: lead.contactEmail || '',
+      Organization: formatLeadType(lead.organizationType),
+      'IP Address': lead.ipAddress || '',
+      Location: lead.location || '',
+      'Open Tickets': Number(lead.openTicketCount || 0),
+      'All Tickets': Number(lead.ticketCount || 0),
+      Updated: formatTimestamp(lead.latestUpdatedAtIso || lead.updatedAtIso),
+    }))
+    const workbook = XLSX.utils.book_new()
+    const worksheet = XLSX.utils.json_to_sheet(exportRows)
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Leads')
+    const exportStamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
+    XLSX.writeFile(workbook, `Kiamina_Leads_${exportStamp}.xlsx`)
+    showToast?.('success', `Exported ${filteredLeads.length} lead(s) to Excel.`)
+  }
+
   const handleOpenInbox = (leadClientEmail = '') => {
     const normalizedEmail = toTrimmedValue(leadClientEmail).toLowerCase()
     if (normalizedEmail) {
@@ -4217,7 +5785,18 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
           <h2 className="text-2xl font-semibold text-text-primary">Leads</h2>
           <p className="text-sm text-text-secondary mt-1">Track inquiry and newsletter leads with contact and routing details.</p>
         </div>
-        <div className="text-sm text-text-muted">Showing {filteredLeads.length} of {leads.length} lead(s)</div>
+        <div className="flex items-center gap-3">
+          <div className="text-sm text-text-muted">Showing {filteredLeads.length} of {leads.length} lead(s)</div>
+          <button
+            type="button"
+            onClick={handleExportLeadsToExcel}
+            disabled={filteredLeads.length === 0}
+            className="h-9 px-3 rounded-md border border-border text-sm font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" />
+            Export Excel
+          </button>
+        </div>
       </div>
 
       <div className="bg-white rounded-lg shadow-card border border-border-light">
@@ -4365,6 +5944,8 @@ function AdminTrashPage({ showToast, currentAdminAccount, onAdminActionLog }) {
     const normalized = toTrimmedValue(value).toLowerCase()
     if (normalized === 'lead') return 'Lead'
     if (normalized === 'notification-draft') return 'Notification Draft'
+    if (normalized === 'admin-account') return 'Admin Account'
+    if (normalized === 'admin-invite') return 'Admin Invite'
     return normalized || 'Unknown'
   }
 
@@ -4410,7 +5991,87 @@ function AdminTrashPage({ showToast, currentAdminAccount, onAdminActionLog }) {
       showToast?.('success', 'Draft restored from trash.')
       return
     }
-    showToast?.('error', 'Restore is not available for this item type yet.')
+    if (entry.entityType === 'admin-account') {
+      const accountPayload = entry.payload?.account
+      const normalizedEmail = toTrimmedValue(accountPayload?.email).toLowerCase()
+      if (!normalizedEmail) {
+        showToast?.('error', 'Admin account payload is missing.')
+        return
+      }
+      const existingAccounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
+      const safeAccounts = Array.isArray(existingAccounts) ? existingAccounts : []
+      const hasAccount = safeAccounts.some((account) => toTrimmedValue(account?.email).toLowerCase() === normalizedEmail)
+      if (hasAccount) {
+        showToast?.('error', 'An account with this email already exists.')
+        return
+      }
+      localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify([
+        ...safeAccounts,
+        normalizeAdminAccount(accountPayload || {}),
+      ]))
+      removeAdminTrashEntryFromStorage(entry.id)
+      refreshTrash()
+      onAdminActionLog?.({
+        adminName: adminActorName,
+        action: 'Restored admin account',
+        affectedUser: entry.entityLabel || normalizedEmail,
+        details: 'Admin account restored from trash.',
+      })
+      showToast?.('success', `${entry.entityLabel || 'Admin account'} restored.`)
+      return
+    }
+    if (entry.entityType === 'admin-invite') {
+      const invitePayload = entry.payload?.invite
+      const normalizedInviteToken = toTrimmedValue(invitePayload?.token)
+      if (!normalizedInviteToken) {
+        showToast?.('error', 'Admin invite payload is missing.')
+        return
+      }
+      const existingInvites = safeParseJson(localStorage.getItem(ADMIN_INVITES_STORAGE_KEY), [])
+      const safeInvites = Array.isArray(existingInvites) ? existingInvites : []
+      const hasInvite = safeInvites.some((invite) => toTrimmedValue(invite?.token) === normalizedInviteToken)
+      if (hasInvite) {
+        showToast?.('error', 'This invite already exists.')
+        return
+      }
+      localStorage.setItem(ADMIN_INVITES_STORAGE_KEY, JSON.stringify([
+        normalizeAdminInvite(invitePayload || {}),
+        ...safeInvites,
+      ]))
+      removeAdminTrashEntryFromStorage(entry.id)
+      refreshTrash()
+      onAdminActionLog?.({
+        adminName: adminActorName,
+        action: 'Restored admin invite',
+        affectedUser: entry.entityLabel || invitePayload?.email || 'Admin Invite',
+        details: 'Admin invite restored from trash.',
+      })
+      showToast?.('success', `${entry.entityLabel || 'Admin invite'} restored.`)
+      return
+    }
+    const storageRecords = Array.isArray(entry.payload?.records) ? entry.payload.records : []
+    if (storageRecords.length > 0) {
+      storageRecords.forEach((record) => {
+        const key = toTrimmedValue(record?.key)
+        if (!key) return
+        if (record?.value === null || record?.value === undefined) {
+          localStorage.removeItem(key)
+          return
+        }
+        localStorage.setItem(key, String(record.value))
+      })
+      removeAdminTrashEntryFromStorage(entry.id)
+      refreshTrash()
+      onAdminActionLog?.({
+        adminName: adminActorName,
+        action: 'Restored record from trash',
+        affectedUser: entry.entityLabel || 'Stored record',
+        details: 'Restored structured storage record from trash payload.',
+      })
+      showToast?.('success', `${entry.entityLabel || 'Item'} restored from trash.`)
+      return
+    }
+    showToast?.('error', 'Unable to restore this item from the current payload.')
   }
 
   const handleDeletePermanently = (entry = null) => {
@@ -5718,17 +7379,552 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
   )
 }
 
+function AdminWorkHoursPage({ currentAdminAccount }) {
+  const [sessions, setSessions] = useState(() => getAdminWorkSessionsFromStorage())
+  const [searchTerm, setSearchTerm] = useState('')
+  const [levelFilter, setLevelFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
+  const [dateFilter, setDateFilter] = useState('all')
+  const [sortField, setSortField] = useState('date')
+  const [sortDirection, setSortDirection] = useState('desc')
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  const normalizedAdmin = normalizeAdminAccount({
+    ...DEFAULT_ADMIN_ACCOUNT,
+    role: 'admin',
+    ...currentAdminAccount,
+  })
+  const normalizedAdminEmail = String(normalizedAdmin?.email || '').trim().toLowerCase()
+  const normalizedAdminLevel = normalizeAdminLevel(normalizedAdmin?.adminLevel || ADMIN_LEVELS.SUPER)
+  const canViewAllWorkers = (
+    normalizedAdminLevel === ADMIN_LEVELS.SUPER
+    || normalizedAdminLevel === ADMIN_LEVELS.AREA_ACCOUNTANT
+  )
+
+  useEffect(() => {
+    const syncSessions = () => setSessions(getAdminWorkSessionsFromStorage())
+    syncSessions()
+    const handleStorage = (event) => {
+      if (!event.key || event.key === ADMIN_WORK_SESSIONS_STORAGE_KEY) {
+        syncSessions()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncSessions)
+    const intervalId = window.setInterval(syncSessions, 60000)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncSessions)
+      window.clearInterval(intervalId)
+    }
+  }, [])
+
+  const hasOpenSessions = useMemo(
+    () => sessions.some((session) => !session.clockOutAt),
+    [sessions],
+  )
+
+  useEffect(() => {
+    if (!hasOpenSessions) return undefined
+    const intervalId = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(intervalId)
+  }, [hasOpenSessions])
+
+  const scopedSessions = useMemo(() => (
+    canViewAllWorkers
+      ? sessions
+      : sessions.filter((session) => String(session?.adminEmail || '').trim().toLowerCase() === normalizedAdminEmail)
+  ), [canViewAllWorkers, normalizedAdminEmail, sessions])
+
+  const levelOptions = useMemo(() => {
+    const levelSet = new Set(
+      scopedSessions.map((session) => normalizeAdminLevel(session.adminLevel || ADMIN_LEVELS.SUPER)),
+    )
+    return [...levelSet]
+      .map((level) => ({ value: level, label: getAdminLevelLabel(level) }))
+      .sort((left, right) => left.label.localeCompare(right.label))
+  }, [scopedSessions])
+
+  const sessionRows = useMemo(() => (
+    scopedSessions.map((session, index) => {
+      const clockInAt = session.clockInAt || ''
+      const clockOutAt = session.clockOutAt || ''
+      const clockInMs = Date.parse(clockInAt) || 0
+      const clockOutMs = Date.parse(clockOutAt) || 0
+      const durationMs = getWorkSessionDurationMs(session, nowMs)
+      const dateKey = toLocalDateKey(clockInAt)
+      return {
+        id: session.id || `WORK-SESSION-${index + 1}`,
+        adminName: session.adminName || 'Admin User',
+        adminEmail: session.adminEmail || '--',
+        adminLevel: normalizeAdminLevel(session.adminLevel || ADMIN_LEVELS.SUPER),
+        adminLevelLabel: getAdminLevelLabel(session.adminLevel || ADMIN_LEVELS.SUPER),
+        clockInAt,
+        clockOutAt,
+        clockInMs,
+        clockOutMs,
+        durationMs,
+        dateKey,
+        dateMs: getLocalDateMsFromDateKey(dateKey),
+        sessionStatus: getWorkSessionStatus(session),
+      }
+    })
+  ), [scopedSessions, nowMs])
+
+  const aggregatedRows = useMemo(() => {
+    const byAdminDay = new Map()
+    const statusRank = { Completed: 0, Paused: 1, Active: 2 }
+
+    sessionRows.forEach((session) => {
+      const groupKey = `${session.adminEmail || session.adminName}__${session.dateKey}`
+      const existing = byAdminDay.get(groupKey)
+      if (!existing) {
+        byAdminDay.set(groupKey, {
+          id: `WORK-DAY-${groupKey}`,
+          adminName: session.adminName,
+          adminEmail: session.adminEmail,
+          adminLevel: session.adminLevel,
+          adminLevelLabel: session.adminLevelLabel,
+          dateKey: session.dateKey,
+          dateMs: session.dateMs,
+          dateLabel: formatLocalDateKey(session.dateKey),
+          sessionCount: 1,
+          totalDurationMs: session.durationMs,
+          totalDurationLabel: formatWorkDuration(session.durationMs),
+          paidBreakMs: 0,
+          paidBreakApplied: false,
+          firstClockInAt: session.clockInAt,
+          firstClockInMs: session.clockInMs,
+          lastClockOutAt: session.clockOutAt,
+          lastClockOutMs: session.clockOutMs,
+          status: session.sessionStatus,
+          statusRank: statusRank[session.sessionStatus] ?? 0,
+          sourceSessions: [session],
+        })
+        return
+      }
+
+      existing.sessionCount += 1
+      existing.totalDurationMs += session.durationMs
+      existing.sourceSessions.push(session)
+      if (session.clockInMs > 0 && (existing.firstClockInMs <= 0 || session.clockInMs < existing.firstClockInMs)) {
+        existing.firstClockInMs = session.clockInMs
+        existing.firstClockInAt = session.clockInAt
+      }
+      if (session.clockOutMs > existing.lastClockOutMs) {
+        existing.lastClockOutMs = session.clockOutMs
+        existing.lastClockOutAt = session.clockOutAt
+      }
+      const nextRank = statusRank[session.sessionStatus] ?? 0
+      if (nextRank > existing.statusRank) {
+        existing.statusRank = nextRank
+        existing.status = session.sessionStatus
+      }
+    })
+
+    return [...byAdminDay.values()].map((row) => ({
+      ...row,
+      paidBreakMs: getPaidBreakBonusMsForSessions(row.sourceSessions, row.dateKey, nowMs),
+    }))
+      .map((row) => {
+        const totalDurationWithBreakMs = row.totalDurationMs + row.paidBreakMs
+        return {
+          ...row,
+          totalDurationMs: totalDurationWithBreakMs,
+          totalDurationLabel: formatWorkDuration(totalDurationWithBreakMs),
+          paidBreakApplied: row.paidBreakMs > 0,
+          lastClockOutAt: row.status === 'Completed' ? row.lastClockOutAt : '',
+          lastClockOutMs: row.status === 'Completed' ? row.lastClockOutMs : 0,
+        }
+      })
+  }, [sessionRows, nowMs])
+
+  const filteredRows = useMemo(() => {
+    const normalizedSearch = searchTerm.trim().toLowerCase()
+    const nowTimestamp = Date.now()
+    return aggregatedRows.filter((row) => {
+      if (normalizedSearch) {
+        const haystack = [
+          row.adminName,
+          row.adminEmail,
+          row.adminLevelLabel,
+          row.dateLabel,
+          row.status,
+          String(row.sessionCount || ''),
+          formatTimestamp(row.firstClockInAt),
+          formatTimestamp(row.lastClockOutAt),
+        ].join(' ').toLowerCase()
+        if (!haystack.includes(normalizedSearch)) return false
+      }
+      if (canViewAllWorkers && levelFilter !== 'all' && row.adminLevel !== levelFilter) return false
+      if (statusFilter !== 'all' && row.status.toLowerCase() !== statusFilter) return false
+      if (dateFilter === 'today') {
+        const startOfToday = new Date()
+        startOfToday.setHours(0, 0, 0, 0)
+        if (row.dateMs < startOfToday.getTime()) return false
+      }
+      if (dateFilter === 'last7' && row.dateMs < (nowTimestamp - (7 * 24 * 60 * 60 * 1000))) return false
+      if (dateFilter === 'last30' && row.dateMs < (nowTimestamp - (30 * 24 * 60 * 60 * 1000))) return false
+      return true
+    })
+  }, [aggregatedRows, canViewAllWorkers, dateFilter, levelFilter, searchTerm, statusFilter])
+
+  const sortedRows = useMemo(() => {
+    const rows = [...filteredRows]
+    rows.sort((left, right) => {
+      if (sortField === 'admin') {
+        return left.adminName.localeCompare(right.adminName)
+      }
+      if (sortField === 'level') {
+        return left.adminLevelLabel.localeCompare(right.adminLevelLabel)
+      }
+      if (sortField === 'duration') {
+        return left.totalDurationMs - right.totalDurationMs
+      }
+      if (sortField === 'status') {
+        return left.status.localeCompare(right.status)
+      }
+      if (sortField === 'sessions') {
+        return left.sessionCount - right.sessionCount
+      }
+      return left.dateMs - right.dateMs
+    })
+    if (sortDirection === 'desc') rows.reverse()
+    return rows
+  }, [filteredRows, sortDirection, sortField])
+
+  const totalDurationMs = useMemo(
+    () => sortedRows.reduce((total, row) => total + row.totalDurationMs, 0),
+    [sortedRows],
+  )
+  const openRowsCount = useMemo(
+    () => sortedRows.filter((row) => row.status === 'Active' || row.status === 'Paused').length,
+    [sortedRows],
+  )
+  const clockInCount = useMemo(
+    () => sortedRows.reduce((total, row) => total + row.sessionCount, 0),
+    [sortedRows],
+  )
+  const personalRows = useMemo(() => (
+    sortedRows.filter((row) => String(row?.adminEmail || '').trim().toLowerCase() === normalizedAdminEmail)
+  ), [normalizedAdminEmail, sortedRows])
+  const personalDurationMs = useMemo(
+    () => personalRows.reduce((total, row) => total + row.totalDurationMs, 0),
+    [personalRows],
+  )
+  const personalClockInCount = useMemo(
+    () => personalRows.reduce((total, row) => total + row.sessionCount, 0),
+    [personalRows],
+  )
+  const personalOpenRowsCount = useMemo(
+    () => personalRows.filter((row) => row.status === 'Active' || row.status === 'Paused').length,
+    [personalRows],
+  )
+
+  const exportRowsToExcel = () => {
+    const exportRows = sortedRows.map((row, index) => ({
+      'S/N': index + 1,
+      'Admin Name': row.adminName,
+      'Admin Email': row.adminEmail,
+      'Admin Level': row.adminLevelLabel,
+      Date: row.dateLabel,
+      'Clock-ins': row.sessionCount,
+      'First Clock In': formatTimestamp(row.firstClockInAt),
+      'Last Clock Out': row.lastClockOutAt ? formatTimestamp(row.lastClockOutAt) : '--',
+      'Break Credit': row.paidBreakApplied ? '1h (Clocked before 1 PM)' : '0h',
+      Duration: row.totalDurationLabel,
+      'Duration (Hours)': Number((row.totalDurationMs / 3600000).toFixed(2)),
+      Status: row.status,
+    }))
+    const worksheet = XLSX.utils.json_to_sheet(exportRows)
+    const workbook = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Admin Work Hours')
+    XLSX.writeFile(workbook, `admin-work-hours-${new Date().toISOString().slice(0, 10)}.xlsx`)
+  }
+
+  const getStatusTone = (status) => (
+    status === 'Active'
+      ? 'bg-warning-bg text-warning'
+      : status === 'Paused'
+        ? 'bg-info-bg text-primary'
+        : 'bg-success-bg text-success'
+  )
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3 mb-5">
+        <div>
+          <h2 className="text-2xl font-semibold text-text-primary">Admin Work Hours</h2>
+          <p className="text-sm text-text-muted mt-1">
+            {canViewAllWorkers
+              ? 'Workforce and personal hour summaries for Super Admin and Area Accountant.'
+              : 'Your personal work-hour summary and sessions.'}
+          </p>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-lg border border-border-light bg-white px-3 py-2">
+          <Clock className="w-4 h-4 text-primary" />
+          <span className="text-xs text-text-secondary">
+            Signed in as {normalizedAdmin.fullName || 'Admin User'} ({getAdminLevelLabel(normalizedAdmin.adminLevel)}) / Scope: {canViewAllWorkers ? 'All Workers + Personal' : 'Personal Only'}
+          </span>
+        </div>
+      </div>
+
+      {canViewAllWorkers ? (
+        <div className="space-y-4 mb-5">
+          <div>
+            <p className="text-xs uppercase tracking-wide text-text-muted mb-2">Workers Summary</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Workday Rows</p>
+                <p className="text-xl font-semibold text-text-primary mt-1">{sortedRows.length}</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Open Rows</p>
+                <p className="text-xl font-semibold text-warning mt-1">{openRowsCount}</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Clock-ins</p>
+                <p className="text-xl font-semibold text-text-primary mt-1">{clockInCount}</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">Total Duration</p>
+                <p className="text-xl font-semibold text-primary mt-1">{formatWorkDuration(totalDurationMs)}</p>
+              </div>
+            </div>
+          </div>
+          <div>
+            <p className="text-xs uppercase tracking-wide text-text-muted mb-2">My Personal Summary</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">My Workday Rows</p>
+                <p className="text-xl font-semibold text-text-primary mt-1">{personalRows.length}</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">My Open Rows</p>
+                <p className="text-xl font-semibold text-warning mt-1">{personalOpenRowsCount}</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">My Clock-ins</p>
+                <p className="text-xl font-semibold text-text-primary mt-1">{personalClockInCount}</p>
+              </div>
+              <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+                <p className="text-xs uppercase tracking-wide text-text-muted">My Total Duration</p>
+                <p className="text-xl font-semibold text-primary mt-1">{formatWorkDuration(personalDurationMs)}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
+          <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <p className="text-xs uppercase tracking-wide text-text-muted">My Workday Rows</p>
+            <p className="text-xl font-semibold text-text-primary mt-1">{sortedRows.length}</p>
+          </div>
+          <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <p className="text-xs uppercase tracking-wide text-text-muted">My Open Rows</p>
+            <p className="text-xl font-semibold text-warning mt-1">{openRowsCount}</p>
+          </div>
+          <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <p className="text-xs uppercase tracking-wide text-text-muted">My Clock-ins</p>
+            <p className="text-xl font-semibold text-text-primary mt-1">{clockInCount}</p>
+          </div>
+          <div className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <p className="text-xs uppercase tracking-wide text-text-muted">My Total Duration</p>
+            <p className="text-xl font-semibold text-primary mt-1">{formatWorkDuration(totalDurationMs)}</p>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-4 mb-5">
+        <p className="text-xs text-text-muted mb-3">
+          Break hour (1:00 PM - 2:00 PM) is credited once per day when the admin clocked in before 1:00 PM (local timezone).
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3">
+          <div className="xl:col-span-2 relative">
+            <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search admin name, email, status..."
+              className="w-full h-10 pl-9 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+          {canViewAllWorkers ? (
+            <select
+              value={levelFilter}
+              onChange={(event) => setLevelFilter(event.target.value)}
+              className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            >
+              <option value="all">All Levels</option>
+              {levelOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          ) : (
+            <div className="h-10 px-3 border border-border-light rounded-md text-sm text-text-muted inline-flex items-center bg-background">
+              Personal scope only
+            </div>
+          )}
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value)}
+            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="all">All Status</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+            <option value="completed">Completed</option>
+          </select>
+          <select
+            value={dateFilter}
+            onChange={(event) => setDateFilter(event.target.value)}
+            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="all">All Dates</option>
+            <option value="today">Today</option>
+            <option value="last7">Last 7 Days</option>
+            <option value="last30">Last 30 Days</option>
+          </select>
+          <button
+            type="button"
+            onClick={exportRowsToExcel}
+            className="h-10 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light inline-flex items-center justify-center gap-2"
+          >
+            <Download className="w-4 h-4" />
+            Export Excel
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
+          <select
+            value={sortField}
+            onChange={(event) => setSortField(event.target.value)}
+            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="date">Sort: Date</option>
+            <option value="admin">Sort: Admin Name</option>
+            <option value="level">Sort: Admin Level</option>
+            <option value="duration">Sort: Duration</option>
+            <option value="sessions">Sort: Clock-ins</option>
+            <option value="status">Sort: Status</option>
+          </select>
+          <select
+            value={sortDirection}
+            onChange={(event) => setSortDirection(event.target.value)}
+            className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="asc">Ascending</option>
+            <option value="desc">Descending</option>
+          </select>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchTerm('')
+              setLevelFilter('all')
+              setStatusFilter('all')
+              setDateFilter('all')
+              setSortField('date')
+              setSortDirection('desc')
+            }}
+            className="h-10 px-3 border border-border rounded-md text-sm text-text-primary hover:bg-background"
+          >
+            Clear Filters
+          </button>
+        </div>
+      </div>
+
+      <div className="md:hidden space-y-3">
+        {sortedRows.map((row, index) => (
+          <div key={row.id} className="bg-white rounded-lg shadow-card border border-border-light p-4">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold text-text-primary">{index + 1}. {row.adminName}</p>
+                <p className="text-xs text-text-muted mt-0.5">{row.adminEmail}</p>
+              </div>
+              <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getStatusTone(row.status)}`}>
+                {row.status}
+              </span>
+            </div>
+            <div className="mt-3 space-y-1.5 text-xs text-text-secondary">
+              <p><span className="text-text-muted">Level:</span> {row.adminLevelLabel}</p>
+              <p><span className="text-text-muted">Date:</span> {row.dateLabel}</p>
+              <p><span className="text-text-muted">Clock-ins:</span> {row.sessionCount}</p>
+              <p><span className="text-text-muted">First Clock In:</span> {formatTimestamp(row.firstClockInAt)}</p>
+              <p><span className="text-text-muted">Last Clock Out:</span> {row.lastClockOutAt ? formatTimestamp(row.lastClockOutAt) : '--'}</p>
+              <p><span className="text-text-muted">Break Credit:</span> {row.paidBreakApplied ? '1h' : '0h'}</p>
+              <p><span className="text-text-muted">Duration:</span> {row.totalDurationLabel}</p>
+            </div>
+          </div>
+        ))}
+        {sortedRows.length === 0 && (
+          <div className="bg-white rounded-lg shadow-card border border-border-light p-4 text-sm text-text-muted text-center">
+            No work-session record found for this filter set.
+          </div>
+        )}
+      </div>
+
+      <div className="hidden md:block bg-white rounded-lg shadow-card border border-border-light">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1100px]">
+            <thead>
+              <tr className="bg-[#F9FAFB]">
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">S/N</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Admin</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Email</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Level</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Date</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Clock-ins</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">First In</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Last Out</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Break Credit</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Duration</th>
+                <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((row, index) => (
+                <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{index + 1}</td>
+                  <td className="px-4 py-3.5 text-sm font-medium text-text-primary">{row.adminName}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{row.adminEmail}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{row.adminLevelLabel}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{row.dateLabel}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{row.sessionCount}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{formatTimestamp(row.firstClockInAt)}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{row.lastClockOutAt ? formatTimestamp(row.lastClockOutAt) : '--'}</td>
+                  <td className="px-4 py-3.5 text-sm text-text-secondary">{row.paidBreakApplied ? '1h' : '0h'}</td>
+                  <td className="px-4 py-3.5 text-sm font-medium text-text-primary">{row.totalDurationLabel}</td>
+                  <td className="px-4 py-3.5 text-sm">
+                    <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getStatusTone(row.status)}`}>
+                      {row.status}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+              {sortedRows.length === 0 && (
+                <tr>
+                  <td colSpan={11} className="px-4 py-8 text-sm text-text-muted text-center">
+                    No work-session record found for this filter set.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // Activity Log Page
 function AdminActivityLogPage() {
-  const [logs, setLogs] = useState(() => {
-    const storedLogs = getActivityLogsFromStorage()
-    return storedLogs.length > 0 ? [...storedLogs, ...mockActivityLog] : mockActivityLog
-  })
+  const [logs, setLogs] = useState(() => getActivityLogsFromStorage())
+  const [scopeFilter, setScopeFilter] = useState('all')
 
   useEffect(() => {
     const syncLogs = () => {
       const storedLogs = getActivityLogsFromStorage()
-      setLogs(storedLogs.length > 0 ? [...storedLogs, ...mockActivityLog] : mockActivityLog)
+      setLogs(storedLogs)
     }
     syncLogs()
     window.addEventListener('storage', syncLogs)
@@ -5747,6 +7943,17 @@ function AdminActivityLogPage() {
     if (action.includes('Sent targeted')) return 'bg-primary-tint text-primary'
     return 'bg-background text-text-secondary'
   }
+  const filteredLogs = useMemo(() => {
+    const normalizedFilter = String(scopeFilter || 'all').trim().toLowerCase()
+    if (normalizedFilter === 'all') return logs
+    return logs.filter((log) => {
+      const level = normalizeAdminLevel(log?.adminLevel || ADMIN_LEVELS.SUPER)
+      if (normalizedFilter === 'operations') return isOperationsAdminLevel(level)
+      if (normalizedFilter === 'technical') return isTechnicalAdminLevel(level)
+      if (normalizedFilter === 'super') return isSuperAdminLevel(level)
+      return true
+    })
+  }, [logs, scopeFilter])
 
   return (
     <div className="animate-fade-in">
@@ -5754,9 +7961,31 @@ function AdminActivityLogPage() {
         <h2 className="text-2xl font-semibold text-text-primary">System Activity Log</h2>
         <p className="text-sm text-text-muted">Audit trail for all admin actions</p>
       </div>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        {[
+          { id: 'all', label: 'All' },
+          { id: 'operations', label: 'Operations' },
+          { id: 'technical', label: 'Technical' },
+          { id: 'super', label: 'Super Admin' },
+        ].map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setScopeFilter(item.id)}
+            className={`h-8 px-3 rounded-md text-xs font-medium border transition-colors ${
+              scopeFilter === item.id
+                ? 'bg-primary-tint text-primary border-primary/35'
+                : 'bg-white text-text-secondary border-border hover:bg-background'
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+        <span className="text-xs text-text-muted ml-1">{filteredLogs.length} log(s)</span>
+      </div>
 
       <div className="md:hidden space-y-3">
-        {logs.map((log) => (
+        {filteredLogs.map((log) => (
           <div key={log.id} className="bg-white rounded-lg shadow-card border border-border-light p-4">
             <div className="flex items-center gap-2 text-xs text-text-muted">
               <Clock className="w-3.5 h-3.5" />
@@ -5768,26 +7997,39 @@ function AdminActivityLogPage() {
                 {log.action}
               </span>
             </div>
+            <p className="text-xs text-text-secondary mt-2">
+              <span className="text-text-muted">Admin Level:</span> {log.adminLevelLabel || getAdminLevelLabel(log.adminLevel || ADMIN_LEVELS.SUPER)}
+            </p>
             <p className="text-xs text-text-secondary mt-2"><span className="text-text-muted">Affected:</span> {log.affectedUser}</p>
+            {log.impersonatedBy && (
+              <p className="text-xs text-text-secondary mt-1"><span className="text-text-muted">Impersonated By:</span> {log.impersonatedBy}</p>
+            )}
             <p className="text-xs text-text-secondary mt-1"><span className="text-text-muted">Details:</span> {log.details}</p>
           </div>
         ))}
+        {filteredLogs.length === 0 && (
+          <div className="bg-white rounded-lg shadow-card border border-border-light p-4 text-sm text-text-muted text-center">
+            No activity found for this section.
+          </div>
+        )}
       </div>
 
       <div className="hidden md:block bg-white rounded-lg shadow-card border border-border-light">
         <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px]">
+        <table className="w-full min-w-[1180px]">
           <thead>
             <tr className="bg-[#F9FAFB]">
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Timestamp</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Admin</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Admin Level</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Action</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Affected User(s)</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Impersonated By</th>
               <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Details</th>
             </tr>
           </thead>
           <tbody>
-            {logs.map((log) => (
+            {filteredLogs.map((log) => (
               <tr key={log.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
                 <td className="px-4 py-3.5 text-sm text-text-secondary">
                   <div className="flex items-center gap-2">
@@ -5796,15 +8038,24 @@ function AdminActivityLogPage() {
                   </div>
                 </td>
                 <td className="px-4 py-3.5 text-sm font-medium">{log.adminName}</td>
+                <td className="px-4 py-3.5 text-sm text-text-secondary">
+                  {log.adminLevelLabel || getAdminLevelLabel(log.adminLevel || ADMIN_LEVELS.SUPER)}
+                </td>
                 <td className="px-4 py-3.5 text-sm">
                   <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getActionStyle(log.action)}`}>
                     {log.action}
                   </span>
                 </td>
                 <td className="px-4 py-3.5 text-sm">{log.affectedUser}</td>
+                <td className="px-4 py-3.5 text-sm text-text-secondary">{log.impersonatedBy || '--'}</td>
                 <td className="px-4 py-3.5 text-sm text-text-secondary">{log.details}</td>
               </tr>
             ))}
+            {filteredLogs.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-4 py-8 text-sm text-text-muted text-center">No activity found for this section.</td>
+              </tr>
+            )}
           </tbody>
         </table>
         </div>
@@ -5827,5 +8078,6 @@ export {
   AdminTrashPage,
   AdminCommunicationsCenter,
   AdminSendNotificationPage,
+  AdminWorkHoursPage,
   AdminActivityLogPage,
 }

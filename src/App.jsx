@@ -25,6 +25,8 @@ import { ADMIN_PAGE_IDS, ADMIN_DEFAULT_PAGE } from './components/admin/adminConf
 import {
   ADMIN_LEVELS,
   FULL_ADMIN_PERMISSION_IDS,
+  getAdminLevelLabel,
+  canImpersonateForAdminLevel,
   hasAdminPermission,
   normalizeAdminAccount,
   normalizeAdminInvite,
@@ -47,6 +49,7 @@ const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
 const IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaImpersonationSession'
+const ADMIN_IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaAdminImpersonationSession'
 const OTP_PREVIEW_STORAGE_KEY = 'kiaminaOtpPreview'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
@@ -55,11 +58,11 @@ const CLIENT_SESSION_CONTROL_STORAGE_KEY = 'kiaminaClientSessionControl'
 const CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY = 'kiaminaClientBriefNotifications'
 const IMPERSONATION_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_DEV_ADMIN_ACCOUNT = {
-  fullName: 'Senior Admin',
+  fullName: 'Super Admin',
   email: 'admin@kiamina.local',
   password: 'Admin@123!',
   role: 'admin',
-  adminLevel: ADMIN_LEVELS.SENIOR,
+  adminLevel: ADMIN_LEVELS.SUPER,
   adminPermissions: FULL_ADMIN_PERMISSION_IDS,
   status: 'active',
 }
@@ -77,16 +80,25 @@ const normalizeRole = (role, email = '') => {
 }
 
 const normalizeAccount = (account = {}) => {
+  const createdAtIso = [
+    account.createdAt,
+    account.createdAtIso,
+    account.dateCreated,
+    account.registeredAt,
+  ].find((value) => Number.isFinite(Date.parse(value || '')))
+    || new Date().toISOString()
   const normalizedRole = normalizeRole(account.role, account.email || '')
   if (normalizedRole !== 'admin') {
     return {
       ...account,
       role: normalizedRole,
+      createdAt: account.createdAt || createdAtIso,
     }
   }
   return normalizeAdminAccount({
     ...account,
     role: 'admin',
+    createdAt: account.createdAt || createdAtIso,
   })
 }
 
@@ -178,6 +190,9 @@ const appendAdminActivityLog = (entry = {}) => {
   const logEntry = {
     id: `LOG-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     adminName: entry.adminName || 'Admin User',
+    adminEmail: String(entry.adminEmail || '').trim().toLowerCase(),
+    adminLevel: entry.adminLevel || ADMIN_LEVELS.SUPER,
+    impersonatedBy: String(entry.impersonatedBy || '').trim().toLowerCase(),
     action: entry.action || 'Admin action',
     affectedUser: entry.affectedUser || '--',
     details: entry.details || '--',
@@ -951,9 +966,53 @@ function App() {
     }
     sessionStorage.setItem(IMPERSONATION_SESSION_STORAGE_KEY, JSON.stringify(session))
   }
+  const detectAuthStorageType = () => {
+    if (localStorage.getItem('kiaminaAuthUser')) return 'local'
+    if (sessionStorage.getItem('kiaminaAuthUser')) return 'session'
+    return 'session'
+  }
+  const getStoredAdminImpersonationSession = () => {
+    const candidates = [
+      sessionStorage.getItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY),
+      localStorage.getItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY),
+    ]
+    for (const raw of candidates) {
+      if (!raw) continue
+      try {
+        const parsed = JSON.parse(raw)
+        const originalAdminEmail = String(parsed?.originalAdminEmail || '').trim().toLowerCase()
+        const impersonatedAdminEmail = String(parsed?.impersonatedAdminEmail || '').trim().toLowerCase()
+        if (!originalAdminEmail || !impersonatedAdminEmail) continue
+        return {
+          originalAdminEmail,
+          originalAdminName: parsed?.originalAdminName || 'Super Admin',
+          originalAdminLevel: parsed?.originalAdminLevel || ADMIN_LEVELS.SUPER,
+          impersonatedAdminEmail,
+          impersonatedAdminName: parsed?.impersonatedAdminName || 'Admin User',
+          impersonatedAdminLevel: parsed?.impersonatedAdminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT,
+          startedAt: Number(parsed?.startedAt || Date.now()),
+        }
+      } catch {
+        // continue
+      }
+    }
+    return null
+  }
+  const persistAdminImpersonationSession = (session, storageType = 'session') => {
+    sessionStorage.removeItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY)
+    localStorage.removeItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY)
+    if (!session) return
+    const nextRaw = JSON.stringify(session)
+    if (storageType === 'local') {
+      localStorage.setItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY, nextRaw)
+      return
+    }
+    sessionStorage.setItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY, nextRaw)
+  }
 
   const initialAuthUser = getStoredAuthUser()
   const initialImpersonationSession = getStoredImpersonationSession()
+  const initialAdminImpersonationSession = getStoredAdminImpersonationSession()
   const initialScopedClientEmail = initialImpersonationSession?.clientEmail || initialAuthUser?.email
   const initialDocumentOwner = initialImpersonationSession?.clientName
     || initialAuthUser?.fullName
@@ -967,6 +1026,7 @@ function App() {
   const [showAdminLogin, setShowAdminLogin] = useState(false)
   const [adminSetupToken, setAdminSetupToken] = useState('')
   const [impersonationSession, setImpersonationSession] = useState(initialImpersonationSession)
+  const [adminImpersonationSession, setAdminImpersonationSession] = useState(initialAdminImpersonationSession)
   const [pendingImpersonationClient, setPendingImpersonationClient] = useState(null)
   const [onboardingState, setOnboardingState] = useState(() => getSavedOnboardingState(initialScopedClientEmail))
   const [otpStore, setOtpStore] = useState(getOtpStore)
@@ -1019,6 +1079,19 @@ function App() {
   
   const currentUserRole = normalizeRole(authUser?.role, authUser?.email || '')
   const isAdminView = currentUserRole === 'admin'
+  const isAdminImpersonationActive = Boolean(
+    adminImpersonationSession
+    && String(authUser?.email || '').trim().toLowerCase() === String(adminImpersonationSession.impersonatedAdminEmail || '').trim().toLowerCase(),
+  )
+  useEffect(() => {
+    if (!adminImpersonationSession) return
+    const currentEmail = String(authUser?.email || '').trim().toLowerCase()
+    const impersonatedEmail = String(adminImpersonationSession.impersonatedAdminEmail || '').trim().toLowerCase()
+    if (!currentEmail || currentEmail !== impersonatedEmail) {
+      setAdminImpersonationSession(null)
+      persistAdminImpersonationSession(null)
+    }
+  }, [adminImpersonationSession, authUser?.email])
   const dashboardRecords = useMemo(() => ([
     ...flattenFolderFilesForDashboard(expenseDocuments, 'expenses'),
     ...flattenFolderFilesForDashboard(salesDocuments, 'sales'),
@@ -1332,7 +1405,7 @@ function App() {
       fullName: authUser.fullName,
       email: authUser.email,
       role: 'admin',
-      adminLevel: ADMIN_LEVELS.SENIOR,
+      adminLevel: ADMIN_LEVELS.SUPER,
       adminPermissions: FULL_ADMIN_PERMISSION_IDS,
       status: 'active',
     })
@@ -1342,10 +1415,24 @@ function App() {
   const impersonationEnabled = adminSystemSettings.impersonationEnabled !== false
   const canImpersonateClients = Boolean(
     currentAdminAccount && (
-      currentAdminAccount.adminLevel === ADMIN_LEVELS.SENIOR
-      || hasAdminPermission(currentAdminAccount, 'client_assistance')
+      canImpersonateForAdminLevel(currentAdminAccount.adminLevel)
+      || hasAdminPermission(currentAdminAccount, 'impersonate_clients')
     ),
   )
+  const getCurrentAdminLogContext = () => ({
+    adminName: authUser?.fullName || currentAdminAccount?.fullName || 'Admin User',
+    adminEmail: String(authUser?.email || currentAdminAccount?.email || '').trim().toLowerCase(),
+    adminLevel: currentAdminAccount?.adminLevel || ADMIN_LEVELS.SUPER,
+    impersonatedBy: isAdminImpersonationActive
+      ? String(adminImpersonationSession?.originalAdminEmail || '').trim().toLowerCase()
+      : '',
+  })
+  const logAdminActivity = (entry = {}) => {
+    appendAdminActivityLog({
+      ...getCurrentAdminLogContext(),
+      ...entry,
+    })
+  }
 
   const touchImpersonationActivity = () => {
     if (isImpersonatingClient) {
@@ -1738,7 +1825,7 @@ function App() {
     const timeoutId = window.setInterval(() => {
       const lastActivityAt = impersonationSession.lastActivityAt || impersonationSession.startedAt || 0
       if (Date.now() - lastActivityAt <= IMPERSONATION_IDLE_TIMEOUT_MS) return
-      appendAdminActivityLog({
+      logAdminActivity({
         adminName: impersonationSession.adminName || authUser?.fullName || 'Admin User',
         action: 'Impersonation session expired',
         affectedUser: impersonationSession.businessName || impersonationSession.clientEmail || '--',
@@ -1857,7 +1944,7 @@ function App() {
       setCompanyName(merged.businessName?.trim() || 'Acme Corporation')
       setClientFirstName(merged.fullName?.trim()?.split(/\s+/)?.[0] || 'Client')
       if (isImpersonatingClient) {
-        appendAdminActivityLog({
+        logAdminActivity({
           adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
           action: 'Updated client onboarding data in impersonation mode',
           affectedUser: impersonationSession?.businessName || targetEmail,
@@ -1911,11 +1998,24 @@ function App() {
     setTimeout(() => setToast(null), 4000)
   }
 
-  const persistAuthUser = (user, remember = true) => {
+  const persistAuthenticatedUserRecord = (user, storageType = 'local') => {
     const normalizedUser = normalizeUser({
       ...user,
       sessionIssuedAtIso: new Date().toISOString(),
     })
+    if (!normalizedUser) return null
+    if (storageType === 'local') {
+      localStorage.setItem('kiaminaAuthUser', JSON.stringify(normalizedUser))
+      sessionStorage.removeItem('kiaminaAuthUser')
+    } else {
+      sessionStorage.setItem('kiaminaAuthUser', JSON.stringify(normalizedUser))
+      localStorage.removeItem('kiaminaAuthUser')
+    }
+    return normalizedUser
+  }
+
+  const persistAuthUser = (user, remember = true) => {
+    const normalizedUser = persistAuthenticatedUserRecord(user, remember ? 'local' : 'session')
     if (!normalizedUser) return
 
     setAuthUser(normalizedUser)
@@ -1924,15 +2024,10 @@ function App() {
     setShowAdminLogin(false)
     setAdminSetupToken('')
     setImpersonationSession(null)
+    setAdminImpersonationSession(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
-    if (remember) {
-      localStorage.setItem('kiaminaAuthUser', JSON.stringify(normalizedUser))
-      sessionStorage.removeItem('kiaminaAuthUser')
-    } else {
-      sessionStorage.setItem('kiaminaAuthUser', JSON.stringify(normalizedUser))
-      localStorage.removeItem('kiaminaAuthUser')
-    }
+    persistAdminImpersonationSession(null)
     setOnboardingState(getSavedOnboardingState(normalizedUser.email))
     setCompanyName(getSavedCompanyName(normalizedUser.email))
     setClientFirstName(getSavedClientFirstName(normalizedUser.email, normalizedUser.fullName?.trim()?.split(/\s+/)?.[0] || 'Client'))
@@ -2054,7 +2149,13 @@ function App() {
     const fullName = normalizedProvidedFullName || existingName || `${selected.name} User`
     const socialRole = existing?.role || 'client'
     if (!existing) {
-      const nextAccounts = [...accounts, { fullName, email: selected.email, password: `oauth-${provider}`, role: socialRole }]
+      const nextAccounts = [...accounts, {
+        fullName,
+        email: selected.email,
+        password: `oauth-${provider}`,
+        role: socialRole,
+        createdAt: new Date().toISOString(),
+      }]
       localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
       persistOnboardingState({
         currentStep: 1,
@@ -2169,8 +2270,10 @@ function App() {
     setIsAuthenticated(false)
     setAuthUser(null)
     setImpersonationSession(null)
+    setAdminImpersonationSession(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
+    persistAdminImpersonationSession(null)
     setAuthMode('login')
     setActivePage(getDefaultPageForRole('client'))
     setActiveFolderRoute(null)
@@ -2205,8 +2308,10 @@ function App() {
       setIsAuthenticated(false)
       setAuthUser(null)
       setImpersonationSession(null)
+      setAdminImpersonationSession(null)
       setPendingImpersonationClient(null)
       persistImpersonationSession(null)
+      persistAdminImpersonationSession(null)
       setAuthMode('login')
       setActivePage(getDefaultPageForRole('client'))
       setActiveFolderRoute(null)
@@ -2319,12 +2424,22 @@ function App() {
         email: normalizedEmail,
         password,
         role: 'client',
+        createdAt: new Date().toISOString(),
       },
     })
     return { ok: true, requiresOtp: true }
   }
 
-  const handleAdminSetupCreateAccount = async ({ inviteToken, fullName, email, password, confirmPassword }) => {
+  const handleAdminSetupCreateAccount = async ({
+    inviteToken,
+    fullName,
+    email,
+    roleInCompany,
+    department,
+    phoneNumber,
+    password,
+    confirmPassword,
+  }) => {
     const normalizedToken = inviteToken?.trim() || ''
     const invite = getAdminInviteByToken(normalizedToken)
     if (!isAdminInvitePending(invite)) {
@@ -2332,11 +2447,17 @@ function App() {
     }
 
     const normalizedEmail = email?.trim()?.toLowerCase() || ''
-    if (!fullName?.trim() || !normalizedEmail || !password || !confirmPassword) {
+    const normalizedRoleInCompany = String(roleInCompany || '').trim()
+    const normalizedDepartment = String(department || '').trim()
+    const normalizedPhoneNumber = String(phoneNumber || '').trim()
+    if (!fullName?.trim() || !normalizedEmail || !normalizedRoleInCompany || !normalizedDepartment || !normalizedPhoneNumber || !password || !confirmPassword) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
     if (normalizedEmail !== invite.email) {
       return { ok: false, message: 'Work email must match your invitation email.' }
+    }
+    if (normalizedPhoneNumber.replace(/\D/g, '').length < 7) {
+      return { ok: false, message: 'Enter a valid phone number.' }
     }
 
     const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
@@ -2363,11 +2484,15 @@ function App() {
       pendingSignup: {
         fullName: fullName.trim(),
         email: normalizedEmail,
+        roleInCompany: normalizedRoleInCompany,
+        department: normalizedDepartment,
+        phoneNumber: normalizedPhoneNumber,
         password,
         role: 'admin',
-        adminLevel: invite.adminLevel || ADMIN_LEVELS.OPERATIONAL,
+        adminLevel: invite.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT,
         adminPermissions: Array.isArray(invite.adminPermissions) ? invite.adminPermissions : [],
         status: 'active',
+        createdAt: new Date().toISOString(),
       },
     })
     return { ok: true, requiresOtp: true }
@@ -2404,6 +2529,16 @@ function App() {
       if (!pendingSignup?.email || !pendingSignup?.fullName || !pendingSignup?.password) {
         return { ok: false, message: 'Incorrect verification code.' }
       }
+      if (otpChallenge.purpose === 'admin-setup') {
+        const hasProfileFields = Boolean(
+          String(pendingSignup?.roleInCompany || '').trim()
+          && String(pendingSignup?.department || '').trim()
+          && String(pendingSignup?.phoneNumber || '').trim(),
+        )
+        if (!hasProfileFields) {
+          return { ok: false, message: 'Please complete all required profile fields.' }
+        }
+      }
 
       const accounts = getSavedAccounts()
       const alreadyExists = accounts.some((account) => account.email.toLowerCase() === pendingSignup.email.toLowerCase())
@@ -2414,6 +2549,9 @@ function App() {
       const nextAccount = normalizeAccount({
         fullName: pendingSignup.fullName,
         email: pendingSignup.email,
+        roleInCompany: pendingSignup.roleInCompany,
+        department: pendingSignup.department,
+        phoneNumber: pendingSignup.phoneNumber,
         password: pendingSignup.password,
         role: pendingSignup.role || 'client',
         adminLevel: pendingSignup.adminLevel,
@@ -2426,6 +2564,9 @@ function App() {
       const user = normalizeUser({
         fullName: pendingSignup.fullName,
         email: pendingSignup.email,
+        roleInCompany: pendingSignup.roleInCompany,
+        department: pendingSignup.department,
+        phoneNumber: pendingSignup.phoneNumber,
         role: nextAccount.role || pendingSignup.role || 'client',
         adminLevel: nextAccount.adminLevel,
         adminPermissions: nextAccount.adminPermissions,
@@ -2455,6 +2596,17 @@ function App() {
       }
 
       if (otpChallenge.purpose === 'admin-setup' && otpChallenge.inviteToken) {
+        try {
+          const profileStorageKey = `kiaminaAdminProfile:${pendingSignup.email?.trim()?.toLowerCase()}`
+          localStorage.setItem(profileStorageKey, JSON.stringify({
+            fullName: pendingSignup.fullName || '',
+            roleInCompany: pendingSignup.roleInCompany || '',
+            department: pendingSignup.department || '',
+            phoneNumber: pendingSignup.phoneNumber || '',
+          }))
+        } catch {
+          // no-op
+        }
         const invites = getSavedAdminInvites()
         const inviteIndex = invites.findIndex((invite) => invite.token === otpChallenge.inviteToken)
         if (inviteIndex !== -1) {
@@ -2485,6 +2637,11 @@ function App() {
       })
       persistAuthUser(user, Boolean(otpChallenge.remember))
       syncProfileToSettings(user.fullName, user.email)
+      if (normalizeRole(match.role, match.email) === 'admin' && match.mustChangePassword) {
+        window.setTimeout(() => {
+          showToast('info', 'Temporary password detected. Open Admin Settings to create a permanent password.')
+        }, 220)
+      }
       if (user.role === 'client') {
         appendClientActivityLog(user.email, {
           actorName: user.fullName || 'Client User',
@@ -2553,14 +2710,18 @@ function App() {
     }
 
     const nextAccounts = [...accounts]
-    nextAccounts[matchIndex] = { ...nextAccounts[matchIndex], password }
+    nextAccounts[matchIndex] = {
+      ...nextAccounts[matchIndex],
+      password,
+      mustChangePassword: false,
+    }
     localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
     showToast('success', 'Password updated successfully.')
     return { ok: true }
   }
 
   const handleAdminActionLog = ({ action, affectedUser, details }) => {
-    appendAdminActivityLog({
+    logAdminActivity({
       adminName: authUser?.fullName || 'Admin User',
       action,
       affectedUser,
@@ -2568,16 +2729,54 @@ function App() {
     })
   }
 
-  const handleCurrentAdminEmailUpdated = ({ previousEmail = '', nextEmail = '' }) => {
+  const handleCurrentAdminEmailUpdated = (payload = {}) => {
+    const {
+      previousEmail = '',
+      nextEmail = '',
+      nextFullName = '',
+      nextRoleInCompany = '',
+      nextDepartment = '',
+      nextPhoneNumber = '',
+      nextAdminLevel = '',
+      nextAdminPermissions = [],
+      nextStatus = '',
+    } = payload
     const normalizedNextEmail = String(nextEmail || '').trim().toLowerCase()
     if (!normalizedNextEmail) return
     const normalizedPreviousEmail = String(previousEmail || authUser?.email || '').trim().toLowerCase()
     const currentAuthEmail = String(authUser?.email || '').trim().toLowerCase()
     if (currentAuthEmail && normalizedPreviousEmail && currentAuthEmail !== normalizedPreviousEmail) return
 
+    const hasNextFullName = Object.prototype.hasOwnProperty.call(payload, 'nextFullName')
+    const hasNextRoleInCompany = Object.prototype.hasOwnProperty.call(payload, 'nextRoleInCompany')
+    const hasNextDepartment = Object.prototype.hasOwnProperty.call(payload, 'nextDepartment')
+    const hasNextPhoneNumber = Object.prototype.hasOwnProperty.call(payload, 'nextPhoneNumber')
+    const hasNextAdminLevel = Object.prototype.hasOwnProperty.call(payload, 'nextAdminLevel')
+    const hasNextAdminPermissions = Object.prototype.hasOwnProperty.call(payload, 'nextAdminPermissions')
+    const hasNextStatus = Object.prototype.hasOwnProperty.call(payload, 'nextStatus')
+
+    const trimmedNextFullName = String(nextFullName || '').trim()
+    const trimmedNextRoleInCompany = String(nextRoleInCompany || '').trim()
+    const trimmedNextDepartment = String(nextDepartment || '').trim()
+    const trimmedNextPhoneNumber = String(nextPhoneNumber || '').trim()
+    const normalizedNextAdminLevel = String(nextAdminLevel || '').trim()
+    const normalizedNextStatus = String(nextStatus || '').trim()
+    const normalizedNextAdminPermissions = Array.isArray(nextAdminPermissions)
+      ? nextAdminPermissions
+      : []
+
     const nextAuthUser = normalizeUser({
       ...(authUser || {}),
       email: normalizedNextEmail,
+      fullName: hasNextFullName ? trimmedNextFullName : (authUser?.fullName || ''),
+      roleInCompany: hasNextRoleInCompany ? trimmedNextRoleInCompany : (authUser?.roleInCompany || ''),
+      department: hasNextDepartment ? trimmedNextDepartment : (authUser?.department || ''),
+      phoneNumber: hasNextPhoneNumber ? trimmedNextPhoneNumber : (authUser?.phoneNumber || ''),
+      adminLevel: hasNextAdminLevel ? normalizedNextAdminLevel : (authUser?.adminLevel || ''),
+      adminPermissions: hasNextAdminPermissions
+        ? normalizedNextAdminPermissions
+        : (authUser?.adminPermissions || []),
+      status: hasNextStatus ? normalizedNextStatus : (authUser?.status || 'active'),
       sessionIssuedAtIso: new Date().toISOString(),
     })
     if (!nextAuthUser) return
@@ -2585,14 +2784,8 @@ function App() {
     setAuthUser(nextAuthUser)
     setIsAuthenticated(true)
 
-    const hasLocalAuth = Boolean(localStorage.getItem('kiaminaAuthUser'))
-    if (hasLocalAuth) {
-      localStorage.setItem('kiaminaAuthUser', JSON.stringify(nextAuthUser))
-      sessionStorage.removeItem('kiaminaAuthUser')
-    } else {
-      sessionStorage.setItem('kiaminaAuthUser', JSON.stringify(nextAuthUser))
-      localStorage.removeItem('kiaminaAuthUser')
-    }
+    const authStorageType = detectAuthStorageType()
+    persistAuthenticatedUserRecord(nextAuthUser, authStorageType === 'local' ? 'local' : 'session')
 
     setImpersonationSession((previousSession) => {
       if (!previousSession) return previousSession
@@ -2605,6 +2798,153 @@ function App() {
       persistImpersonationSession(nextSession)
       return nextSession
     })
+    setAdminImpersonationSession((previousSession) => {
+      if (!previousSession) return previousSession
+      let didChange = false
+      const nextSession = { ...previousSession }
+      if (nextSession.originalAdminEmail === normalizedPreviousEmail) {
+        nextSession.originalAdminEmail = normalizedNextEmail
+        didChange = true
+      }
+      if (nextSession.impersonatedAdminEmail === normalizedPreviousEmail) {
+        nextSession.impersonatedAdminEmail = normalizedNextEmail
+        didChange = true
+      }
+      if (!didChange) return previousSession
+      persistAdminImpersonationSession(nextSession, authStorageType === 'local' ? 'local' : 'session')
+      return nextSession
+    })
+  }
+
+  const exitAdminImpersonationMode = ({ silent = false } = {}) => {
+    const activeSession = adminImpersonationSession
+    if (!activeSession) return { ok: false, message: 'No active admin impersonation session.' }
+    const originalEmail = String(activeSession.originalAdminEmail || '').trim().toLowerCase()
+    if (!originalEmail) {
+      setAdminImpersonationSession(null)
+      persistAdminImpersonationSession(null)
+      return { ok: false, message: 'Original admin session is unavailable.' }
+    }
+
+    const accounts = getSavedAccounts()
+    const originalAccount = accounts.find((account) => account.email?.trim()?.toLowerCase() === originalEmail)
+    if (!originalAccount || normalizeRole(originalAccount.role, originalAccount.email) !== 'admin') {
+      setAdminImpersonationSession(null)
+      persistAdminImpersonationSession(null)
+      return { ok: false, message: 'Original admin account was not found.' }
+    }
+
+    const storageType = detectAuthStorageType()
+    const restoredUser = persistAuthenticatedUserRecord(originalAccount, storageType === 'local' ? 'local' : 'session')
+    if (!restoredUser) {
+      return { ok: false, message: 'Unable to restore original admin session.' }
+    }
+
+    const previousImpersonatedName = activeSession.impersonatedAdminName || activeSession.impersonatedAdminEmail || 'Admin User'
+    setAuthUser(restoredUser)
+    setIsAuthenticated(true)
+    setShowAuth(false)
+    setShowAdminLogin(false)
+    setAdminSetupToken('')
+    setImpersonationSession(null)
+    setPendingImpersonationClient(null)
+    persistImpersonationSession(null)
+    setAdminImpersonationSession(null)
+    persistAdminImpersonationSession(null)
+    setActivePage(ADMIN_DEFAULT_PAGE)
+    setActiveFolderRoute(null)
+    try {
+      history.replaceState({}, '', `/${ADMIN_DEFAULT_PAGE}`)
+    } catch {
+      // ignore
+    }
+    appendAdminActivityLog({
+      adminName: activeSession.originalAdminName || restoredUser.fullName || 'Super Admin',
+      adminEmail: originalEmail,
+      adminLevel: activeSession.originalAdminLevel || ADMIN_LEVELS.SUPER,
+      action: 'Admin impersonation ended',
+      affectedUser: previousImpersonatedName,
+      details: `Super Admin exited impersonation for ${previousImpersonatedName}.`,
+    })
+    if (!silent) {
+      showToast('success', 'Returned to Super Admin session.')
+    }
+    return { ok: true }
+  }
+
+  const handleRequestAdminImpersonation = async (targetAdminEmail = '') => {
+    const targetEmail = String(targetAdminEmail || '').trim().toLowerCase()
+    if (!targetEmail) return { ok: false, message: 'Admin account not found.' }
+    if (!currentAdminAccount || currentAdminAccount.adminLevel !== ADMIN_LEVELS.SUPER) {
+      return { ok: false, message: 'Only Super Admin can impersonate admin accounts.' }
+    }
+    if (isImpersonatingClient) {
+      return { ok: false, message: 'Exit client impersonation mode before impersonating an admin.' }
+    }
+
+    const currentEmail = String(authUser?.email || '').trim().toLowerCase()
+    if (!currentEmail) return { ok: false, message: 'Current admin session is unavailable.' }
+    if (targetEmail === currentEmail) return { ok: false, message: 'Cannot impersonate your own account.' }
+
+    const accounts = getSavedAccounts()
+    const targetAccount = accounts.find((account) => account.email?.trim()?.toLowerCase() === targetEmail)
+    if (!targetAccount || normalizeRole(targetAccount.role, targetAccount.email) !== 'admin') {
+      return { ok: false, message: 'Admin account not found.' }
+    }
+    if (targetAccount.status === 'suspended') {
+      return { ok: false, message: 'Cannot impersonate a suspended admin account.' }
+    }
+
+    if (adminImpersonationSession) {
+      const cleanup = exitAdminImpersonationMode({ silent: true })
+      if (!cleanup.ok) return cleanup
+    }
+
+    const storageType = detectAuthStorageType()
+    const sessionPayload = {
+      originalAdminEmail: currentEmail,
+      originalAdminName: authUser?.fullName || currentAdminAccount.fullName || 'Super Admin',
+      originalAdminLevel: currentAdminAccount.adminLevel || ADMIN_LEVELS.SUPER,
+      impersonatedAdminEmail: targetEmail,
+      impersonatedAdminName: targetAccount.fullName || targetAccount.email || 'Admin User',
+      impersonatedAdminLevel: targetAccount.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT,
+      startedAt: Date.now(),
+    }
+    persistAdminImpersonationSession(sessionPayload, storageType === 'local' ? 'local' : 'session')
+    setAdminImpersonationSession(sessionPayload)
+
+    const impersonatedUser = persistAuthenticatedUserRecord(targetAccount, storageType === 'local' ? 'local' : 'session')
+    if (!impersonatedUser) {
+      setAdminImpersonationSession(null)
+      persistAdminImpersonationSession(null)
+      return { ok: false, message: 'Unable to start impersonation session.' }
+    }
+
+    setAuthUser(impersonatedUser)
+    setIsAuthenticated(true)
+    setShowAuth(false)
+    setShowAdminLogin(false)
+    setAdminSetupToken('')
+    setImpersonationSession(null)
+    setPendingImpersonationClient(null)
+    persistImpersonationSession(null)
+    setActivePage(ADMIN_DEFAULT_PAGE)
+    setActiveFolderRoute(null)
+    try {
+      history.replaceState({}, '', `/${ADMIN_DEFAULT_PAGE}`)
+    } catch {
+      // ignore
+    }
+
+    appendAdminActivityLog({
+      adminName: sessionPayload.originalAdminName,
+      adminEmail: sessionPayload.originalAdminEmail,
+      adminLevel: sessionPayload.originalAdminLevel,
+      action: 'Admin impersonation started',
+      affectedUser: `${sessionPayload.impersonatedAdminName} (${getAdminLevelLabel(sessionPayload.impersonatedAdminLevel)})`,
+      details: `Super Admin started impersonation for ${sessionPayload.impersonatedAdminEmail}.`,
+    })
+    return { ok: true }
   }
 
   const handleRequestImpersonation = (clientRecord) => {
@@ -2653,7 +2993,7 @@ function App() {
       // ignore
     }
 
-    appendAdminActivityLog({
+    logAdminActivity({
       adminName: nextSession.adminName,
       action: 'Client impersonation started',
       affectedUser: nextSession.businessName,
@@ -2664,7 +3004,7 @@ function App() {
 
   const exitImpersonationMode = ({ expired = false } = {}) => {
     if (!impersonationSession) return
-    appendAdminActivityLog({
+    logAdminActivity({
       adminName: impersonationSession.adminName || authUser?.fullName || 'Admin User',
       action: expired ? 'Client impersonation expired' : 'Client impersonation ended',
       affectedUser: impersonationSession.businessName || impersonationSession.clientEmail || '--',
@@ -2694,7 +3034,7 @@ function App() {
       skipped: false,
     }
     persistOnboardingState(nextState, scopedClientEmail)
-    appendAdminActivityLog({
+    logAdminActivity({
       adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
       action: 'Forced verification approval in impersonation mode',
       affectedUser: impersonationSession?.businessName || scopedClientEmail,
@@ -2726,7 +3066,7 @@ function App() {
       persistImpersonationSession(updated)
       return updated
     })
-    appendAdminActivityLog({
+    logAdminActivity({
       adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
       action: 'Corrected CRI in impersonation mode',
       affectedUser: impersonationSession?.businessName || scopedClientEmail,
@@ -2762,7 +3102,7 @@ function App() {
     }
 
     if (updated) {
-      appendAdminActivityLog({
+      logAdminActivity({
         adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
         action: 'Overrode document status in impersonation mode',
         affectedUser: impersonationSession?.businessName || scopedClientEmail || '--',
@@ -2809,7 +3149,7 @@ function App() {
       'Documents uploaded successfully.': 'Admin uploaded document on behalf of client.',
     }
     const details = detailsByMessage[message] || `Admin ${impersonationSession?.adminName || authUser?.fullName || 'Admin User'} action in client view: ${message}`
-    appendAdminActivityLog({
+    logAdminActivity({
       adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
       action: type === 'success' ? 'Impersonation action' : 'Impersonation warning',
       affectedUser: impersonationSession?.businessName || scopedClientEmail || '--',
@@ -2825,7 +3165,7 @@ function App() {
       verificationPending: true,
     }, scopedClientEmail)
     if (isImpersonatingClient) {
-      appendAdminActivityLog({
+      logAdminActivity({
         adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
         action: 'Skipped onboarding in impersonation mode',
         affectedUser: impersonationSession?.businessName || scopedClientEmail || '--',
@@ -2883,7 +3223,7 @@ function App() {
       : (finalData.defaultLandingPage || getDefaultPageForRole(currentUserRole))
     handleSetActivePage(defaultLandingPage, { replace: true })
     if (isImpersonatingClient) {
-      appendAdminActivityLog({
+      logAdminActivity({
         adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
         action: 'Completed onboarding in impersonation mode',
         affectedUser: impersonationSession?.businessName || scopedClientEmail || '--',
@@ -3453,18 +3793,18 @@ function App() {
         </div>
       )}
 
-      {!isAuthenticated ? (
-        adminSetupToken ? (
-          <AdminAccountSetup
-            invite={activeAdminInvite}
-            otpChallenge={adminSetupOtpChallenge}
-            onCreateAccount={handleAdminSetupCreateAccount}
-            onVerifyOtp={handleVerifyOtp}
-            onResendOtp={handleResendOtp}
-            onCancelOtp={handleCancelOtp}
-            onReturnToAdminLogin={() => navigateToAdminLogin({ replace: true })}
-          />
-        ) : showAdminLogin ? (
+      {adminSetupToken ? (
+        <AdminAccountSetup
+          invite={activeAdminInvite}
+          otpChallenge={adminSetupOtpChallenge}
+          onCreateAccount={handleAdminSetupCreateAccount}
+          onVerifyOtp={handleVerifyOtp}
+          onResendOtp={handleResendOtp}
+          onCancelOtp={handleCancelOtp}
+          onReturnToAdminLogin={() => navigateToAdminLogin({ replace: true })}
+        />
+      ) : !isAuthenticated ? (
+        showAdminLogin ? (
           <AdminLoginPortal
             onLogin={handleAdminLogin}
             otpChallenge={adminLoginOtpChallenge}
@@ -3520,18 +3860,44 @@ function App() {
           showToast={showClientToast}
         />
       ) : isAdminView && !isImpersonatingClient ? (
-        <AdminWorkspace
-          activePage={activePage}
-          setActivePage={handleSetActivePage}
-          onLogout={handleLogout}
-          showToast={showToast}
-          adminFirstName={authUser?.fullName?.trim()?.split(/\s+/)?.[0] || clientFirstName}
-          currentAdminAccount={currentAdminAccount}
-          onRequestImpersonation={handleRequestImpersonation}
-          impersonationEnabled={impersonationEnabled}
-          onAdminActionLog={handleAdminActionLog}
-          onCurrentAdminEmailUpdated={handleCurrentAdminEmailUpdated}
-        />
+        <>
+          {isAdminImpersonationActive && (
+            <div className="fixed top-0 left-0 right-0 z-[215] bg-warning-bg border-b border-warning/30">
+              <div className="min-h-12 px-3 sm:px-4 py-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm text-warning">
+                  <ShieldAlert className="w-4 h-4" />
+                  <span className="font-medium">
+                    You are impersonating {adminImpersonationSession?.impersonatedAdminName || 'an admin'}.
+                  </span>
+                  <span className="text-xs text-text-secondary">All actions are logged with admin level.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => exitAdminImpersonationMode({ silent: false })}
+                  className="h-8 px-3 rounded bg-success text-white text-xs font-semibold hover:bg-[#0a6a41] transition-colors inline-flex items-center gap-1.5"
+                >
+                  <ArrowLeftRight className="w-3.5 h-3.5" />
+                  Exit Admin Impersonation
+                </button>
+              </div>
+            </div>
+          )}
+          <div className={isAdminImpersonationActive ? 'pt-12' : ''}>
+            <AdminWorkspace
+              activePage={activePage}
+              setActivePage={handleSetActivePage}
+              onLogout={handleLogout}
+              showToast={showToast}
+              adminFirstName={authUser?.fullName?.trim()?.split(/\s+/)?.[0] || clientFirstName}
+              currentAdminAccount={currentAdminAccount}
+              onRequestImpersonation={handleRequestImpersonation}
+              onRequestAdminImpersonation={handleRequestAdminImpersonation}
+              impersonationEnabled={impersonationEnabled}
+              onAdminActionLog={handleAdminActionLog}
+              onCurrentAdminEmailUpdated={handleCurrentAdminEmailUpdated}
+            />
+          </div>
+        </>
       ) : (
         <>
           {isImpersonatingClient && (

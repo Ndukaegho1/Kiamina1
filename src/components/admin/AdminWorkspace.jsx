@@ -13,6 +13,7 @@ import {
   AdminTrashPage,
   AdminCommunicationsCenter,
   AdminSendNotificationPage,
+  AdminWorkHoursPage,
   AdminActivityLogPage,
 } from './AdminViews'
 import AdminSettingsPage from './settings/AdminSettingsPage'
@@ -25,11 +26,13 @@ import {
   primeSupportNotificationSound,
   SUPPORT_NOTIFICATION_INITIAL_DELAY_MS,
 } from '../../utils/supportNotificationSound'
+import {
+  canAdminAccessClientScope,
+  filterClientsForAdminScope,
+  getAssignedClientEmailSetForAdmin,
+} from './adminAssignments'
 
-const defaultAdminNotifications = [
-  { id: 'NOT-001', type: 'comment', message: 'New comment on Expense_Report_Feb2026.pdf', timestamp: 'Feb 24, 2026 11:00 AM', read: false },
-  { id: 'NOT-002', type: 'status', message: 'Bank_Statement_GTB_Feb2026.pdf requires review', timestamp: 'Feb 22, 2026 9:45 AM', read: false },
-]
+const defaultAdminNotifications = []
 
 const buildKeywordSuggestions = (values = [], limit = 20) => {
   const seen = new Set()
@@ -79,13 +82,19 @@ const flattenDocumentRowsForSearch = (rows = [], fallbackCategory = '') => (
   })
 )
 
-const readAdminSearchSnapshot = () => {
+const extractClientEmailFromDocumentStorageKey = (storageKey = '') => {
+  const prefix = 'kiaminaClientDocuments:'
+  if (!String(storageKey).startsWith(prefix)) return ''
+  return String(storageKey).slice(prefix.length).trim().toLowerCase()
+}
+
+const readAdminSearchSnapshot = (currentAdminAccount = null) => {
   if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
     return { clients: [], documents: [], activityLogs: [] }
   }
 
   const accounts = safeParseJson(localStorage.getItem('kiaminaAccounts'), [])
-  const clients = (Array.isArray(accounts) ? accounts : [])
+  const allClients = (Array.isArray(accounts) ? accounts : [])
     .filter((account) => account && typeof account === 'object' && !isAdminAccount(account))
     .map((account, index) => ({
       id: `client-${account.email || index}`,
@@ -95,9 +104,16 @@ const readAdminSearchSnapshot = () => {
       country: account.country || '',
       status: account.status || '',
     }))
+  const clients = filterClientsForAdminScope(allClients, currentAdminAccount || {})
 
+  const assignedClientEmailSet = getAssignedClientEmailSetForAdmin(currentAdminAccount || {})
   const documentStorageKeys = Object.keys(localStorage)
-    .filter((key) => key === 'kiaminaClientDocuments' || key.startsWith('kiaminaClientDocuments:'))
+    .filter((key) => {
+      if (!(key === 'kiaminaClientDocuments' || key.startsWith('kiaminaClientDocuments:'))) return false
+      if (assignedClientEmailSet === null) return true
+      const scopedEmail = extractClientEmailFromDocumentStorageKey(key)
+      return Boolean(scopedEmail && assignedClientEmailSet.has(scopedEmail))
+    })
   const documentBundles = documentStorageKeys.flatMap((key) => {
     const parsed = safeParseJson(localStorage.getItem(key), null)
     if (!parsed || typeof parsed !== 'object') return []
@@ -126,6 +142,7 @@ const readAdminSearchSnapshot = () => {
   const normalizedActivityLogs = (Array.isArray(activityLogs) ? activityLogs : []).map((row, index) => ({
     id: `activity-${row.id || index}`,
     action: row.action || 'Admin action',
+    adminLevel: row.adminLevel || '',
     affectedUser: row.affectedUser || '',
     details: row.details || '',
     timestamp: row.timestamp || '',
@@ -160,6 +177,7 @@ function AdminWorkspace({
   adminFirstName,
   currentAdminAccount,
   onRequestImpersonation,
+  onRequestAdminImpersonation,
   impersonationEnabled,
   onAdminActionLog,
   onCurrentAdminEmailUpdated,
@@ -184,8 +202,8 @@ function AdminWorkspace({
   const activePageRef = useRef(activePage)
   const supportUnreadRef = useRef(-1)
   const liveAdminSearchSnapshot = useMemo(
-    () => readAdminSearchSnapshot(),
-    [searchIndexRevision],
+    () => readAdminSearchSnapshot(currentAdminAccount),
+    [searchIndexRevision, currentAdminAccount],
   )
   const adminSearchEntries = useMemo(() => ([
     { id: 'search-admin-dashboard', label: 'Admin Dashboard', description: 'Overview and key admin metrics', pageId: 'admin-dashboard', keywords: ['dashboard', 'overview', 'metrics'] },
@@ -195,6 +213,7 @@ function AdminWorkspace({
     { id: 'search-admin-trash', label: 'Trash', description: 'Restore deleted items or empty trash', pageId: 'admin-trash', keywords: ['trash', 'restore', 'deleted', 'recycle bin'] },
     { id: 'search-admin-communications', label: 'Communications Center', description: 'Conversation and communication tools', pageId: 'admin-communications', keywords: ['communications', 'messages', 'broadcast'] },
     { id: 'search-admin-notifications', label: 'Send Notification', description: 'Send bulk or targeted notifications', pageId: 'admin-notifications', keywords: ['notification', 'bulk', 'targeted', 'send'] },
+    { id: 'search-admin-work-hours', label: 'Work Hours', description: 'Admin time clock and daily hour tracking', pageId: 'admin-work-hours', keywords: ['work hours', 'clock in', 'clock out', 'timesheet'] },
     { id: 'search-admin-activity', label: 'Activity Log', description: 'System activity audit trail', pageId: 'admin-activity', keywords: ['activity', 'audit', 'logs'] },
     { id: 'search-admin-settings', label: 'Admin Settings', description: 'Manage roles, permissions, and system controls', pageId: 'admin-settings', keywords: ['settings', 'admin', 'permissions', 'roles'] },
     ...liveAdminSearchSnapshot.clients.map((client) => ({
@@ -216,7 +235,7 @@ function AdminWorkspace({
       label: log.action,
       description: 'Activity Log',
       pageId: 'admin-activity',
-      keywords: [log.affectedUser, log.details, log.timestamp, 'activity', 'audit'],
+      keywords: [log.affectedUser, log.details, log.timestamp, log.adminLevel, 'activity', 'audit'],
     })),
     ...adminNotifications.map((notification, index) => ({
       id: `search-admin-notification-${notification.id || index}`,
@@ -410,6 +429,15 @@ function AdminWorkspace({
   }, [activePage])
 
   useEffect(() => {
+    if (!selectedClientContext?.email) return
+    if (canAdminAccessClientScope(currentAdminAccount || {}, selectedClientContext.email)) return
+    setSelectedClientContext(null)
+    if (activePage === 'admin-client-profile' || activePage === 'admin-client-documents' || activePage === 'admin-client-upload-history') {
+      setActivePage('admin-clients')
+    }
+  }, [activePage, currentAdminAccount, selectedClientContext, setActivePage])
+
+  useEffect(() => {
     const handlePrimer = () => {
       primeSupportNotificationSound()
     }
@@ -501,7 +529,7 @@ function AdminWorkspace({
 
     switch (activePage) {
       case 'admin-dashboard':
-        return <AdminDashboardPage setActivePage={setActivePage} />
+        return <AdminDashboardPage setActivePage={setActivePage} currentAdminAccount={currentAdminAccount} />
       case 'admin-clients':
         return (
           <AdminClientsPage
@@ -523,6 +551,7 @@ function AdminWorkspace({
             setActivePage={setActivePage}
             showToast={showToast}
             onAdminActionLog={onAdminActionLog}
+            currentAdminAccount={currentAdminAccount}
           />
         )
       case 'admin-client-documents':
@@ -536,7 +565,13 @@ function AdminWorkspace({
           />
         )
       case 'admin-client-upload-history':
-        return <AdminClientUploadHistoryPage client={selectedClientContext} setActivePage={setActivePage} showToast={showToast} />
+        return (
+          <AdminClientUploadHistoryPage
+            client={selectedClientContext}
+            setActivePage={setActivePage}
+            currentAdminAccount={currentAdminAccount}
+          />
+        )
       case 'admin-documents':
         return (
           <AdminDocumentReviewCenter
@@ -565,6 +600,8 @@ function AdminWorkspace({
         )
       case 'admin-notifications':
         return <AdminSendNotificationPage showToast={showToast} runWithSlowRuntimeWatch={runWithSlowRuntimeWatch} />
+      case 'admin-work-hours':
+        return <AdminWorkHoursPage currentAdminAccount={currentAdminAccount} />
       case 'admin-activity':
         return <AdminActivityLogPage />
       case 'admin-trash':
@@ -582,10 +619,11 @@ function AdminWorkspace({
             currentAdminAccount={currentAdminAccount}
             runWithSlowRuntimeWatch={runWithSlowRuntimeWatch}
             onCurrentAdminEmailUpdated={onCurrentAdminEmailUpdated}
+            onRequestAdminImpersonation={onRequestAdminImpersonation}
           />
         )
       default:
-        return <AdminDashboardPage setActivePage={setActivePage} />
+        return <AdminDashboardPage setActivePage={setActivePage} currentAdminAccount={currentAdminAccount} />
     }
   }
 
@@ -616,6 +654,7 @@ function AdminWorkspace({
           searchResults={adminSearchResults}
           onSearchResultSelect={handleAdminSearchResultSelect}
           onSearchResultsDismiss={dismissAdminSearchFeedback}
+          onAdminActionLog={onAdminActionLog}
         />
         <main className="p-4 sm:p-6 flex-1 overflow-auto">
           {renderAdminPage()}

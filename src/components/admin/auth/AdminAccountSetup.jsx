@@ -5,6 +5,7 @@ import {
   ADMIN_PERMISSION_DEFINITIONS,
   getAdminLevelLabel,
   isAdminInvitePending,
+  sanitizeAdminPermissions,
 } from '../adminIdentity'
 import AdminOtpModal from './AdminOtpModal'
 import KiaminaLogo from '../../common/KiaminaLogo'
@@ -22,6 +23,9 @@ function AdminAccountSetup({
   const [setupForm, setSetupForm] = useState({
     fullName: '',
     email: invite?.email || '',
+    roleInCompany: '',
+    department: '',
+    phoneNumber: '',
     password: '',
     confirmPassword: '',
   })
@@ -31,10 +35,11 @@ function AdminAccountSetup({
   const isInviteValid = isAdminInvitePending(invite)
   const invitePermissions = useMemo(() => {
     if (!invite) return []
-    if (invite.adminLevel === ADMIN_LEVELS.SENIOR) {
+    if (invite.adminLevel === ADMIN_LEVELS.SUPER) {
       return ['Full System Access']
     }
-    return invite.adminPermissions
+    const permissionIds = sanitizeAdminPermissions(invite.adminPermissions)
+    return permissionIds
       .map((permissionId) => ADMIN_PERMISSION_DEFINITIONS.find((permission) => permission.id === permissionId)?.label)
       .filter(Boolean)
   }, [invite])
@@ -49,6 +54,9 @@ function AdminAccountSetup({
       inviteToken: invite.token,
       fullName: setupForm.fullName,
       email: setupForm.email,
+      roleInCompany: setupForm.roleInCompany,
+      department: setupForm.department,
+      phoneNumber: setupForm.phoneNumber,
       password: setupForm.password,
       confirmPassword: setupForm.confirmPassword,
     })
@@ -136,6 +144,37 @@ function AdminAccountSetup({
               className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
             <p className="text-xs text-text-muted mt-1">This must match the invited email address.</p>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Role In Company</label>
+              <input
+                type="text"
+                value={setupForm.roleInCompany}
+                onChange={(event) => setSetupForm((prev) => ({ ...prev, roleInCompany: event.target.value }))}
+                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Department</label>
+              <input
+                type="text"
+                value={setupForm.department}
+                onChange={(event) => setSetupForm((prev) => ({ ...prev, department: event.target.value }))}
+                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Phone Number</label>
+            <input
+              type="tel"
+              value={setupForm.phoneNumber}
+              onChange={(event) => setSetupForm((prev) => ({ ...prev, phoneNumber: event.target.value }))}
+              className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
