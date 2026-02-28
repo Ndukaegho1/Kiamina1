@@ -9,6 +9,8 @@ import {
   AdminClientDocumentsPage,
   AdminClientUploadHistoryPage,
   AdminDocumentReviewCenter,
+  AdminSupportLeadsPage,
+  AdminTrashPage,
   AdminCommunicationsCenter,
   AdminSendNotificationPage,
   AdminActivityLogPage,
@@ -17,6 +19,12 @@ import AdminSettingsPage from './settings/AdminSettingsPage'
 import { ADMIN_DEFAULT_PAGE } from './adminConfig'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import DotLottiePreloader from '../common/DotLottiePreloader'
+import { getSupportCenterSnapshot, subscribeSupportCenter } from '../../utils/supportCenter'
+import {
+  playSupportNotificationSound,
+  primeSupportNotificationSound,
+  SUPPORT_NOTIFICATION_INITIAL_DELAY_MS,
+} from '../../utils/supportNotificationSound'
 
 const defaultAdminNotifications = [
   { id: 'NOT-001', type: 'comment', message: 'New comment on Expense_Report_Feb2026.pdf', timestamp: 'Feb 24, 2026 11:00 AM', read: false },
@@ -154,6 +162,7 @@ function AdminWorkspace({
   onRequestImpersonation,
   impersonationEnabled,
   onAdminActionLog,
+  onCurrentAdminEmailUpdated,
 }) {
   const [adminNotifications, setAdminNotifications] = useState(defaultAdminNotifications)
   const [selectedClientContext, setSelectedClientContext] = useState(null)
@@ -172,6 +181,8 @@ function AdminWorkspace({
   const slowRuntimeMinVisibleUntilRef = useRef(0)
   const slowRuntimeVisibleRef = useRef(false)
   const slowRuntimeMessageRef = useRef('Please wait...')
+  const activePageRef = useRef(activePage)
+  const supportUnreadRef = useRef(-1)
   const liveAdminSearchSnapshot = useMemo(
     () => readAdminSearchSnapshot(),
     [searchIndexRevision],
@@ -180,6 +191,8 @@ function AdminWorkspace({
     { id: 'search-admin-dashboard', label: 'Admin Dashboard', description: 'Overview and key admin metrics', pageId: 'admin-dashboard', keywords: ['dashboard', 'overview', 'metrics'] },
     { id: 'search-admin-clients', label: 'Client Management', description: 'Manage client accounts', pageId: 'admin-clients', keywords: ['clients', 'accounts', 'businesses'] },
     { id: 'search-admin-documents', label: 'Document Review Center', description: 'Approve, reject, and request information', pageId: 'admin-documents', keywords: ['documents', 'review', 'approve', 'reject', 'pending'] },
+    { id: 'search-admin-leads', label: 'Leads', description: 'Lead registry from support chat', pageId: 'admin-leads', keywords: ['leads', 'prospects', 'support', 'inquiries'] },
+    { id: 'search-admin-trash', label: 'Trash', description: 'Restore deleted items or empty trash', pageId: 'admin-trash', keywords: ['trash', 'restore', 'deleted', 'recycle bin'] },
     { id: 'search-admin-communications', label: 'Communications Center', description: 'Conversation and communication tools', pageId: 'admin-communications', keywords: ['communications', 'messages', 'broadcast'] },
     { id: 'search-admin-notifications', label: 'Send Notification', description: 'Send bulk or targeted notifications', pageId: 'admin-notifications', keywords: ['notification', 'bulk', 'targeted', 'send'] },
     { id: 'search-admin-activity', label: 'Activity Log', description: 'System activity audit trail', pageId: 'admin-activity', keywords: ['activity', 'audit', 'logs'] },
@@ -393,6 +406,62 @@ function AdminWorkspace({
   }
 
   useEffect(() => {
+    activePageRef.current = activePage
+  }, [activePage])
+
+  useEffect(() => {
+    const handlePrimer = () => {
+      primeSupportNotificationSound()
+    }
+    window.addEventListener('pointerdown', handlePrimer, { passive: true })
+    window.addEventListener('keydown', handlePrimer, { passive: true })
+    window.addEventListener('touchstart', handlePrimer, { passive: true })
+    return () => {
+      window.removeEventListener('pointerdown', handlePrimer)
+      window.removeEventListener('keydown', handlePrimer)
+      window.removeEventListener('touchstart', handlePrimer)
+    }
+  }, [])
+
+  useEffect(() => {
+    let delayedSoundTimer = null
+    const toUnreadCount = (snapshot = {}) => {
+      const tickets = Array.isArray(snapshot?.tickets) ? snapshot.tickets : []
+      return tickets.reduce((total, ticket) => total + Number(ticket?.unreadByAdmin || 0), 0)
+    }
+
+    supportUnreadRef.current = -1
+    const unsubscribe = subscribeSupportCenter((snapshot) => {
+      const nextUnreadCount = toUnreadCount(snapshot)
+      const previousUnreadCount = supportUnreadRef.current
+      supportUnreadRef.current = nextUnreadCount
+      if (previousUnreadCount < 0) {
+        const windowActive = typeof document !== 'undefined'
+          ? (document.visibilityState === 'visible' && document.hasFocus())
+          : true
+        if (nextUnreadCount > 0 && (activePageRef.current !== 'admin-communications' || !windowActive)) {
+          delayedSoundTimer = window.setTimeout(() => {
+            playSupportNotificationSound()
+          }, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS)
+        }
+        return
+      }
+      if (nextUnreadCount <= previousUnreadCount) return
+
+      const windowActive = typeof document !== 'undefined'
+        ? (document.visibilityState === 'visible' && document.hasFocus())
+        : true
+      if (activePageRef.current !== 'admin-communications' || !windowActive) {
+        playSupportNotificationSound()
+      }
+    })
+    return () => {
+      if (delayedSoundTimer) window.clearTimeout(delayedSoundTimer)
+      unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
     slowRuntimeVisibleRef.current = isSlowRuntimeOverlayVisible
   }, [isSlowRuntimeOverlayVisible])
 
@@ -476,18 +545,43 @@ function AdminWorkspace({
             runWithSlowRuntimeWatch={runWithSlowRuntimeWatch}
           />
         )
+      case 'admin-leads':
+        return (
+          <AdminSupportLeadsPage
+            setActivePage={setActivePage}
+            showToast={showToast}
+            currentAdminAccount={currentAdminAccount}
+            onAdminActionLog={onAdminActionLog}
+          />
+        )
       case 'admin-communications':
-        return <AdminCommunicationsCenter showToast={showToast} />
+        return (
+          <AdminCommunicationsCenter
+            showToast={showToast}
+            currentAdminAccount={currentAdminAccount}
+            onAdminActionLog={onAdminActionLog}
+            setActivePage={setActivePage}
+          />
+        )
       case 'admin-notifications':
         return <AdminSendNotificationPage showToast={showToast} runWithSlowRuntimeWatch={runWithSlowRuntimeWatch} />
       case 'admin-activity':
         return <AdminActivityLogPage />
+      case 'admin-trash':
+        return (
+          <AdminTrashPage
+            showToast={showToast}
+            currentAdminAccount={currentAdminAccount}
+            onAdminActionLog={onAdminActionLog}
+          />
+        )
       case 'admin-settings':
         return (
           <AdminSettingsPage
             showToast={showToast}
             currentAdminAccount={currentAdminAccount}
             runWithSlowRuntimeWatch={runWithSlowRuntimeWatch}
+            onCurrentAdminEmailUpdated={onCurrentAdminEmailUpdated}
           />
         )
       default:

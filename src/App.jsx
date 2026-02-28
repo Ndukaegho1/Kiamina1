@@ -51,6 +51,8 @@ const OTP_PREVIEW_STORAGE_KEY = 'kiaminaOtpPreview'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
 const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
+const CLIENT_SESSION_CONTROL_STORAGE_KEY = 'kiaminaClientSessionControl'
+const CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY = 'kiaminaClientBriefNotifications'
 const IMPERSONATION_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_DEV_ADMIN_ACCOUNT = {
   fullName: 'Senior Admin',
@@ -205,6 +207,40 @@ const formatClientDocumentTimestamp = (value) => {
   })
 }
 
+const readClientSessionControl = () => {
+  if (typeof localStorage === 'undefined') {
+    return {
+      globalLogoutAtIso: '',
+      byEmail: {},
+    }
+  }
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CLIENT_SESSION_CONTROL_STORAGE_KEY) || '{}')
+    const byEmail = parsed?.byEmail && typeof parsed.byEmail === 'object' ? parsed.byEmail : {}
+    return {
+      globalLogoutAtIso: parsed?.globalLogoutAtIso || '',
+      byEmail,
+    }
+  } catch {
+    return {
+      globalLogoutAtIso: '',
+      byEmail: {},
+    }
+  }
+}
+
+const readClientBriefNotifications = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail || typeof localStorage === 'undefined') return []
+  const scopedKey = getScopedStorageKey(CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY, normalizedEmail)
+  try {
+    const parsed = JSON.parse(localStorage.getItem(scopedKey) || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
 const toIsoDate = (value) => {
   const parsed = Date.parse(value || '')
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString()
@@ -215,6 +251,11 @@ const buildFileSnapshot = (file = {}) => ({
   extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
   status: file.status || 'Pending Review',
   class: file.class || file.expenseClass || file.salesClass || '',
+  classId: file.classId || '',
+  className: file.className || file.class || file.expenseClass || file.salesClass || '',
+  paymentMethod: file.paymentMethod || '',
+  invoice: file.invoice || '',
+  invoiceNumber: file.invoiceNumber || '',
   fileCacheKey: file.fileCacheKey || '',
   folderId: file.folderId || '',
   folderName: file.folderName || '',
@@ -348,7 +389,8 @@ const ensureFolderStructuredRecords = (rows = [], categoryKey = 'expenses') => {
 
   const normalizeFile = (sourceFile = {}, folderId, index, folderName = 'Folder') => {
     const file = sourceFile && typeof sourceFile === 'object' ? sourceFile : {}
-    const className = file.class || file.expenseClass || file.salesClass || ''
+    const classValue = file.class || file.className || file.expenseClass || file.salesClass || ''
+    const classId = file.classId || (classValue ? buildClassId(classValue) : '')
     const timestamp = file.date || formatClientDocumentTimestamp()
     const timestampIso = file.updatedAtIso || file.createdAtIso || toIsoDate(file.date)
     const fileId = file.fileId || createFileId(folderId, index)
@@ -392,7 +434,9 @@ const ensureFolderStructuredRecords = (rows = [], categoryKey = 'expenses') => {
           folderId,
           folderName,
           status: normalizedStatus,
-          class: className,
+          class: classValue,
+          classId,
+          className: classValue,
         },
       })]
     const rawActivityLog = Array.isArray(file.activityLog) ? file.activityLog : []
@@ -446,13 +490,20 @@ const ensureFolderStructuredRecords = (rows = [], categoryKey = 'expenses') => {
       updatedAtIso: file.updatedAtIso || timestampIso,
       deletedAtIso: file.deletedAtIso || null,
       isDeleted: normalizedIsDeleted,
-      class: className,
-      expenseClass: file.expenseClass || className,
-      salesClass: file.salesClass || className,
+      class: classValue,
+      classId,
+      className: classValue,
+      expenseClass: file.expenseClass || classValue,
+      salesClass: file.salesClass || classValue,
       vendorName: file.vendorName || '',
       confidentialityLevel: file.confidentialityLevel || 'Standard',
       processingPriority: file.processingPriority || 'Normal',
       internalNotes: file.internalNotes || '',
+      ...(categoryKey === 'expenses' ? { paymentMethod: file.paymentMethod || '' } : {}),
+      ...(categoryKey === 'sales' ? {
+        invoice: file.invoice || '',
+        invoiceNumber: file.invoiceNumber || '',
+      } : {}),
       folderName,
       versions: normalizedVersions,
       activityLog: normalizedActivityLog,
@@ -558,6 +609,28 @@ const resolveCategoryIdFromHistoryLabel = (value = '') => {
   return 'expenses'
 }
 
+const normalizeClassOptions = (values = []) => {
+  const byKey = new Map()
+  ;(Array.isArray(values) ? values : []).forEach((value) => {
+    const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+    if (!normalized) return
+    const key = normalized.toLowerCase()
+    if (byKey.has(key)) return
+    byKey.set(key, normalized)
+  })
+  return Array.from(byKey.values())
+}
+
+const buildClassId = (name = '') => {
+  const normalized = String(name || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const token = normalized.slice(0, 16)
+  return token ? `CLS-${token}` : `CLS-${Date.now().toString(36).toUpperCase()}`
+}
+
 const createDefaultClientDocuments = (ownerName = '') => {
   const normalizedOwner = ownerName?.trim() || 'Client User'
   return {
@@ -565,6 +638,8 @@ const createDefaultClientDocuments = (ownerName = '') => {
     sales: salesDocumentSeed.map((item) => ({ ...item, user: normalizedOwner })),
     bankStatements: bankStatementDocumentSeed.map((item) => ({ ...item, user: normalizedOwner })),
     uploadHistory: [],
+    expenseClassOptions: [],
+    salesClassOptions: [],
   }
 }
 
@@ -601,6 +676,8 @@ const readClientDocuments = (email, ownerName = '') => {
         Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
         email,
       ),
+      expenseClassOptions: normalizeClassOptions(parsed.expenseClassOptions || fallback.expenseClassOptions),
+      salesClassOptions: normalizeClassOptions(parsed.salesClassOptions || fallback.salesClassOptions),
     }
   } catch {
     return fallback
@@ -657,6 +734,8 @@ const persistClientDocuments = (email, documents) => {
     sales: sanitizeCategoryRows(documents.sales),
     bankStatements: sanitizeCategoryRows(documents.bankStatements),
     uploadHistory: normalizeUploadHistoryRows(documents.uploadHistory, email),
+    expenseClassOptions: normalizeClassOptions(documents.expenseClassOptions),
+    salesClassOptions: normalizeClassOptions(documents.salesClassOptions),
   }
   try {
     localStorage.setItem(scopedKey, JSON.stringify(payload))
@@ -903,8 +982,8 @@ function App() {
   const [expenseDocuments, setExpenseDocuments] = useState(() => ensureFolderStructuredRecords(initialClientDocuments.expenses, 'expenses'))
   const [salesDocuments, setSalesDocuments] = useState(() => ensureFolderStructuredRecords(initialClientDocuments.sales, 'sales'))
   const [bankStatementDocuments, setBankStatementDocuments] = useState(() => ensureFolderStructuredRecords(initialClientDocuments.bankStatements, 'bankStatements'))
-  const [expenseClassOptions, setExpenseClassOptions] = useState([])
-  const [salesClassOptions, setSalesClassOptions] = useState([])
+  const [expenseClassOptions, setExpenseClassOptions] = useState(() => normalizeClassOptions(initialClientDocuments.expenseClassOptions))
+  const [salesClassOptions, setSalesClassOptions] = useState(() => normalizeClassOptions(initialClientDocuments.salesClassOptions))
   const [uploadHistoryRecords, setUploadHistoryRecords] = useState(initialClientDocuments.uploadHistory)
   const [clientActivityRecords, setClientActivityRecords] = useState(initialClientActivityRecords)
   const [toast, setToast] = useState(null)
@@ -930,6 +1009,7 @@ function App() {
   const dashboardSearchRequestRef = useRef(0)
   const dashboardSearchTimeoutRef = useRef(null)
   const dashboardBootstrapTimerRef = useRef(null)
+  const deliveredBriefNotificationIdsRef = useRef(new Set())
   const slowRuntimeRevealTimerRef = useRef(null)
   const slowRuntimeHideTimerRef = useRef(null)
   const slowRuntimeOperationCountRef = useRef(0)
@@ -1647,6 +1727,8 @@ function App() {
     setExpenseDocuments(ensureFolderStructuredRecords(scopedDocuments.expenses, 'expenses'))
     setSalesDocuments(ensureFolderStructuredRecords(scopedDocuments.sales, 'sales'))
     setBankStatementDocuments(ensureFolderStructuredRecords(scopedDocuments.bankStatements, 'bankStatements'))
+    setExpenseClassOptions(normalizeClassOptions(scopedDocuments.expenseClassOptions))
+    setSalesClassOptions(normalizeClassOptions(scopedDocuments.salesClassOptions))
     setUploadHistoryRecords(scopedDocuments.uploadHistory)
     setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
   }, [scopedClientEmail, impersonationSession?.businessName, impersonationSession?.clientName, authUser?.fullName])
@@ -1704,21 +1786,33 @@ function App() {
       sales: salesDocuments,
       bankStatements: bankStatementDocuments,
       uploadHistory: uploadHistoryRecords,
+      expenseClassOptions,
+      salesClassOptions,
     })
-  }, [scopedClientEmail, expenseDocuments, salesDocuments, bankStatementDocuments, uploadHistoryRecords])
+  }, [
+    scopedClientEmail,
+    expenseDocuments,
+    salesDocuments,
+    bankStatementDocuments,
+    uploadHistoryRecords,
+    expenseClassOptions,
+    salesClassOptions,
+  ])
 
   useEffect(() => {
     const extractClasses = (records = []) => (
       records.flatMap((record) => (
         record?.isFolder
-          ? (record.files || []).map((file) => (file.class || file.expenseClass || file.salesClass || '').trim())
-          : [(record.class || record.expenseClass || record.salesClass || '').trim()]
+          ? (record.files || []).map((file) => (file.class || file.className || file.expenseClass || file.salesClass || '').trim())
+          : [(record.class || record.className || record.expenseClass || record.salesClass || '').trim()]
       ))
         .filter(Boolean)
     )
 
-    setExpenseClassOptions(Array.from(new Set(extractClasses(expenseDocuments))))
-    setSalesClassOptions(Array.from(new Set(extractClasses(salesDocuments))))
+    const extractedExpense = normalizeClassOptions(extractClasses(expenseDocuments))
+    const extractedSales = normalizeClassOptions(extractClasses(salesDocuments))
+    setExpenseClassOptions((prev) => normalizeClassOptions([...prev, ...extractedExpense]))
+    setSalesClassOptions((prev) => normalizeClassOptions([...prev, ...extractedSales]))
   }, [expenseDocuments, salesDocuments])
 
   const persistOnboardingState = (nextState, emailOverride) => {
@@ -1818,7 +1912,10 @@ function App() {
   }
 
   const persistAuthUser = (user, remember = true) => {
-    const normalizedUser = normalizeUser(user)
+    const normalizedUser = normalizeUser({
+      ...user,
+      sessionIssuedAtIso: new Date().toISOString(),
+    })
     if (!normalizedUser) return
 
     setAuthUser(normalizedUser)
@@ -2087,6 +2184,107 @@ function App() {
     }
     showToast('success', 'You have successfully logged out.')
   }
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUserRole === 'admin' || !authUser?.email) return undefined
+
+    const normalizedEmail = String(authUser.email || '').trim().toLowerCase()
+    if (!normalizedEmail) return undefined
+
+    const sessionIssuedAtMs = Date.parse(authUser.sessionIssuedAtIso || '') || 0
+    const shouldForceLogout = () => {
+      const control = readClientSessionControl()
+      const globalLogoutAtMs = Date.parse(control.globalLogoutAtIso || '') || 0
+      const userLogoutAtMs = Date.parse(control.byEmail?.[normalizedEmail] || '') || 0
+      return Math.max(globalLogoutAtMs, userLogoutAtMs) > sessionIssuedAtMs
+    }
+
+    const forceClientLogout = () => {
+      setIsLogoutConfirmOpen(false)
+      setIsModalOpen(false)
+      setIsAuthenticated(false)
+      setAuthUser(null)
+      setImpersonationSession(null)
+      setPendingImpersonationClient(null)
+      persistImpersonationSession(null)
+      setAuthMode('login')
+      setActivePage(getDefaultPageForRole('client'))
+      setActiveFolderRoute(null)
+      sessionStorage.removeItem('kiaminaAuthUser')
+      localStorage.removeItem('kiaminaAuthUser')
+      navigateToAuth('login', { replace: true })
+      showToast('error', 'Your session was ended by an administrator. Please log in again.')
+    }
+
+    if (shouldForceLogout()) {
+      forceClientLogout()
+      return undefined
+    }
+
+    const handleStorage = (event) => {
+      if (event.key !== CLIENT_SESSION_CONTROL_STORAGE_KEY) return
+      if (shouldForceLogout()) forceClientLogout()
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [isAuthenticated, currentUserRole, authUser?.email, authUser?.sessionIssuedAtIso])
+
+  useEffect(() => {
+    deliveredBriefNotificationIdsRef.current = new Set()
+  }, [normalizedScopedClientEmail, isAuthenticated, currentUserRole])
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUserRole === 'admin') return undefined
+    const normalizedEmail = String(normalizedScopedClientEmail || '').trim().toLowerCase()
+    if (!normalizedEmail) return undefined
+
+    const briefStorageKey = getScopedStorageKey(CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY, normalizedEmail)
+    const syncBriefNotifications = () => {
+      const queued = readClientBriefNotifications(normalizedEmail)
+      if (!queued.length) return
+      const unseen = queued.filter((item, index) => {
+        const id = String(item?.id || `CBN-FALLBACK-${index}`).trim()
+        if (!id || deliveredBriefNotificationIdsRef.current.has(id)) return false
+        deliveredBriefNotificationIdsRef.current.add(id)
+        return true
+      })
+      if (unseen.length === 0) return
+
+      const mapped = unseen.map((item, index) => {
+        const notificationId = String(item?.id || `CBN-FALLBACK-${Date.now()}-${index}`).trim()
+        const title = String(item?.title || 'New Update').trim()
+        const body = String(item?.message || '').trim()
+        const composedMessage = body ? `${title}: ${body}` : title
+        const sentAtIso = String(item?.sentAtIso || new Date().toISOString()).trim()
+        return {
+          id: notificationId,
+          type: 'info',
+          message: composedMessage,
+          timestamp: formatClientDocumentTimestamp(sentAtIso),
+          read: false,
+          priority: String(item?.priority || 'normal').trim().toLowerCase(),
+          linkPage: 'dashboard',
+        }
+      })
+
+      setUserNotifications((previous) => [...mapped, ...previous].slice(0, 80))
+      const previewMessage = mapped[0]?.message || 'You have a new notification.'
+      showToast('info', previewMessage.length > 140 ? `${previewMessage.slice(0, 137)}...` : previewMessage)
+    }
+
+    syncBriefNotifications()
+    const intervalId = window.setInterval(syncBriefNotifications, 4000)
+    const handleStorage = (event) => {
+      if (!event.key || event.key === briefStorageKey) {
+        syncBriefNotifications()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      window.clearInterval(intervalId)
+    }
+  }, [isAuthenticated, currentUserRole, normalizedScopedClientEmail])
 
   const handleSignup = async ({ fullName, email, password, confirmPassword, agree }) => {
     const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
@@ -2367,6 +2565,45 @@ function App() {
       action,
       affectedUser,
       details,
+    })
+  }
+
+  const handleCurrentAdminEmailUpdated = ({ previousEmail = '', nextEmail = '' }) => {
+    const normalizedNextEmail = String(nextEmail || '').trim().toLowerCase()
+    if (!normalizedNextEmail) return
+    const normalizedPreviousEmail = String(previousEmail || authUser?.email || '').trim().toLowerCase()
+    const currentAuthEmail = String(authUser?.email || '').trim().toLowerCase()
+    if (currentAuthEmail && normalizedPreviousEmail && currentAuthEmail !== normalizedPreviousEmail) return
+
+    const nextAuthUser = normalizeUser({
+      ...(authUser || {}),
+      email: normalizedNextEmail,
+      sessionIssuedAtIso: new Date().toISOString(),
+    })
+    if (!nextAuthUser) return
+
+    setAuthUser(nextAuthUser)
+    setIsAuthenticated(true)
+
+    const hasLocalAuth = Boolean(localStorage.getItem('kiaminaAuthUser'))
+    if (hasLocalAuth) {
+      localStorage.setItem('kiaminaAuthUser', JSON.stringify(nextAuthUser))
+      sessionStorage.removeItem('kiaminaAuthUser')
+    } else {
+      sessionStorage.setItem('kiaminaAuthUser', JSON.stringify(nextAuthUser))
+      localStorage.removeItem('kiaminaAuthUser')
+    }
+
+    setImpersonationSession((previousSession) => {
+      if (!previousSession) return previousSession
+      const sessionAdminEmail = String(previousSession.adminEmail || '').trim().toLowerCase()
+      if (sessionAdminEmail && sessionAdminEmail !== normalizedPreviousEmail) return previousSession
+      const nextSession = {
+        ...previousSession,
+        adminEmail: normalizedNextEmail,
+      }
+      persistImpersonationSession(nextSession)
+      return nextSession
     })
   }
 
@@ -2669,6 +2906,21 @@ function App() {
     setIsModalOpen(true)
   }
 
+  const handleCreateClassOption = (categoryId, className) => {
+    const normalized = normalizeClassOptions([className])[0]
+    if (!normalized) return
+    if (categoryId === 'sales') {
+      setSalesClassOptions((prev) => normalizeClassOptions([...prev, normalized]))
+      return
+    }
+    if (categoryId === 'expenses') {
+      setExpenseClassOptions((prev) => normalizeClassOptions([...prev, normalized]))
+      return
+    }
+    setExpenseClassOptions((prev) => normalizeClassOptions([...prev, normalized]))
+    setSalesClassOptions((prev) => normalizeClassOptions([...prev, normalized]))
+  }
+
   const handleUpload = async ({
     category,
     folderName,
@@ -2680,6 +2932,7 @@ function App() {
   }) => {
     if (!category) return { ok: false, message: 'Please select a document category.' }
     if (!folderName?.trim()) return { ok: false, message: 'Please provide a folder name.' }
+    if (!documentOwner?.trim()) return { ok: false, message: 'Please provide the document owner.' }
     if (!Array.isArray(uploadedItems) || uploadedItems.length === 0) {
       return { ok: false, message: 'Please upload at least one file.' }
     }
@@ -2700,11 +2953,9 @@ function App() {
     }
 
     const missingClass = uploadedItems.some((item) => !(resolveFileDetails(item)?.class || '').trim())
-    if (missingClass) return { ok: false, message: 'Class is required for each uploaded file.' }
+    if (missingClass) return { ok: false, message: 'Class is required before uploading.' }
 
-    const ownerName = documentOwner?.trim()
-      || (isImpersonatingClient ? (impersonationSession?.clientName || clientFirstName || 'Client') : authUser?.fullName)
-      || 'Client User'
+    const ownerName = documentOwner?.trim() || 'Client User'
     const ownerEmail = (
       normalizedScopedClientEmail
       || scopedClientEmail
@@ -2720,11 +2971,15 @@ function App() {
 
     const files = await Promise.all(uploadedItems.map(async (item, index) => {
       const metadata = resolveFileDetails(item)
-      const classValue = (metadata?.class || '').trim()
+      const classValue = String(metadata?.class || '').replace(/\s+/g, ' ').trim()
+      const classId = buildClassId(classValue)
       const confidentialityLevel = metadata?.confidentialityLevel || 'Standard'
       const processingPriority = metadata?.processingPriority || 'Normal'
       const internalNotes = (metadata?.internalNotes || '').trim()
       const vendorName = (metadata?.vendorName || '').trim()
+      const paymentMethod = (metadata?.paymentMethod || '').trim()
+      const invoice = (metadata?.invoice || '').trim()
+      const invoiceNumber = (metadata?.invoiceNumber || '').trim()
       const fileCreatedAtIso = new Date().toISOString()
       const fileId = buildFileReference(index)
       const fileCacheKey = buildFileCacheKey({ ownerEmail, fileId })
@@ -2745,10 +3000,14 @@ function App() {
         extension: item.extension || (item.name?.split('.').pop()?.toUpperCase() || 'FILE'),
         status: 'Pending Review',
         class: classValue,
+        classId,
+        className: classValue,
         expenseClass: category === 'expenses' ? classValue : '',
         salesClass: category === 'sales' ? classValue : '',
         fileCacheKey,
         previewUrl,
+        ...(category === 'expenses' ? { paymentMethod } : {}),
+        ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
       }
 
       return {
@@ -2777,12 +3036,16 @@ function App() {
         unlockedAtIso: null,
         unlockReason: '',
         class: classValue,
+        classId,
+        className: classValue,
         expenseClass: category === 'expenses' ? classValue : '',
         salesClass: category === 'sales' ? classValue : '',
         vendorName,
         confidentialityLevel,
         processingPriority,
         internalNotes,
+        ...(category === 'expenses' ? { paymentMethod } : {}),
+        ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
         previewUrl,
         rawFile: item.rawFile || null,
         uploadSource,
@@ -2820,13 +3083,13 @@ function App() {
     if (category === 'expenses') {
       const classValues = files.map((file) => file.class).filter(Boolean)
       if (classValues.length > 0) {
-        setExpenseClassOptions((prev) => Array.from(new Set([...prev, ...classValues])))
+        setExpenseClassOptions((prev) => normalizeClassOptions([...prev, ...classValues]))
       }
     }
     if (category === 'sales') {
       const classValues = files.map((file) => file.class).filter(Boolean)
       if (classValues.length > 0) {
-        setSalesClassOptions((prev) => Array.from(new Set([...prev, ...classValues])))
+        setSalesClassOptions((prev) => normalizeClassOptions([...prev, ...classValues]))
       }
     }
 
@@ -2873,6 +3136,23 @@ function App() {
     }, 'Uploading files...')
   }
 
+  const supportClientEmail = String(
+    normalizedScopedClientEmail
+    || scopedClientEmail
+    || authUser?.email
+    || '',
+  ).trim().toLowerCase()
+  const supportClientName = String(
+    isImpersonatingClient
+      ? (impersonationSession?.clientName || clientFirstName || 'Client User')
+      : (authUser?.fullName || clientFirstName || 'Client User'),
+  ).trim() || 'Client User'
+  const supportBusinessName = String(
+    impersonationSession?.businessName
+    || companyName
+    || '',
+  ).trim()
+
   const renderClientPage = () => {
     const logDocumentWorkspaceActivity = (categoryId, action, details) => {
       const categoryLabel = categoryId === 'sales'
@@ -2882,6 +3162,8 @@ function App() {
           : 'Expenses'
       appendScopedClientLog(action, `[${categoryLabel}] ${details}`)
     }
+
+    const downloadBusinessName = String(impersonationSession?.businessName || companyName || '').trim()
 
     const renderDocumentWorkspace = ({ categoryId, title, records, setRecords }) => {
       const impersonationBusinessName = impersonationSession?.businessName || companyName || 'Client Account'
@@ -2929,6 +3211,7 @@ function App() {
             onNavigateDashboard={() => handleSetActivePage('dashboard')}
             isImpersonatingClient={isImpersonatingClient}
             impersonationBusinessName={impersonationBusinessName}
+            downloadBusinessName={downloadBusinessName}
             showToast={showClientToast}
             onRecordUploadHistory={appendFileUploadHistory}
             globalSearchTerm={dashboardSearchTerm}
@@ -2997,6 +3280,7 @@ function App() {
             salesRecords={salesDocuments}
             bankStatementRecords={bankStatementDocuments}
             ownerEmail={normalizedScopedClientEmail}
+            downloadBusinessName={downloadBusinessName}
             onOpenFileLocation={(categoryId, folderId) => handleOpenFolderRoute(categoryId, folderId)}
             showToast={showClientToast}
             globalSearchTerm={dashboardSearchTerm}
@@ -3013,7 +3297,13 @@ function App() {
           />
         )
       case 'support':
-        return <ClientSupportPage />
+        return (
+          <ClientSupportPage
+            clientEmail={supportClientEmail}
+            clientName={supportClientName}
+            businessName={supportBusinessName}
+          />
+        )
       case 'settings':
         return (
           <ClientSettingsPage
@@ -3205,6 +3495,11 @@ function App() {
               onGetStarted={() => navigateToAuth('signup')}
               onLogin={() => navigateToAuth('login')}
             />
+            <ClientSupportWidget
+              clientEmail=""
+              clientName="Lead"
+              businessName=""
+            />
             <button
               type="button"
               onClick={() => navigateToAdminLogin()}
@@ -3235,6 +3530,7 @@ function App() {
           onRequestImpersonation={handleRequestImpersonation}
           impersonationEnabled={impersonationEnabled}
           onAdminActionLog={handleAdminActionLog}
+          onCurrentAdminEmailUpdated={handleCurrentAdminEmailUpdated}
         />
       ) : (
         <>
@@ -3331,7 +3627,13 @@ function App() {
                 {renderClientPage()}
               </main>
             </div>
-            {!isImpersonatingClient && activePage !== 'support' && <ClientSupportWidget />}
+            {!isImpersonatingClient && activePage !== 'support' && (
+              <ClientSupportWidget
+                clientEmail={supportClientEmail}
+                clientName={supportClientName}
+                businessName={supportBusinessName}
+              />
+            )}
             {isModalOpen && <ClientAddDocumentModal
               isOpen={isModalOpen}
               onClose={() => setIsModalOpen(false)}
@@ -3340,6 +3642,7 @@ function App() {
               showToast={showClientToast}
               expenseClassOptions={expenseClassOptions}
               salesClassOptions={salesClassOptions}
+              onCreateClassOption={handleCreateClassOption}
             />}
           </div>
         </>

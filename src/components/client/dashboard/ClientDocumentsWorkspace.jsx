@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Archive, ArrowRightLeft, ClipboardList, Download, Eye, Folder, FolderOpen, History, Info, Lock, Pencil, RotateCcw, Search, Trash2, X } from 'lucide-react'
 import { FileViewerModal, StatusBadge } from './ClientDashboardViews'
 import { buildFileCacheKey, putCachedFileBlob } from '../../../utils/fileCache'
+import { buildClientDownloadFilename } from '../../../utils/downloadFilename'
 
 const toDateAndTime = (value) => {
   const parsed = Date.parse(value || '')
@@ -117,6 +118,7 @@ const collectEditedFieldLabels = (previousFile = {}, updatedFile = {}) => {
   registerChange('Notes', previousFile.internalNotes, updatedFile.internalNotes)
   registerChange('Expense Date', previousFile.expenseDate, updatedFile.expenseDate)
   registerChange('Payment Method', previousFile.paymentMethod, updatedFile.paymentMethod)
+  registerChange('Invoice', previousFile.invoice, updatedFile.invoice)
   registerChange('Customer', previousFile.customerName, updatedFile.customerName)
   registerChange('Invoice Number', previousFile.invoiceNumber, updatedFile.invoiceNumber)
   registerChange('Bank Name', previousFile.bankName, updatedFile.bankName)
@@ -134,6 +136,11 @@ const buildFileSnapshot = (file = {}) => ({
   extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
   status: file.status || 'Pending Review',
   class: file.class || file.expenseClass || file.salesClass || '',
+  classId: file.classId || '',
+  className: file.className || file.class || file.expenseClass || file.salesClass || '',
+  paymentMethod: file.paymentMethod || '',
+  invoice: file.invoice || '',
+  invoiceNumber: file.invoiceNumber || '',
   fileCacheKey: file.fileCacheKey || '',
   folderId: file.folderId || '',
   folderName: file.folderName || '',
@@ -714,7 +721,7 @@ function SideDrawer({ title, subtitle, onClose, children }) {
   )
 }
 
-function VersionHistoryDrawer({ file, onClose }) {
+function VersionHistoryDrawer({ file, onClose, downloadNamePrefix = '' }) {
   const versions = Array.isArray(file?.versions) ? file.versions : []
   return (
     <SideDrawer
@@ -745,6 +752,10 @@ function VersionHistoryDrawer({ file, onClose }) {
                 const snapshot = version.fileSnapshot || {}
                 const downloadUrl = normalizeRuntimePreviewUrl(snapshot.previewUrl || '', { allowBlob: false })
                 const canDownload = Boolean(downloadUrl) && !file?.isDeleted
+                const downloadFilename = buildClientDownloadFilename({
+                  businessName: downloadNamePrefix,
+                  fileName: snapshot.filename || file?.filename || 'document',
+                })
                 return (
                   <tr key={`version-${version.versionNumber}-${version.timestamp}`} className="border-b border-border-light last:border-b-0">
                     <td className="px-3 py-2 text-sm text-text-primary">v{version.versionNumber}</td>
@@ -756,7 +767,7 @@ function VersionHistoryDrawer({ file, onClose }) {
                       {canDownload ? (
                         <a
                           href={downloadUrl}
-                          download={snapshot.filename || file?.filename || 'document'}
+                          download={downloadFilename}
                           className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background"
                         >
                           Download
@@ -882,6 +893,7 @@ function DocumentFoldersPage({
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const maxFilterDate = toIsoDate(new Date())
+  const [folderSortBy, setFolderSortBy] = useState('date-desc')
   const [activeTab, setActiveTab] = useState('active')
   const [selectedFolderId, setSelectedFolderId] = useState('')
   const [contextMenu, setContextMenu] = useState(null)
@@ -906,7 +918,7 @@ function DocumentFoldersPage({
   const filteredFolders = useMemo(() => {
     const normalized = searchTerm.trim().toLowerCase()
     const scopedFolders = folders.filter((folder) => (activeTab === 'archived' ? folder.archived : !folder.archived))
-    return scopedFolders.filter((folder) => {
+    const filtered = scopedFolders.filter((folder) => {
       const matchesSearch = !normalized || (
         String(folder.folderName || '').toLowerCase().includes(normalized)
         || String(folder.id || '').toLowerCase().includes(normalized)
@@ -915,7 +927,23 @@ function DocumentFoldersPage({
       const matchesDate = matchesDateRange(folderDate, dateFrom, dateTo)
       return matchesSearch && matchesDate
     })
-  }, [folders, activeTab, searchTerm, dateFrom, dateTo])
+    const sorted = [...filtered]
+    sorted.sort((left, right) => {
+      if (folderSortBy === 'alphabetical-asc') {
+        return String(left.folderName || '').localeCompare(String(right.folderName || ''), undefined, { sensitivity: 'base' })
+      }
+      if (folderSortBy === 'alphabetical-desc') {
+        return String(right.folderName || '').localeCompare(String(left.folderName || ''), undefined, { sensitivity: 'base' })
+      }
+      const leftStamp = toTimestampMs(left.createdAtIso || left.date || left.createdAtDisplay || '')
+      const rightStamp = toTimestampMs(right.createdAtIso || right.date || right.createdAtDisplay || '')
+      if (folderSortBy === 'date-asc') {
+        return leftStamp - rightStamp
+      }
+      return rightStamp - leftStamp
+    })
+    return sorted
+  }, [folders, activeTab, searchTerm, dateFrom, dateTo, folderSortBy])
   const folderSearchSuggestions = useMemo(() => {
     const scopedFolders = folders.filter((folder) => (activeTab === 'archived' ? folder.archived : !folder.archived))
     return buildSearchSuggestions(
@@ -1113,6 +1141,17 @@ function DocumentFoldersPage({
             className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
+          <select
+            value={folderSortBy}
+            onChange={(event) => setFolderSortBy(event.target.value)}
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="Sort folders"
+          >
+            <option value="date-desc">Sort: Date (Newest)</option>
+            <option value="date-asc">Sort: Date (Oldest)</option>
+            <option value="alphabetical-asc">Sort: Alphabetically (A-Z)</option>
+            <option value="alphabetical-desc">Sort: Alphabetically (Z-A)</option>
+          </select>
           {(searchTerm || dateFrom || dateTo) && (
             <button
               type="button"
@@ -1278,6 +1317,7 @@ function FolderFilesPage({
   onNavigateDashboard,
   isImpersonatingClient = false,
   impersonationBusinessName = '',
+  downloadBusinessName = '',
   showToast,
   globalSearchTerm = '',
   onGlobalSearchTermChange,
@@ -1298,6 +1338,7 @@ function FolderFilesPage({
   const maxFilterDate = toIsoDate(new Date())
   const [statusFilter, setStatusFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
+  const [fileSortBy, setFileSortBy] = useState('date-desc')
   const [viewingFile, setViewingFile] = useState(null)
   const [highlightedFileId, setHighlightedFileId] = useState('')
   const [selectedFileIds, setSelectedFileIds] = useState([])
@@ -1315,19 +1356,58 @@ function FolderFilesPage({
 
   const files = folder?.files || []
   const isArchivedFolder = Boolean(folder?.archived)
-  const filteredFiles = files.filter((file) => {
+  const filteredFiles = useMemo(() => {
     const normalized = searchTerm.trim().toLowerCase()
-    const matchesSearch = !normalized || (
-      String(file.filename || '').toLowerCase().includes(normalized)
-      || String(file.fileId || '').toLowerCase().includes(normalized)
-      || (file.class || '').toLowerCase().includes(normalized)
-    )
-    const matchesStatus = !statusFilter || String(file.status || '').toLowerCase() === String(statusFilter).toLowerCase()
-    const matchesType = !typeFilter || String(file.extension || '').toUpperCase() === String(typeFilter).toUpperCase()
-    const fileDate = file.createdAtIso || file.updatedAtIso || file.date || ''
-    const matchesDate = matchesDateRange(fileDate, dateFrom, dateTo)
-    return matchesSearch && matchesStatus && matchesType && matchesDate
-  })
+    const filtered = files.filter((file) => {
+      const matchesSearch = !normalized || (
+        String(file.filename || '').toLowerCase().includes(normalized)
+        || String(file.fileId || '').toLowerCase().includes(normalized)
+        || (file.class || '').toLowerCase().includes(normalized)
+      )
+      const matchesStatus = !statusFilter || String(file.status || '').toLowerCase() === String(statusFilter).toLowerCase()
+      const matchesType = !typeFilter || String(file.extension || '').toUpperCase() === String(typeFilter).toUpperCase()
+      const fileDate = file.createdAtIso || file.updatedAtIso || file.date || ''
+      const matchesDate = matchesDateRange(fileDate, dateFrom, dateTo)
+      return matchesSearch && matchesStatus && matchesType && matchesDate
+    })
+    const sorted = [...filtered]
+    const priorityWeight = { Urgent: 3, High: 2, Normal: 1, Low: 0 }
+    sorted.sort((left, right) => {
+      if (fileSortBy === 'name-asc') {
+        return String(left.filename || '').localeCompare(String(right.filename || ''), undefined, { sensitivity: 'base' })
+      }
+      if (fileSortBy === 'name-desc') {
+        return String(right.filename || '').localeCompare(String(left.filename || ''), undefined, { sensitivity: 'base' })
+      }
+      if (fileSortBy === 'class-asc') {
+        return String(left.class || '').localeCompare(String(right.class || ''), undefined, { sensitivity: 'base' })
+      }
+      if (fileSortBy === 'class-desc') {
+        return String(right.class || '').localeCompare(String(left.class || ''), undefined, { sensitivity: 'base' })
+      }
+      if (fileSortBy === 'date-asc') {
+        const leftStamp = toTimestampMs(left.createdAtIso || left.updatedAtIso || left.date || '')
+        const rightStamp = toTimestampMs(right.createdAtIso || right.updatedAtIso || right.date || '')
+        return leftStamp - rightStamp
+      }
+      if (fileSortBy === 'priority-desc') {
+        const leftWeight = priorityWeight[String(left.processingPriority || 'Normal')] ?? 1
+        const rightWeight = priorityWeight[String(right.processingPriority || 'Normal')] ?? 1
+        if (rightWeight !== leftWeight) return rightWeight - leftWeight
+        return String(left.filename || '').localeCompare(String(right.filename || ''), undefined, { sensitivity: 'base' })
+      }
+      if (fileSortBy === 'priority-asc') {
+        const leftWeight = priorityWeight[String(left.processingPriority || 'Normal')] ?? 1
+        const rightWeight = priorityWeight[String(right.processingPriority || 'Normal')] ?? 1
+        if (leftWeight !== rightWeight) return leftWeight - rightWeight
+        return String(left.filename || '').localeCompare(String(right.filename || ''), undefined, { sensitivity: 'base' })
+      }
+      const leftStamp = toTimestampMs(left.createdAtIso || left.updatedAtIso || left.date || '')
+      const rightStamp = toTimestampMs(right.createdAtIso || right.updatedAtIso || right.date || '')
+      return rightStamp - leftStamp
+    })
+    return sorted
+  }, [files, searchTerm, statusFilter, typeFilter, dateFrom, dateTo, fileSortBy])
   const selectableFilteredFiles = filteredFiles.filter((file) => !file?.isDeleted && !isApprovedFileLocked(file))
 
   const folderMeta = toDateAndTime(folder?.createdAtIso || folder?.date || folder?.createdAtDisplay || '')
@@ -1335,14 +1415,16 @@ function FolderFilesPage({
   const allVisibleSelected = selectableFilteredFiles.length > 0 && selectableFilteredFiles.every((file) => selectedSet.has(file.fileId))
   const selectedCount = selectedFileIds.length
   const classOptions = useMemo(() => {
-    const defaults = categoryId === 'sales'
-      ? ['Invoice', 'Sales Receipt', 'Credit Note', 'Statement']
-      : categoryId === 'bank-statements'
-        ? ['Bank Statement', 'Reconciliation', 'Deposit Record']
-        : ['Fuel', 'Utilities', 'Office Supplies', 'Travel', 'Rent']
-    const fromFiles = files.map((file) => (file.class || file.expenseClass || file.salesClass || '').trim()).filter(Boolean)
-    return Array.from(new Set([...defaults, ...fromFiles])).map((label) => ({ label, value: label }))
-  }, [categoryId, files])
+    const fromRecords = (Array.isArray(records) ? records : [])
+      .flatMap((record) => {
+        if (!record?.isFolder) {
+          return [(record.class || record.expenseClass || record.salesClass || '').trim()]
+        }
+        return (record.files || []).map((file) => (file.class || file.expenseClass || file.salesClass || '').trim())
+      })
+      .filter(Boolean)
+    return Array.from(new Set(fromRecords)).map((label) => ({ label, value: label }))
+  }, [records])
   const statusOptions = useMemo(
     () => Array.from(new Set(files.map((file) => String(file.status || '').trim()).filter(Boolean))),
     [files],
@@ -1433,6 +1515,7 @@ function FolderFilesPage({
     setDateTo('')
     setStatusFilter('')
     setTypeFilter('')
+    setFileSortBy('date-desc')
   }, [folder?.id])
 
   useEffect(() => {
@@ -1504,7 +1587,10 @@ function FolderFilesPage({
     }
     const link = document.createElement('a')
     link.href = url
-    link.download = targetFile.filename || 'document'
+    link.download = buildClientDownloadFilename({
+      businessName: downloadBusinessName,
+      fileName: targetFile.filename || 'document',
+    })
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -1578,6 +1664,8 @@ function FolderFilesPage({
         notes: `Bulk update for ${selectedCount} file(s).`,
         filePatch: {
           class: bulkClassValue,
+          classId: `CLS-${bulkClassValue.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 16)}`,
+          className: bulkClassValue,
           expenseClass: bulkClassValue,
           salesClass: bulkClassValue,
         },
@@ -1862,6 +1950,21 @@ function FolderFilesPage({
             className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
+          <select
+            value={fileSortBy}
+            onChange={(event) => setFileSortBy(event.target.value)}
+            className="h-10 w-full sm:w-auto px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="Sort files"
+          >
+            <option value="date-desc">Sort: Date (Newest)</option>
+            <option value="date-asc">Sort: Date (Oldest)</option>
+            <option value="name-asc">Sort: Name (A-Z)</option>
+            <option value="name-desc">Sort: Name (Z-A)</option>
+            <option value="class-asc">Sort: Alphabetically (A-Z)</option>
+            <option value="class-desc">Sort: Alphabetically (Z-A)</option>
+            <option value="priority-desc">Sort: Priority (High-Low)</option>
+            <option value="priority-asc">Sort: Priority (Low-High)</option>
+          </select>
           {(searchTerm || statusFilter || typeFilter || dateFrom || dateTo) && (
             <button
               type="button"
@@ -2053,6 +2156,8 @@ function FolderFilesPage({
       {viewingFile && (
         <FileViewerModal
           file={viewingFile}
+          downloadNamePrefix={downloadBusinessName}
+          tagOptions={classOptions.map((option) => option.value)}
           readOnly={isArchivedFolder || isApprovedFileLocked(viewingFile)}
           onClose={() => setViewingFile(null)}
           onSave={isArchivedFolder ? undefined : (updated) => {
@@ -2200,6 +2305,7 @@ function FolderFilesPage({
       {versionHistoryFile && (
         <VersionHistoryDrawer
           file={versionHistoryFile}
+          downloadNamePrefix={downloadBusinessName}
           onClose={() => setVersionHistoryFile(null)}
         />
       )}

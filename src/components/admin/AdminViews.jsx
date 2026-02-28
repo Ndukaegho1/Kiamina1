@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import {
   LayoutDashboard,
   Users,
@@ -56,6 +56,15 @@ import {
 import KiaminaLogo from '../common/KiaminaLogo'
 import DotLottiePreloader from '../common/DotLottiePreloader'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
+import { playSupportNotificationSound, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS } from '../../utils/supportNotificationSound'
+import AdminSupportInboxPanel from './support/AdminSupportInboxPanel'
+import {
+  deleteSupportLead,
+  getSupportCenterSnapshot,
+  restoreSupportLead,
+  subscribeSupportCenter,
+  SUPPORT_TICKET_STATUS,
+} from '../../utils/supportCenter'
 
 // Mock admin data
 const mockAdmin = {
@@ -118,13 +127,20 @@ const mockUsers = [
 
 const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
+const ADMIN_SENT_NOTIFICATIONS_STORAGE_KEY = 'kiaminaAdminSentNotifications'
+const ADMIN_NOTIFICATION_DRAFTS_STORAGE_KEY = 'kiaminaAdminNotificationDrafts'
+const ADMIN_NOTIFICATION_EDIT_DRAFT_STORAGE_KEY = 'kiaminaAdminNotificationEditDraftId'
+const ADMIN_SCHEDULED_NOTIFICATIONS_STORAGE_KEY = 'kiaminaAdminScheduledNotifications'
+const CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY = 'kiaminaClientBriefNotifications'
+const ADMIN_TRASH_STORAGE_KEY = 'kiaminaAdminTrash'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
 const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
+const ADMIN_NOTIFICATIONS_SYNC_EVENT = 'kiamina:admin-notifications-sync'
 const COMPLIANCE_STATUS = {
-  FULL: '🟢 Fully Compliant',
-  ACTION: '🟡 Action Required',
-  PENDING: '🔴 Verification Pending',
+  FULL: '?? Fully Compliant',
+  ACTION: '?? Action Required',
+  PENDING: '?? Verification Pending',
 }
 const COMPLIANCE_STATUS_OPTIONS = [
   COMPLIANCE_STATUS.FULL,
@@ -140,10 +156,12 @@ const waitForNetworkAwareDelay = (context = 'search') => new Promise((resolve) =
 })
 const ADMIN_PAGE_PERMISSION_RULES = {
   'admin-documents': ['view_documents'],
-  'admin-communications': ['send_notifications'],
+  'admin-leads': ['client_assistance'],
+  'admin-communications': ['send_notifications', 'client_assistance'],
   'admin-notifications': ['send_notifications'],
   'admin-clients': ['view_businesses'],
   'admin-activity': ['view_activity_logs'],
+  'admin-trash': ['client_assistance'],
   'admin-client-profile': ['view_businesses'],
   'admin-client-documents': ['view_documents'],
   'admin-client-upload-history': ['view_documents'],
@@ -195,6 +213,14 @@ const formatTimestamp = (value) => {
     minute: '2-digit',
     hour12: true,
   })
+}
+
+const toDateTimeLocalValue = (value = '') => {
+  const parsedDate = Date.parse(value || '')
+  if (!Number.isFinite(parsedDate)) return ''
+  const sourceDate = new Date(parsedDate)
+  const timezoneOffsetMs = sourceDate.getTimezoneOffset() * 60000
+  return new Date(parsedDate - timezoneOffsetMs).toISOString().slice(0, 16)
 }
 
 const getScopedStorageObject = (baseKey, email) => {
@@ -286,6 +312,541 @@ const appendScopedClientActivityLog = (email, entry = {}) => {
 }
 
 const toTrimmedValue = (value) => String(value || '').trim()
+
+const toIsoOrFallback = (value, fallback = new Date().toISOString()) => {
+  const parsed = Date.parse(value || '')
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : fallback
+}
+
+const emitAdminNotificationsSync = () => {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new Event(ADMIN_NOTIFICATIONS_SYNC_EVENT))
+}
+
+const createNotificationDraftId = () => (
+  `DRF-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`
+)
+
+const createScheduledNotificationId = () => (
+  `SCH-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`
+)
+
+const normalizeSentNotification = (notification = {}, index = 0) => ({
+  id: toTrimmedValue(notification.id) || `SN-${index + 1}`,
+  title: toTrimmedValue(notification.title) || 'Untitled Notification',
+  message: String(notification.message || ''),
+  audience: toTrimmedValue(notification.audience) || 'Users',
+  dateSent: toTrimmedValue(notification.dateSent) || formatTimestamp(notification.sentAtIso || new Date().toISOString()),
+  openRate: toTrimmedValue(notification.openRate) || '--',
+  status: toTrimmedValue(notification.status) || 'Delivered',
+  sentAtIso: toTrimmedValue(notification.sentAtIso) || new Date().toISOString(),
+})
+
+const readAdminSentNotificationsFromStorage = () => {
+  const stored = safeParseJson(localStorage.getItem(ADMIN_SENT_NOTIFICATIONS_STORAGE_KEY), null)
+  const source = Array.isArray(stored) ? stored : mockSentNotifications
+  return source.map((notification, index) => normalizeSentNotification(notification, index))
+}
+
+const persistAdminSentNotificationsToStorage = (notifications = []) => {
+  const normalized = (Array.isArray(notifications) ? notifications : [])
+    .map((notification, index) => normalizeSentNotification(notification, index))
+  localStorage.setItem(ADMIN_SENT_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(normalized))
+  emitAdminNotificationsSync()
+}
+
+const normalizeNotificationDraft = (draft = {}) => ({
+  id: toTrimmedValue(draft.id) || createNotificationDraftId(),
+  mode: toTrimmedValue(draft.mode) === 'targeted' ? 'targeted' : 'bulk',
+  bulkAudience: toTrimmedValue(draft.bulkAudience) || 'all-users',
+  deliveryMode: toTrimmedValue(draft.deliveryMode) === 'scheduled' ? 'scheduled' : 'now',
+  title: String(draft.title || ''),
+  message: String(draft.message || ''),
+  link: String(draft.link || ''),
+  priority: toTrimmedValue(draft.priority) || 'normal',
+  scheduledForIso: toTrimmedValue(draft.scheduledForIso) ? toIsoOrFallback(draft.scheduledForIso, '') : '',
+  searchUser: String(draft.searchUser || ''),
+  selectedUsers: Array.isArray(draft.selectedUsers) ? [...draft.selectedUsers] : [],
+  filters: {
+    business: toTrimmedValue(draft.filters?.business),
+    country: toTrimmedValue(draft.filters?.country),
+    role: toTrimmedValue(draft.filters?.role),
+    verificationStatus: toTrimmedValue(draft.filters?.verificationStatus),
+    registrationStage: toTrimmedValue(draft.filters?.registrationStage),
+  },
+  status: 'Draft',
+  createdAtIso: toTrimmedValue(draft.createdAtIso) || new Date().toISOString(),
+  updatedAtIso: toTrimmedValue(draft.updatedAtIso) || new Date().toISOString(),
+})
+
+const readAdminNotificationDraftsFromStorage = () => {
+  const stored = safeParseJson(localStorage.getItem(ADMIN_NOTIFICATION_DRAFTS_STORAGE_KEY), [])
+  if (!Array.isArray(stored)) return []
+  return stored
+    .map((draft) => normalizeNotificationDraft(draft))
+    .sort((left, right) => (Date.parse(right.updatedAtIso || '') || 0) - (Date.parse(left.updatedAtIso || '') || 0))
+}
+
+const persistAdminNotificationDraftsToStorage = (drafts = []) => {
+  const normalized = (Array.isArray(drafts) ? drafts : [])
+    .map((draft) => normalizeNotificationDraft(draft))
+    .sort((left, right) => (Date.parse(right.updatedAtIso || '') || 0) - (Date.parse(left.updatedAtIso || '') || 0))
+  localStorage.setItem(ADMIN_NOTIFICATION_DRAFTS_STORAGE_KEY, JSON.stringify(normalized))
+  emitAdminNotificationsSync()
+}
+
+const upsertAdminNotificationDraftInStorage = (draft = {}) => {
+  const normalizedDraft = normalizeNotificationDraft(draft)
+  const existingDrafts = readAdminNotificationDraftsFromStorage()
+  const hasMatch = existingDrafts.some((item) => item.id === normalizedDraft.id)
+  const nextDrafts = hasMatch
+    ? existingDrafts.map((item) => (item.id === normalizedDraft.id ? normalizedDraft : item))
+    : [normalizedDraft, ...existingDrafts]
+  persistAdminNotificationDraftsToStorage(nextDrafts)
+  return normalizedDraft
+}
+
+const removeAdminNotificationDraftFromStorage = (draftId = '') => {
+  const normalizedDraftId = toTrimmedValue(draftId)
+  if (!normalizedDraftId) return
+  const nextDrafts = readAdminNotificationDraftsFromStorage().filter((draft) => draft.id !== normalizedDraftId)
+  persistAdminNotificationDraftsToStorage(nextDrafts)
+}
+
+const normalizeScheduledNotificationStatus = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'sent') return 'Sent'
+  if (normalized === 'cancelled') return 'Cancelled'
+  if (normalized === 'failed') return 'Failed'
+  if (normalized === 'sending') return 'Sending'
+  return 'Scheduled'
+}
+
+const normalizeScheduledNotification = (entry = {}, index = 0) => {
+  const createdAtIso = toIsoOrFallback(entry.createdAtIso)
+  const scheduledForIso = toIsoOrFallback(entry.scheduledForIso, createdAtIso)
+  return {
+    id: toTrimmedValue(entry.id) || createScheduledNotificationId(),
+    mode: toTrimmedValue(entry.mode) === 'targeted' ? 'targeted' : 'bulk',
+    bulkAudience: toTrimmedValue(entry.bulkAudience) || 'all-users',
+    title: toTrimmedValue(entry.title) || `Scheduled Notification ${index + 1}`,
+    message: String(entry.message || ''),
+    link: toTrimmedValue(entry.link),
+    priority: toTrimmedValue(entry.priority) || 'normal',
+    selectedUsers: Array.isArray(entry.selectedUsers) ? [...entry.selectedUsers] : [],
+    status: normalizeScheduledNotificationStatus(entry.status),
+    createdAtIso,
+    updatedAtIso: toIsoOrFallback(entry.updatedAtIso, createdAtIso),
+    scheduledForIso,
+    sentAtIso: toTrimmedValue(entry.sentAtIso) ? toIsoOrFallback(entry.sentAtIso, '') : '',
+    lastAttemptAtIso: toTrimmedValue(entry.lastAttemptAtIso) ? toIsoOrFallback(entry.lastAttemptAtIso, '') : '',
+    recipientCount: Number(entry.recipientCount || 0),
+    emailSuccessCount: Number(entry.emailSuccessCount || 0),
+    emailFailureCount: Number(entry.emailFailureCount || 0),
+    sentNotificationId: toTrimmedValue(entry.sentNotificationId),
+    deliveryOrigin: toTrimmedValue(entry.deliveryOrigin) || 'scheduled',
+  }
+}
+
+const readAdminScheduledNotificationsFromStorage = () => {
+  const stored = safeParseJson(localStorage.getItem(ADMIN_SCHEDULED_NOTIFICATIONS_STORAGE_KEY), [])
+  if (!Array.isArray(stored)) return []
+  return stored
+    .map((entry, index) => normalizeScheduledNotification(entry, index))
+    .sort((left, right) => (Date.parse(left.scheduledForIso || '') || 0) - (Date.parse(right.scheduledForIso || '') || 0))
+}
+
+const persistAdminScheduledNotificationsToStorage = (entries = []) => {
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .map((entry, index) => normalizeScheduledNotification(entry, index))
+    .sort((left, right) => (Date.parse(left.scheduledForIso || '') || 0) - (Date.parse(right.scheduledForIso || '') || 0))
+  localStorage.setItem(ADMIN_SCHEDULED_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(normalized))
+  emitAdminNotificationsSync()
+}
+
+const upsertAdminScheduledNotificationInStorage = (entry = {}) => {
+  const normalizedEntry = normalizeScheduledNotification(entry)
+  const existingEntries = readAdminScheduledNotificationsFromStorage()
+  const hasMatch = existingEntries.some((item) => item.id === normalizedEntry.id)
+  const nextEntries = hasMatch
+    ? existingEntries.map((item) => (item.id === normalizedEntry.id ? normalizedEntry : item))
+    : [...existingEntries, normalizedEntry]
+  persistAdminScheduledNotificationsToStorage(nextEntries)
+  return normalizedEntry
+}
+
+const removeAdminScheduledNotificationFromStorage = (scheduledId = '') => {
+  const normalizedId = toTrimmedValue(scheduledId)
+  if (!normalizedId) return
+  const nextEntries = readAdminScheduledNotificationsFromStorage().filter((entry) => entry.id !== normalizedId)
+  persistAdminScheduledNotificationsToStorage(nextEntries)
+}
+
+const normalizeNotificationRecipient = (recipient = {}, index = 0) => {
+  const normalizedEmail = String(recipient.email || '').trim().toLowerCase()
+  return {
+    id: toTrimmedValue(recipient.id) || `REC-${index + 1}`,
+    fullName: toTrimmedValue(recipient.fullName) || normalizedEmail || `User ${index + 1}`,
+    email: normalizedEmail,
+    businessName: toTrimmedValue(recipient.businessName) || 'Unknown Business',
+    role: toTrimmedValue(recipient.role) || 'Client',
+    country: toTrimmedValue(recipient.country) || '--',
+    verificationStatus: toTrimmedValue(recipient.verificationStatus) || 'Pending',
+    registrationStage: toTrimmedValue(recipient.registrationStage) || 'Onboarding',
+  }
+}
+
+const getNotificationRecipientsDirectory = () => {
+  const byEmail = new Map()
+  const pushRecipient = (recipient = {}) => {
+    const normalized = normalizeNotificationRecipient(recipient)
+    if (!normalized.email) return
+    byEmail.set(normalized.email, normalized)
+  }
+
+  mockUsers.forEach((user) => pushRecipient(user))
+
+  const rawAccounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
+  if (Array.isArray(rawAccounts)) {
+    rawAccounts.forEach((account, index) => {
+      const normalizedEmail = String(account?.email || '').trim().toLowerCase()
+      if (!normalizedEmail) return
+      const normalizedRole = normalizeRoleWithLegacyFallback(account?.role, normalizedEmail)
+      if (normalizedRole === 'admin') return
+      pushRecipient({
+        id: account?.id || `ACC-${index + 1}`,
+        fullName: account?.fullName || normalizedEmail,
+        email: normalizedEmail,
+        businessName: account?.businessName || account?.companyName || '',
+        role: account?.role || (normalizedRole === 'client' ? 'Client' : 'User'),
+      })
+    })
+  }
+
+  const clientRows = readClientRows()
+  clientRows.forEach((client, index) => {
+    pushRecipient({
+      id: client.id || `CLI-${index + 1}`,
+      fullName: client.primaryContact || client.businessName || client.email,
+      email: client.email,
+      businessName: client.businessName,
+      role: 'Client',
+      country: client.country,
+      verificationStatus: String(client.verificationStatus || '').includes('Fully')
+        ? 'Verified'
+        : String(client.verificationStatus || '').includes('Action')
+          ? 'Rejected'
+          : 'Pending',
+      registrationStage: client.onboardingStatus === 'Completed' ? 'Completed' : 'Onboarding',
+    })
+  })
+
+  return Array.from(byEmail.values())
+    .filter((recipient) => recipient.email)
+    .sort((left, right) => left.fullName.localeCompare(right.fullName))
+}
+
+const resolveNotificationRecipients = ({
+  mode = 'bulk',
+  bulkAudience = 'all-users',
+  selectedUsers = [],
+} = {}) => {
+  const directory = getNotificationRecipientsDirectory()
+  if (mode === 'targeted') {
+    const selectedIdSet = new Set((Array.isArray(selectedUsers) ? selectedUsers : []).map((id) => String(id)))
+    return directory.filter((recipient) => selectedIdSet.has(String(recipient.id)))
+  }
+  if (bulkAudience === 'pending-verification') {
+    return directory.filter((recipient) => recipient.verificationStatus === 'Pending')
+  }
+  if (bulkAudience === 'all-accountants') {
+    return directory.filter((recipient) => recipient.role.toLowerCase() === 'accountant')
+  }
+  if (bulkAudience === 'all-businesses') {
+    return directory.filter((recipient) => recipient.businessName && recipient.businessName !== 'Unknown Business')
+  }
+  return directory
+}
+
+const getNotificationAudienceLabel = ({
+  mode = 'bulk',
+  bulkAudience = 'all-users',
+  selectedUsers = [],
+} = {}) => {
+  if (mode === 'targeted') return `${selectedUsers.length} Selected Users`
+  return bulkAudience
+    .split('-')
+    .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+    .join(' ')
+}
+
+const readClientBriefNotificationsFromStorage = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return []
+  const scopedKey = `${CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY}:${normalizedEmail}`
+  const stored = safeParseJson(localStorage.getItem(scopedKey), [])
+  if (!Array.isArray(stored)) return []
+  return stored
+}
+
+const appendClientBriefNotificationsToStorage = (email = '', entries = []) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const additions = Array.isArray(entries) ? entries : []
+  if (!normalizedEmail || additions.length === 0) return
+  const scopedKey = `${CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY}:${normalizedEmail}`
+  const existingEntries = readClientBriefNotificationsFromStorage(normalizedEmail)
+  localStorage.setItem(scopedKey, JSON.stringify([...additions, ...existingEntries].slice(0, 100)))
+}
+
+const deliverNotificationEmail = async ({
+  recipient,
+  notification,
+  sentAtIso,
+  deliveryOrigin = 'manual',
+}) => {
+  if (!recipient?.email) return false
+  try {
+    const response = await fetch('/api/notifications/send-email', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: recipient.email,
+        subject: notification.title,
+        message: notification.message,
+        link: notification.link || '',
+        priority: notification.priority || 'normal',
+        sentAtIso,
+        deliveryOrigin,
+      }),
+    })
+    return response.ok
+  } catch {
+    // Fallback to local demo flow when backend email endpoint is unavailable.
+    return false
+  }
+}
+
+const dispatchAdminNotification = async ({
+  mode = 'bulk',
+  bulkAudience = 'all-users',
+  selectedUsers = [],
+  title = '',
+  message = '',
+  link = '',
+  priority = 'normal',
+  deliveryOrigin = 'manual',
+}) => {
+  const recipients = resolveNotificationRecipients({ mode, bulkAudience, selectedUsers })
+  const sentAtIso = new Date().toISOString()
+  const normalizedTitle = toTrimmedValue(title) || 'Untitled Notification'
+  const normalizedMessage = String(message || '')
+  const normalizedLink = toTrimmedValue(link)
+  const normalizedPriority = toTrimmedValue(priority) || 'normal'
+  const normalizedAudience = getNotificationAudienceLabel({ mode, bulkAudience, selectedUsers })
+
+  if (recipients.length === 0) {
+    return {
+      ok: false,
+      reason: 'empty-recipients',
+      recipients: [],
+      recipientCount: 0,
+      sentNotification: null,
+      emailSuccessCount: 0,
+      emailFailureCount: 0,
+    }
+  }
+
+  const emailResults = await Promise.all(
+    recipients.map((recipient) => deliverNotificationEmail({
+      recipient,
+      notification: {
+        title: normalizedTitle,
+        message: normalizedMessage,
+        link: normalizedLink,
+        priority: normalizedPriority,
+      },
+      sentAtIso,
+      deliveryOrigin,
+    })),
+  )
+  const emailSuccessCount = emailResults.filter(Boolean).length
+  const emailFailureCount = Math.max(0, recipients.length - emailSuccessCount)
+
+  recipients.forEach((recipient, index) => {
+    const briefEntry = {
+      id: `CBN-${Date.now().toString(36).toUpperCase()}-${index}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`,
+      type: 'admin-notification',
+      title: normalizedTitle,
+      message: normalizedMessage,
+      link: normalizedLink,
+      priority: normalizedPriority,
+      sentAtIso,
+      read: false,
+    }
+    appendClientBriefNotificationsToStorage(recipient.email, [briefEntry])
+    appendScopedClientActivityLog(recipient.email, {
+      actorName: 'Kiamina Notifications',
+      actorRole: 'system',
+      action: normalizedTitle,
+      details: normalizedMessage,
+    })
+  })
+
+  const sentNotification = normalizeSentNotification({
+    id: `SN-${Date.now().toString(36).toUpperCase()}`,
+    title: normalizedTitle,
+    message: normalizedMessage,
+    audience: normalizedAudience,
+    dateSent: formatTimestamp(sentAtIso),
+    openRate: '--',
+    status: emailFailureCount > 0 ? 'Partially Delivered' : 'Delivered',
+    sentAtIso,
+  })
+  persistAdminSentNotificationsToStorage([
+    sentNotification,
+    ...readAdminSentNotificationsFromStorage(),
+  ])
+
+  return {
+    ok: true,
+    recipients,
+    recipientCount: recipients.length,
+    sentNotification,
+    emailSuccessCount,
+    emailFailureCount,
+  }
+}
+
+let scheduledNotificationProcessorPromise = null
+
+const runScheduledNotificationProcessor = async () => {
+  if (scheduledNotificationProcessorPromise) return scheduledNotificationProcessorPromise
+  scheduledNotificationProcessorPromise = (async () => {
+    const nowMs = Date.now()
+    const scheduledEntries = readAdminScheduledNotificationsFromStorage()
+    const dueEntries = scheduledEntries.filter((entry) => (
+      entry.status === 'Scheduled'
+      && Number.isFinite(Date.parse(entry.scheduledForIso || ''))
+      && Date.parse(entry.scheduledForIso) <= nowMs
+    ))
+
+    if (dueEntries.length === 0) {
+      return { processedCount: 0, deliveredCount: 0, failedCount: 0 }
+    }
+
+    const processingById = new Map(dueEntries.map((entry) => [
+      entry.id,
+      {
+        ...entry,
+        status: 'Sending',
+        updatedAtIso: new Date().toISOString(),
+        lastAttemptAtIso: new Date().toISOString(),
+      },
+    ]))
+    const sendingSnapshot = scheduledEntries.map((entry) => processingById.get(entry.id) || entry)
+    persistAdminScheduledNotificationsToStorage(sendingSnapshot)
+
+    let deliveredCount = 0
+    let failedCount = 0
+    let updatedEntries = [...sendingSnapshot]
+    for (const entry of dueEntries) {
+      const result = await dispatchAdminNotification({
+        mode: entry.mode,
+        bulkAudience: entry.bulkAudience,
+        selectedUsers: entry.selectedUsers,
+        title: entry.title,
+        message: entry.message,
+        link: entry.link,
+        priority: entry.priority,
+        deliveryOrigin: 'scheduled',
+      })
+
+      const nowIso = new Date().toISOString()
+      const nextStatus = result.ok ? 'Sent' : 'Failed'
+      if (result.ok) deliveredCount += 1
+      else failedCount += 1
+      updatedEntries = updatedEntries.map((candidate) => (
+        candidate.id === entry.id
+          ? normalizeScheduledNotification({
+            ...candidate,
+            status: nextStatus,
+            sentAtIso: result.sentNotification?.sentAtIso || candidate.sentAtIso || '',
+            updatedAtIso: nowIso,
+            lastAttemptAtIso: nowIso,
+            recipientCount: result.recipientCount || 0,
+            emailSuccessCount: result.emailSuccessCount || 0,
+            emailFailureCount: result.emailFailureCount || 0,
+            sentNotificationId: result.sentNotification?.id || '',
+          })
+          : candidate
+      ))
+    }
+
+    persistAdminScheduledNotificationsToStorage(updatedEntries)
+    return {
+      processedCount: dueEntries.length,
+      deliveredCount,
+      failedCount,
+    }
+  })()
+
+  try {
+    return await scheduledNotificationProcessorPromise
+  } finally {
+    scheduledNotificationProcessorPromise = null
+  }
+}
+
+const createAdminTrashEntryId = () => (
+  `TRASH-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`
+)
+
+const normalizeAdminTrashEntry = (entry = {}, index = 0) => ({
+  id: toTrimmedValue(entry.id) || `TRASH-${index + 1}`,
+  entityType: toTrimmedValue(entry.entityType) || 'unknown',
+  entityLabel: toTrimmedValue(entry.entityLabel) || 'Deleted Item',
+  description: String(entry.description || ''),
+  deletedByName: toTrimmedValue(entry.deletedByName) || 'Admin User',
+  deletedAtIso: toTrimmedValue(entry.deletedAtIso) || new Date().toISOString(),
+  payload: entry.payload && typeof entry.payload === 'object' ? entry.payload : {},
+})
+
+const readAdminTrashEntriesFromStorage = () => {
+  const stored = safeParseJson(localStorage.getItem(ADMIN_TRASH_STORAGE_KEY), [])
+  if (!Array.isArray(stored)) return []
+  return stored
+    .map((entry, index) => normalizeAdminTrashEntry(entry, index))
+    .sort((left, right) => (Date.parse(right.deletedAtIso || '') || 0) - (Date.parse(left.deletedAtIso || '') || 0))
+}
+
+const persistAdminTrashEntriesToStorage = (entries = []) => {
+  const normalizedEntries = (Array.isArray(entries) ? entries : [])
+    .map((entry, index) => normalizeAdminTrashEntry(entry, index))
+    .sort((left, right) => (Date.parse(right.deletedAtIso || '') || 0) - (Date.parse(left.deletedAtIso || '') || 0))
+  localStorage.setItem(ADMIN_TRASH_STORAGE_KEY, JSON.stringify(normalizedEntries))
+}
+
+const appendAdminTrashEntryToStorage = (entry = {}) => {
+  const normalizedEntry = normalizeAdminTrashEntry({
+    ...entry,
+    id: toTrimmedValue(entry.id) || createAdminTrashEntryId(),
+    deletedAtIso: toTrimmedValue(entry.deletedAtIso) || new Date().toISOString(),
+  })
+  const existingEntries = readAdminTrashEntriesFromStorage()
+  persistAdminTrashEntriesToStorage([normalizedEntry, ...existingEntries])
+  return normalizedEntry
+}
+
+const removeAdminTrashEntryFromStorage = (entryId = '') => {
+  const normalizedEntryId = toTrimmedValue(entryId)
+  if (!normalizedEntryId) return
+  const nextEntries = readAdminTrashEntriesFromStorage().filter((entry) => entry.id !== normalizedEntryId)
+  persistAdminTrashEntriesToStorage(nextEntries)
+}
+
+const clearAdminTrashEntriesFromStorage = () => {
+  localStorage.removeItem(ADMIN_TRASH_STORAGE_KEY)
+}
 
 const normalizeComplianceStatus = (value, fallback = COMPLIANCE_STATUS.PENDING) => {
   const normalized = String(value || '').trim().toLowerCase()
@@ -796,17 +1357,30 @@ function AdminSidebar({
   isMobileOpen = false,
   onCloseMobile,
 }) {
+  const [leadCount, setLeadCount] = useState(() => {
+    const snapshot = getSupportCenterSnapshot()
+    return Array.isArray(snapshot?.leads) ? snapshot.leads.length : 0
+  })
+  const [supportUnreadCount, setSupportUnreadCount] = useState(() => {
+    const snapshot = getSupportCenterSnapshot()
+    const tickets = Array.isArray(snapshot?.tickets) ? snapshot.tickets : []
+    return tickets.reduce((total, ticket) => total + Number(ticket?.unreadByAdmin || 0), 0)
+  })
+  const [trashCount, setTrashCount] = useState(() => readAdminTrashEntriesFromStorage().length)
+
   const navItems = [
-    { id: 'admin-dashboard', label: 'Admin Dashboard', icon: LayoutDashboard },
-    { id: 'admin-documents', label: 'Document Review', icon: FileText },
-    { id: 'admin-communications', label: 'Communications', icon: Mail },
-    { id: 'admin-notifications', label: 'Send Notification', icon: Send },
-    { id: 'admin-clients', label: 'Client Management', icon: Users },
+    { id: 'admin-dashboard', label: 'Admin Dashboard', icon: LayoutDashboard, badgeCount: 0, badgeTone: 'neutral' },
+    { id: 'admin-documents', label: 'Document Review', icon: FileText, badgeCount: 0, badgeTone: 'neutral' },
+    { id: 'admin-leads', label: 'Leads', icon: UsersRound, badgeCount: leadCount, badgeTone: 'neutral' },
+    { id: 'admin-communications', label: 'Communications', icon: Mail, badgeCount: supportUnreadCount, badgeTone: 'alert' },
+    { id: 'admin-notifications', label: 'Send Notification', icon: Send, badgeCount: 0, badgeTone: 'neutral' },
+    { id: 'admin-clients', label: 'Client Management', icon: Users, badgeCount: 0, badgeTone: 'neutral' },
   ]
 
   const footerNavItems = [
-    { id: 'admin-activity', label: 'Activity Log', icon: Activity },
-    { id: 'admin-settings', label: 'Admin Settings', icon: Settings },
+    { id: 'admin-activity', label: 'Activity Log', icon: Activity, badgeCount: 0, badgeTone: 'neutral' },
+    { id: 'admin-trash', label: 'Trash', icon: Trash2, badgeCount: trashCount, badgeTone: 'neutral' },
+    { id: 'admin-settings', label: 'Admin Settings', icon: Settings, badgeCount: 0, badgeTone: 'neutral' },
   ]
 
   const displayAdmin = normalizeAdminAccount({
@@ -821,6 +1395,49 @@ function AdminSidebar({
     setActivePage(pageId)
     onCloseMobile?.()
   }
+
+  useEffect(() => {
+    const syncSupportStats = (snapshot) => {
+      const leads = Array.isArray(snapshot?.leads) ? snapshot.leads : []
+      const tickets = Array.isArray(snapshot?.tickets) ? snapshot.tickets : []
+      setLeadCount(leads.length)
+      setSupportUnreadCount(tickets.reduce((total, ticket) => total + Number(ticket?.unreadByAdmin || 0), 0))
+    }
+    syncSupportStats(getSupportCenterSnapshot())
+    const unsubscribe = subscribeSupportCenter((snapshot) => syncSupportStats(snapshot))
+
+    const syncTrashStats = () => setTrashCount(readAdminTrashEntriesFromStorage().length)
+    syncTrashStats()
+    const handleStorage = (event) => {
+      if (!event.key || event.key === ADMIN_TRASH_STORAGE_KEY) {
+        syncTrashStats()
+      }
+    }
+    const runProcessor = () => {
+      void runScheduledNotificationProcessor()
+    }
+    runProcessor()
+    const processorIntervalId = window.setInterval(runProcessor, 15000)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') runProcessor()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, runProcessor)
+    window.addEventListener('storage', handleStorage)
+    return () => {
+      unsubscribe()
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, runProcessor)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.clearInterval(processorIntervalId)
+    }
+  }, [])
+
+  const getBadgeClasses = (badgeTone = 'neutral') => (
+    badgeTone === 'alert'
+      ? 'bg-error text-white'
+      : 'bg-background border border-border-light text-text-secondary'
+  )
 
   return (
     <>
@@ -851,7 +1468,12 @@ function AdminSidebar({
               className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
             >
               <item.icon className="w-5 h-5" />
-              {item.label}
+              <span className="flex-1 text-left truncate">{item.label}</span>
+              {(item.id === 'admin-leads' || Number(item.badgeCount || 0) > 0) && (
+                <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-semibold ${getBadgeClasses(item.badgeTone)}`}>
+                  {Number(item.badgeCount) > 99 ? '99+' : Number(item.badgeCount)}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -868,7 +1490,12 @@ function AdminSidebar({
               className={"w-full flex items-center gap-3 px-4 py-3 text-sm font-medium transition-all " + (activePage === item.id ? 'bg-primary-tint text-primary border-l-[3px] border-primary' : 'text-text-secondary hover:bg-background hover:text-text-primary border-l-[3px] border-transparent')}
             >
               <item.icon className="w-5 h-5" />
-              {item.label}
+              <span className="flex-1 text-left truncate">{item.label}</span>
+              {(item.id === 'admin-trash' || Number(item.badgeCount || 0) > 0) && (
+                <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-semibold ${getBadgeClasses(item.badgeTone)}`}>
+                  {Number(item.badgeCount) > 99 ? '99+' : Number(item.badgeCount)}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -3373,13 +4000,676 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   )
 }
 
+const SUPPORT_INBOX_FOCUS_EMAIL_KEY = 'kiaminaSupportInboxFocusEmail'
+
+function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, onAdminActionLog }) {
+  const [supportSnapshot, setSupportSnapshot] = useState(() => getSupportCenterSnapshot())
+  const [searchTerm, setSearchTerm] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('all')
+  const [typeFilter, setTypeFilter] = useState('all')
+  const [ticketFilter, setTicketFilter] = useState('all')
+  const [sortBy, setSortBy] = useState('updated-desc')
+  const adminActorName = toTrimmedValue(currentAdminAccount?.fullName)
+    || toTrimmedValue(currentAdminAccount?.firstName)
+    || 'Admin User'
+
+  useEffect(() => {
+    const unsubscribe = subscribeSupportCenter((snapshot) => setSupportSnapshot(snapshot))
+    return unsubscribe
+  }, [])
+
+  const tickets = Array.isArray(supportSnapshot?.tickets) ? supportSnapshot.tickets : []
+  const leads = useMemo(() => {
+    const rawLeads = Array.isArray(supportSnapshot?.leads) ? supportSnapshot.leads : []
+    const rows = rawLeads
+      .filter((lead) => lead && typeof lead === 'object')
+      .map((lead) => {
+        const normalizedLeadId = toTrimmedValue(lead.id)
+        const normalizedClientEmail = toTrimmedValue(lead.clientEmail).toLowerCase()
+        const linkedTickets = tickets.filter((ticket) => {
+          const ticketLeadId = toTrimmedValue(ticket?.leadId)
+          const ticketClientEmail = toTrimmedValue(ticket?.clientEmail).toLowerCase()
+          return (
+            (normalizedLeadId && ticketLeadId === normalizedLeadId)
+            || (normalizedClientEmail && ticketClientEmail === normalizedClientEmail)
+          )
+        })
+        const latestTicket = [...linkedTickets]
+          .sort((left, right) => (Date.parse(right.updatedAtIso || '') || 0) - (Date.parse(left.updatedAtIso || '') || 0))[0] || null
+        const latestUpdatedAtIso = (
+          (Date.parse(lead.updatedAtIso || '') || 0) > (Date.parse(latestTicket?.updatedAtIso || '') || 0)
+            ? lead.updatedAtIso
+            : (latestTicket?.updatedAtIso || lead.updatedAtIso)
+        )
+        return {
+          ...lead,
+          ticketCount: linkedTickets.length,
+          openTicketCount: linkedTickets.filter((ticket) => ticket.status !== SUPPORT_TICKET_STATUS.RESOLVED).length,
+          latestUpdatedAtIso,
+        }
+      })
+    return rows.sort((left, right) => (Date.parse(right.latestUpdatedAtIso || '') || 0) - (Date.parse(left.latestUpdatedAtIso || '') || 0))
+  }, [supportSnapshot, tickets])
+
+  const getLeadCategoryList = (lead = {}) => {
+    const categories = []
+    const pushCategory = (value = '') => {
+      const normalized = toTrimmedValue(value)
+      if (!normalized || categories.includes(normalized)) return
+      categories.push(normalized)
+    }
+    ;(Array.isArray(lead.leadCategories) ? lead.leadCategories : []).forEach((entry) => pushCategory(entry))
+    pushCategory(lead.leadCategory)
+    return categories
+  }
+
+  const filteredLeads = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase()
+    const toCategorySearchText = (lead = {}) => (
+      getLeadCategoryList(lead)
+        .map((value) => String(value || '').toLowerCase())
+        .join(' ')
+    )
+
+    const scopedLeads = leads
+      .filter((lead) => (
+        !query
+          || [
+            lead.leadLabel,
+            toCategorySearchText(lead),
+            lead.fullName,
+            lead.contactEmail,
+            lead.organizationType,
+            lead.ipAddress,
+            lead.location,
+            lead.clientEmail,
+          ].some((value) => String(value || '').toLowerCase().includes(query))
+      ))
+      .filter((lead) => {
+        if (categoryFilter === 'all') return true
+        const categories = getLeadCategoryList(lead)
+        const hasInquiry = categories.includes('Inquiry_FollowUP')
+        const hasNewsletter = categories.includes('Newsletter_Subscriber')
+        if (categoryFilter === 'inquiry') return hasInquiry
+        if (categoryFilter === 'newsletter') return hasNewsletter
+        if (categoryFilter === 'mixed') return hasInquiry && hasNewsletter
+        return true
+      })
+      .filter((lead) => {
+        if (typeFilter === 'all') return true
+        const normalizedType = toTrimmedValue(lead.organizationType).toLowerCase()
+        if (typeFilter === 'unknown') return !normalizedType
+        return normalizedType === typeFilter
+      })
+      .filter((lead) => {
+        if (ticketFilter === 'all') return true
+        const openCount = Number(lead.openTicketCount || 0)
+        if (ticketFilter === 'open') return openCount > 0
+        if (ticketFilter === 'closed') return openCount === 0
+        return true
+      })
+
+    return [...scopedLeads].sort((left, right) => {
+      if (sortBy === 'updated-asc') {
+        return (Date.parse(left.latestUpdatedAtIso || '') || 0) - (Date.parse(right.latestUpdatedAtIso || '') || 0)
+      }
+      if (sortBy === 'label-asc') {
+        return String(left.leadLabel || '').localeCompare(String(right.leadLabel || ''))
+      }
+      if (sortBy === 'label-desc') {
+        return String(right.leadLabel || '').localeCompare(String(left.leadLabel || ''))
+      }
+      if (sortBy === 'email-asc') {
+        return String(left.contactEmail || '').localeCompare(String(right.contactEmail || ''))
+      }
+      if (sortBy === 'email-desc') {
+        return String(right.contactEmail || '').localeCompare(String(left.contactEmail || ''))
+      }
+      if (sortBy === 'open-desc') {
+        return Number(right.openTicketCount || 0) - Number(left.openTicketCount || 0)
+      }
+      if (sortBy === 'open-asc') {
+        return Number(left.openTicketCount || 0) - Number(right.openTicketCount || 0)
+      }
+      return (Date.parse(right.latestUpdatedAtIso || '') || 0) - (Date.parse(left.latestUpdatedAtIso || '') || 0)
+    })
+  }, [leads, searchTerm, categoryFilter, typeFilter, ticketFilter, sortBy])
+
+  const formatLeadType = (value = '') => {
+    const normalized = toTrimmedValue(value).toLowerCase()
+    if (normalized === 'business') return 'Business'
+    if (normalized === 'non-profit') return 'Non-profit'
+    if (normalized === 'individual') return 'Individual'
+    return '--'
+  }
+
+  const formatLeadCategory = (value = '', list = []) => {
+    const resolved = []
+    const pushCategory = (entry = '') => {
+      const normalized = toTrimmedValue(entry)
+      if (!normalized || resolved.includes(normalized)) return
+      resolved.push(normalized)
+    }
+    ;(Array.isArray(list) ? list : []).forEach((entry) => pushCategory(entry))
+    pushCategory(value)
+    if (resolved.length === 0) return '--'
+    return resolved
+      .map((entry) => {
+        if (entry === 'Inquiry_FollowUP') return 'Inquiry Follow-up'
+        if (entry === 'Newsletter_Subscriber') return 'Newsletter Subscriber'
+        return entry
+      })
+      .join(', ')
+  }
+
+  const handleOpenInbox = (leadClientEmail = '') => {
+    const normalizedEmail = toTrimmedValue(leadClientEmail).toLowerCase()
+    if (normalizedEmail) {
+      try {
+        localStorage.setItem(SUPPORT_INBOX_FOCUS_EMAIL_KEY, normalizedEmail)
+      } catch {
+        // Ignore storage write failure.
+      }
+    }
+    setActivePage?.('admin-communications')
+  }
+
+  const handleDeleteLead = (lead = null) => {
+    if (!lead || typeof lead !== 'object') return
+    const leadLabel = toTrimmedValue(lead.leadLabel) || toTrimmedValue(lead.fullName) || toTrimmedValue(lead.contactEmail) || 'this lead'
+    const confirmed = window.confirm(`Move ${leadLabel} to trash? You can restore later from Admin Trash.`)
+    if (!confirmed) return
+
+    const deleteResult = deleteSupportLead({
+      leadId: lead.id,
+      clientEmail: lead.clientEmail,
+    })
+    if (!deleteResult.ok) {
+      showToast?.('error', deleteResult.message || 'Unable to delete lead.')
+      return
+    }
+
+    appendAdminTrashEntryToStorage({
+      entityType: 'lead',
+      entityLabel: leadLabel,
+      description: `Lead removed with ${deleteResult.removedTicketCount || 0} linked support ticket(s).`,
+      deletedByName: adminActorName,
+      payload: {
+        lead: deleteResult.lead || lead,
+        tickets: Array.isArray(deleteResult.tickets) ? deleteResult.tickets : [],
+        removedAtIso: new Date().toISOString(),
+      },
+    })
+
+    onAdminActionLog?.({
+      adminName: adminActorName,
+      action: 'Deleted lead',
+      affectedUser: leadLabel,
+      details: `Moved to trash (${deleteResult.removedTicketCount || 0} ticket(s) archived).`,
+    })
+    showToast?.('success', `${leadLabel} moved to trash.`)
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+        <div>
+          <h2 className="text-2xl font-semibold text-text-primary">Leads</h2>
+          <p className="text-sm text-text-secondary mt-1">Track inquiry and newsletter leads with contact and routing details.</p>
+        </div>
+        <div className="text-sm text-text-muted">Showing {filteredLeads.length} of {leads.length} lead(s)</div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light">
+        <div className="p-4 border-b border-border-light">
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-2">
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search lead name, category, email, type, IP, or location..."
+              className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary md:col-span-2"
+            />
+            <select
+              value={categoryFilter}
+              onChange={(event) => setCategoryFilter(event.target.value)}
+              className="h-10 px-3 border border-border rounded-md text-sm bg-white focus:outline-none focus:border-primary"
+            >
+              <option value="all">All Categories</option>
+              <option value="inquiry">Inquiry Follow-up</option>
+              <option value="newsletter">Newsletter Subscriber</option>
+              <option value="mixed">Mixed Categories</option>
+            </select>
+            <select
+              value={typeFilter}
+              onChange={(event) => setTypeFilter(event.target.value)}
+              className="h-10 px-3 border border-border rounded-md text-sm bg-white focus:outline-none focus:border-primary"
+            >
+              <option value="all">All Types</option>
+              <option value="business">Business</option>
+              <option value="non-profit">Non-profit</option>
+              <option value="individual">Individual</option>
+              <option value="unknown">Unknown</option>
+            </select>
+            <select
+              value={ticketFilter}
+              onChange={(event) => setTicketFilter(event.target.value)}
+              className="h-10 px-3 border border-border rounded-md text-sm bg-white focus:outline-none focus:border-primary"
+            >
+              <option value="all">All Tickets</option>
+              <option value="open">Open Tickets</option>
+              <option value="closed">No Open Tickets</option>
+            </select>
+            <select
+              value={sortBy}
+              onChange={(event) => setSortBy(event.target.value)}
+              className="h-10 px-3 border border-border rounded-md text-sm bg-white focus:outline-none focus:border-primary md:col-span-2 xl:col-span-2"
+            >
+              <option value="updated-desc">Sort: Updated (Newest)</option>
+              <option value="updated-asc">Sort: Updated (Oldest)</option>
+              <option value="label-asc">Sort: Lead Label (A-Z)</option>
+              <option value="label-desc">Sort: Lead Label (Z-A)</option>
+              <option value="email-asc">Sort: Email (A-Z)</option>
+              <option value="email-desc">Sort: Email (Z-A)</option>
+              <option value="open-desc">Sort: Open Tickets (High-Low)</option>
+              <option value="open-asc">Sort: Open Tickets (Low-High)</option>
+            </select>
+          </div>
+        </div>
+
+        {filteredLeads.length === 0 ? (
+          <div className="px-4 py-10 text-sm text-text-muted text-center">
+            No leads found yet.
+          </div>
+        ) : (
+          <div className="overflow-auto">
+            <table className="w-full min-w-[1200px] border-collapse">
+              <thead className="bg-background border-b border-border-light">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">S/N</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Type</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Category</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Full Name</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Email</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Organization</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">IP Address</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Location</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Open Tickets</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">All Tickets</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Updated</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredLeads.map((lead, index) => (
+                  <tr key={lead.id} className="border-b border-border-light hover:bg-background transition-colors">
+                    <td className="px-4 py-3.5 text-sm font-semibold text-text-primary">{index + 1}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">Lead</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{formatLeadCategory(lead.leadCategory, lead.leadCategories)}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{lead.fullName || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{lead.contactEmail || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{formatLeadType(lead.organizationType)}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{lead.ipAddress || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{lead.location || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{lead.openTicketCount || 0}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{lead.ticketCount || 0}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{formatTimestamp(lead.latestUpdatedAtIso || lead.updatedAtIso)}</td>
+                    <td className="px-4 py-3.5 text-sm">
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenInbox(lead.clientEmail)}
+                          className="h-8 px-3 rounded-md border border-border text-xs font-medium text-text-primary hover:bg-white"
+                        >
+                          Open Support Inbox
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteLead(lead)}
+                          className="h-8 px-3 rounded-md border border-error/50 text-xs font-medium text-error hover:bg-error/10"
+                        >
+                          Delete Lead
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AdminTrashPage({ showToast, currentAdminAccount, onAdminActionLog }) {
+  const [trashEntries, setTrashEntries] = useState(() => readAdminTrashEntriesFromStorage())
+  const adminActorName = toTrimmedValue(currentAdminAccount?.fullName)
+    || toTrimmedValue(currentAdminAccount?.firstName)
+    || 'Admin User'
+
+  useEffect(() => {
+    const syncTrash = () => setTrashEntries(readAdminTrashEntriesFromStorage())
+    syncTrash()
+    const handleStorage = (event) => {
+      if (!event.key || event.key === ADMIN_TRASH_STORAGE_KEY) {
+        syncTrash()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [])
+
+  const formatEntityType = (value = '') => {
+    const normalized = toTrimmedValue(value).toLowerCase()
+    if (normalized === 'lead') return 'Lead'
+    if (normalized === 'notification-draft') return 'Notification Draft'
+    return normalized || 'Unknown'
+  }
+
+  const refreshTrash = () => setTrashEntries(readAdminTrashEntriesFromStorage())
+
+  const handleRestoreEntry = (entry = null) => {
+    if (!entry || typeof entry !== 'object') return
+    if (entry.entityType === 'lead') {
+      const restoreResult = restoreSupportLead({
+        lead: entry.payload?.lead,
+        tickets: entry.payload?.tickets,
+      })
+      if (!restoreResult.ok) {
+        showToast?.('error', restoreResult.message || 'Unable to restore this lead.')
+        return
+      }
+      removeAdminTrashEntryFromStorage(entry.id)
+      refreshTrash()
+      onAdminActionLog?.({
+        adminName: adminActorName,
+        action: 'Restored lead',
+        affectedUser: entry.entityLabel || 'Lead',
+        details: `Restored from trash with ${restoreResult.restoredTicketCount || 0} ticket(s).`,
+      })
+      showToast?.('success', `${entry.entityLabel || 'Lead'} restored from trash.`)
+      return
+    }
+    if (entry.entityType === 'notification-draft') {
+      const draft = entry.payload?.draft
+      if (!draft || typeof draft !== 'object') {
+        showToast?.('error', 'Draft payload is missing.')
+        return
+      }
+      upsertAdminNotificationDraftInStorage(draft)
+      removeAdminTrashEntryFromStorage(entry.id)
+      refreshTrash()
+      onAdminActionLog?.({
+        adminName: adminActorName,
+        action: 'Restored notification draft',
+        affectedUser: entry.entityLabel || '(Untitled draft)',
+        details: 'Notification draft restored from trash.',
+      })
+      showToast?.('success', 'Draft restored from trash.')
+      return
+    }
+    showToast?.('error', 'Restore is not available for this item type yet.')
+  }
+
+  const handleDeletePermanently = (entry = null) => {
+    if (!entry || typeof entry !== 'object') return
+    const confirmed = window.confirm(`Delete ${entry.entityLabel || 'this item'} permanently from trash?`)
+    if (!confirmed) return
+    removeAdminTrashEntryFromStorage(entry.id)
+    refreshTrash()
+    onAdminActionLog?.({
+      adminName: adminActorName,
+      action: 'Emptied trash item',
+      affectedUser: entry.entityLabel || 'Trash item',
+      details: `Permanently removed ${formatEntityType(entry.entityType)} from trash.`,
+    })
+    showToast?.('success', 'Item removed permanently.')
+  }
+
+  const handleEmptyTrash = () => {
+    if (trashEntries.length === 0) return
+    const confirmed = window.confirm('Empty trash permanently? This cannot be undone.')
+    if (!confirmed) return
+    clearAdminTrashEntriesFromStorage()
+    refreshTrash()
+    onAdminActionLog?.({
+      adminName: adminActorName,
+      action: 'Emptied trash',
+      affectedUser: `${trashEntries.length} item(s)`,
+      details: 'All trash items were permanently removed.',
+    })
+    showToast?.('success', 'Trash emptied.')
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+        <div>
+          <h2 className="text-2xl font-semibold text-text-primary">Trash</h2>
+          <p className="text-sm text-text-secondary mt-1">Recover deleted admin records or remove them permanently.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="text-sm text-text-muted">Items: {trashEntries.length}</div>
+          <button
+            type="button"
+            onClick={handleEmptyTrash}
+            disabled={trashEntries.length === 0}
+            className="h-9 px-3 rounded-md border border-error/50 text-xs font-semibold text-error hover:bg-error/10 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Empty Trash
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light overflow-hidden">
+        {trashEntries.length === 0 ? (
+          <div className="px-4 py-10 text-sm text-text-muted text-center">
+            Trash is empty.
+          </div>
+        ) : (
+          <div className="overflow-auto">
+            <table className="w-full min-w-[980px] border-collapse">
+              <thead className="bg-background border-b border-border-light">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">S/N</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Item</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Type</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Description</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Deleted By</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Deleted At</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-text-muted">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trashEntries.map((entry, index) => (
+                  <tr key={entry.id} className="border-b border-border-light hover:bg-background transition-colors">
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{index + 1}</td>
+                    <td className="px-4 py-3.5 text-sm font-semibold text-text-primary">{entry.entityLabel || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{formatEntityType(entry.entityType)}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{entry.description || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{entry.deletedByName || '--'}</td>
+                    <td className="px-4 py-3.5 text-sm text-text-secondary">{formatTimestamp(entry.deletedAtIso)}</td>
+                    <td className="px-4 py-3.5 text-sm">
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreEntry(entry)}
+                          className="h-8 px-3 rounded-md border border-border text-xs font-medium text-text-primary hover:bg-white"
+                        >
+                          Restore
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeletePermanently(entry)}
+                          className="h-8 px-3 rounded-md border border-error/50 text-xs font-medium text-error hover:bg-error/10"
+                        >
+                          Delete Permanently
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // Communications Center (Message Center)
-function AdminCommunicationsCenter({ showToast }) {
+function AdminCommunicationsCenter({ showToast, currentAdminAccount, onAdminActionLog, setActivePage }) {
   const [activeTab, setActiveTab] = useState('sent')
-  const [notifications, setNotifications] = useState(mockSentNotifications)
-  const [drafts, setDrafts] = useState([
-    { id: 'DRF-001', title: 'Quarterly Report Reminder', message: 'Please submit your Q1 reports by April 15th.', audience: 'All Businesses', status: 'Draft' },
-  ])
+  const [notifications, setNotifications] = useState(() => readAdminSentNotificationsFromStorage())
+  const [drafts, setDrafts] = useState(() => readAdminNotificationDraftsFromStorage())
+  const [scheduledNotifications, setScheduledNotifications] = useState(() => readAdminScheduledNotificationsFromStorage())
+  const [supportSnapshot, setSupportSnapshot] = useState(() => getSupportCenterSnapshot())
+  const supportUnreadRef = useRef(-1)
+
+  useEffect(() => {
+    const refreshNotifications = () => {
+      setNotifications(readAdminSentNotificationsFromStorage())
+      setDrafts(readAdminNotificationDraftsFromStorage())
+      setScheduledNotifications(readAdminScheduledNotificationsFromStorage())
+    }
+    refreshNotifications()
+    const refreshIntervalId = window.setInterval(refreshNotifications, 4000)
+    window.addEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, refreshNotifications)
+    window.addEventListener('storage', refreshNotifications)
+    return () => {
+      window.removeEventListener('storage', refreshNotifications)
+      window.removeEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, refreshNotifications)
+      window.clearInterval(refreshIntervalId)
+    }
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = subscribeSupportCenter((snapshot) => setSupportSnapshot(snapshot))
+    return unsubscribe
+  }, [])
+
+  const supportUnreadCount = useMemo(() => {
+    const tickets = Array.isArray(supportSnapshot?.tickets) ? supportSnapshot.tickets : []
+    return tickets.reduce((total, ticket) => total + Number(ticket?.unreadByAdmin || 0), 0)
+  }, [supportSnapshot])
+
+  useEffect(() => {
+    let delayedSoundTimer = null
+    const nextUnreadCount = Number(supportUnreadCount || 0)
+    if (supportUnreadRef.current < 0) {
+      supportUnreadRef.current = nextUnreadCount
+      const windowActive = typeof document !== 'undefined'
+        ? (document.visibilityState === 'visible' && document.hasFocus())
+        : true
+      if (nextUnreadCount > 0 && (activeTab !== 'support' || !windowActive)) {
+        delayedSoundTimer = window.setTimeout(() => {
+          playSupportNotificationSound()
+        }, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS)
+      }
+      return () => {
+        if (delayedSoundTimer) window.clearTimeout(delayedSoundTimer)
+      }
+    }
+    const previousUnreadCount = supportUnreadRef.current
+    supportUnreadRef.current = nextUnreadCount
+    if (nextUnreadCount <= previousUnreadCount) return
+
+    const windowActive = typeof document !== 'undefined'
+      ? (document.visibilityState === 'visible' && document.hasFocus())
+      : true
+    if (activeTab !== 'support' || !windowActive) {
+      playSupportNotificationSound()
+    }
+
+    return () => {
+      if (delayedSoundTimer) window.clearTimeout(delayedSoundTimer)
+    }
+  }, [supportUnreadCount, activeTab])
+
+  const handleEditDraft = (draftId = '') => {
+    const normalizedDraftId = toTrimmedValue(draftId)
+    if (!normalizedDraftId) return
+    localStorage.setItem(ADMIN_NOTIFICATION_EDIT_DRAFT_STORAGE_KEY, normalizedDraftId)
+    setActivePage?.('admin-notifications')
+  }
+
+  const handleDeleteDraft = (draftId = '') => {
+    const normalizedDraftId = toTrimmedValue(draftId)
+    if (!normalizedDraftId) return
+    const draft = drafts.find((item) => item.id === normalizedDraftId)
+    if (draft) {
+      appendAdminTrashEntryToStorage({
+        entityType: 'notification-draft',
+        entityLabel: draft.title || '(Untitled draft)',
+        description: draft.message || '',
+        deletedByName: toTrimmedValue(currentAdminAccount?.fullName) || 'Admin User',
+        payload: { draft },
+      })
+    }
+    removeAdminNotificationDraftFromStorage(normalizedDraftId)
+    setDrafts(readAdminNotificationDraftsFromStorage())
+    showToast?.('success', 'Draft moved to trash.')
+  }
+
+  const handleCancelScheduled = (scheduledId = '') => {
+    const normalizedId = toTrimmedValue(scheduledId)
+    if (!normalizedId) return
+    const existingEntries = readAdminScheduledNotificationsFromStorage()
+    const target = existingEntries.find((entry) => entry.id === normalizedId)
+    if (!target || target.status === 'Sent' || target.status === 'Cancelled') return
+    const nowIso = new Date().toISOString()
+    const nextEntries = existingEntries.map((entry) => (
+      entry.id === normalizedId
+        ? normalizeScheduledNotification({
+          ...entry,
+          status: 'Cancelled',
+          updatedAtIso: nowIso,
+        })
+        : entry
+    ))
+    persistAdminScheduledNotificationsToStorage(nextEntries)
+    setScheduledNotifications(nextEntries)
+    showToast?.('success', 'Scheduled notification cancelled.')
+  }
+
+  const handleSendScheduledNow = async (scheduledId = '') => {
+    const normalizedId = toTrimmedValue(scheduledId)
+    if (!normalizedId) return
+    const existingEntries = readAdminScheduledNotificationsFromStorage()
+    const target = existingEntries.find((entry) => entry.id === normalizedId)
+    if (!target || target.status === 'Sent' || target.status === 'Cancelled') return
+
+    const nowIso = new Date().toISOString()
+    const nextEntries = existingEntries.map((entry) => (
+      entry.id === normalizedId
+        ? normalizeScheduledNotification({
+          ...entry,
+          status: 'Scheduled',
+          scheduledForIso: nowIso,
+          updatedAtIso: nowIso,
+        })
+        : entry
+    ))
+    persistAdminScheduledNotificationsToStorage(nextEntries)
+    setScheduledNotifications(nextEntries)
+    const result = await runScheduledNotificationProcessor()
+    if ((result?.processedCount || 0) > 0) {
+      showToast?.('success', 'Scheduled notification sent.')
+    } else {
+      showToast?.('error', 'Unable to send scheduled notification now.')
+    }
+  }
+
+  const getScheduledStatusStyle = (status = '') => {
+    if (status === 'Sent') return 'bg-success-bg text-success'
+    if (status === 'Cancelled') return 'bg-background text-text-muted'
+    if (status === 'Failed') return 'bg-error-bg text-error'
+    if (status === 'Sending') return 'bg-warning-bg text-warning'
+    return 'bg-primary-tint text-primary'
+  }
 
   return (
     <div className="animate-fade-in">
@@ -3407,6 +4697,19 @@ function AdminCommunicationsCenter({ showToast }) {
             className={`flex-1 h-12 px-4 text-sm font-medium transition-colors ${activeTab === 'scheduled' ? 'text-primary border-b-2 border-primary' : 'text-text-secondary hover:text-text-primary'}`}
           >
             Scheduled
+          </button>
+          <button
+            onClick={() => setActiveTab('support')}
+            className={`flex-1 h-12 px-4 text-sm font-medium transition-colors ${activeTab === 'support' ? 'text-primary border-b-2 border-primary' : 'text-text-secondary hover:text-text-primary'}`}
+          >
+            <span className="inline-flex items-center gap-2">
+              <span>Support Inbox</span>
+              {supportUnreadCount > 0 && (
+                <span className="inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-full bg-error text-white text-[10px] font-semibold">
+                  {supportUnreadCount > 99 ? '99+' : supportUnreadCount}
+                </span>
+              )}
+            </span>
           </button>
         </div>
 
@@ -3449,13 +4752,35 @@ function AdminCommunicationsCenter({ showToast }) {
                 <div key={draft.id} className="border border-border-light rounded-lg p-4 hover:shadow-card transition-shadow">
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
-                      <h4 className="text-sm font-semibold text-text-primary">{draft.title}</h4>
-                      <p className="text-sm text-text-secondary mt-1">{draft.message}</p>
+                      <h4 className="text-sm font-semibold text-text-primary">{draft.title || '(Untitled draft)'}</h4>
+                      <p className="text-sm text-text-secondary mt-1 whitespace-pre-wrap">{draft.message || 'No message body yet.'}</p>
                       <div className="flex items-center gap-4 mt-3">
                         <div className="flex items-center gap-1">
                           <Users className="w-4 h-4 text-text-muted" />
-                          <span className="text-xs text-text-muted">{draft.audience}</span>
+                          <span className="text-xs text-text-muted">
+                            {draft.mode === 'targeted'
+                              ? `Targeted (${Array.isArray(draft.selectedUsers) ? draft.selectedUsers.length : 0} users)`
+                              : `Bulk (${draft.bulkAudience || 'all-users'})`}
+                          </span>
                         </div>
+                        <div className="flex items-center gap-1">
+                          <Clock className="w-4 h-4 text-text-muted" />
+                          <span className="text-xs text-text-muted">{formatTimestamp(draft.updatedAtIso)}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleEditDraft(draft.id)}
+                          className="text-xs text-primary hover:underline"
+                        >
+                          Edit Draft
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteDraft(draft.id)}
+                          className="text-xs text-error hover:underline"
+                        >
+                          Delete
+                        </button>
                       </div>
                     </div>
                     <span className="inline-flex items-center h-6 px-2.5 rounded text-xs font-medium bg-warning-bg text-warning">
@@ -3474,11 +4799,81 @@ function AdminCommunicationsCenter({ showToast }) {
           )}
 
           {activeTab === 'scheduled' && (
-            <div className="text-center py-8 text-text-muted">
-              <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>No scheduled notifications</p>
-              <p className="text-xs mt-1">This feature is future-ready</p>
+            <div className="space-y-4">
+              {scheduledNotifications.map((item) => (
+                <div key={item.id} className="border border-border-light rounded-lg p-4 hover:shadow-card transition-shadow">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex-1">
+                      <h4 className="text-sm font-semibold text-text-primary">{item.title}</h4>
+                      <p className="text-sm text-text-secondary mt-1">{item.message || '--'}</p>
+                      <div className="flex flex-wrap items-center gap-3 mt-3">
+                        <span className="inline-flex items-center gap-1 text-xs text-text-muted">
+                          <Users className="w-3.5 h-3.5" />
+                          {getNotificationAudienceLabel({
+                            mode: item.mode,
+                            bulkAudience: item.bulkAudience,
+                            selectedUsers: item.selectedUsers,
+                          })}
+                        </span>
+                        <span className="inline-flex items-center gap-1 text-xs text-text-muted">
+                          <Calendar className="w-3.5 h-3.5" />
+                          Scheduled {formatTimestamp(item.scheduledForIso)}
+                        </span>
+                        {item.sentAtIso && (
+                          <span className="inline-flex items-center gap-1 text-xs text-text-muted">
+                            <Clock className="w-3.5 h-3.5" />
+                            Sent {formatTimestamp(item.sentAtIso)}
+                          </span>
+                        )}
+                        {item.emailSuccessCount > 0 && (
+                          <span className="text-xs text-text-muted">
+                            Email: {item.emailSuccessCount} delivered
+                            {item.emailFailureCount > 0 ? `, ${item.emailFailureCount} failed` : ''}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-medium ${getScheduledStatusStyle(item.status)}`}>
+                        {item.status}
+                      </span>
+                      {item.status === 'Scheduled' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleSendScheduledNow(item.id)}
+                            className="h-8 px-3 rounded-md border border-border text-xs font-medium text-text-primary hover:bg-background"
+                          >
+                            Send Now
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleCancelScheduled(item.id)}
+                            className="h-8 px-3 rounded-md border border-error/40 text-xs font-medium text-error hover:bg-error/10"
+                          >
+                            Cancel
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {scheduledNotifications.length === 0 && (
+                <div className="text-center py-8 text-text-muted">
+                  <Calendar className="w-12 h-12 mx-auto mb-3 opacity-50" />
+                  <p>No scheduled notifications</p>
+                </div>
+              )}
             </div>
+          )}
+
+          {activeTab === 'support' && (
+            <AdminSupportInboxPanel
+              showToast={showToast}
+              currentAdminAccount={currentAdminAccount}
+              onAdminActionLog={onAdminActionLog}
+            />
           )}
         </div>
       </div>
@@ -3490,6 +4885,8 @@ function AdminCommunicationsCenter({ showToast }) {
 function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
   const [mode, setMode] = useState('bulk') // 'bulk' or 'targeted'
   const [bulkAudience, setBulkAudience] = useState('all-users')
+  const [deliveryMode, setDeliveryMode] = useState('now')
+  const [scheduledForLocal, setScheduledForLocal] = useState('')
   const [title, setTitle] = useState('')
   const [message, setMessage] = useState('')
   const [link, setLink] = useState('')
@@ -3497,6 +4894,9 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
   const [showPreview, setShowPreview] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [isSending, setIsSending] = useState(false)
+  const [activeDraftId, setActiveDraftId] = useState('')
+  const [draftSavedAtIso, setDraftSavedAtIso] = useState('')
+  const [recipientsDirectory, setRecipientsDirectory] = useState(() => getNotificationRecipientsDirectory())
   
   // Targeted notification filters
   const [searchUser, setSearchUser] = useState('')
@@ -3509,7 +4909,127 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
     registrationStage: '',
   })
 
-  const filteredUsers = mockUsers.filter(user => {
+  useEffect(() => {
+    const refreshRecipients = () => setRecipientsDirectory(getNotificationRecipientsDirectory())
+    refreshRecipients()
+    window.addEventListener('storage', refreshRecipients)
+    window.addEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, refreshRecipients)
+    return () => {
+      window.removeEventListener('storage', refreshRecipients)
+      window.removeEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, refreshRecipients)
+    }
+  }, [])
+
+  useEffect(() => {
+    const draftIdToEdit = toTrimmedValue(localStorage.getItem(ADMIN_NOTIFICATION_EDIT_DRAFT_STORAGE_KEY))
+    if (!draftIdToEdit) return
+    const draft = readAdminNotificationDraftsFromStorage().find((item) => item.id === draftIdToEdit)
+    localStorage.removeItem(ADMIN_NOTIFICATION_EDIT_DRAFT_STORAGE_KEY)
+    if (!draft) return
+    setMode(draft.mode || 'bulk')
+    setBulkAudience(draft.bulkAudience || 'all-users')
+    setDeliveryMode(draft.deliveryMode === 'scheduled' ? 'scheduled' : 'now')
+    setScheduledForLocal(toDateTimeLocalValue(draft.scheduledForIso || ''))
+    setTitle(draft.title || '')
+    setMessage(draft.message || '')
+    setLink(draft.link || '')
+    setPriority(draft.priority || 'normal')
+    setSearchUser(draft.searchUser || '')
+    setSelectedUsers(Array.isArray(draft.selectedUsers) ? draft.selectedUsers : [])
+    setFilters({
+      business: draft.filters?.business || '',
+      country: draft.filters?.country || '',
+      role: draft.filters?.role || '',
+      verificationStatus: draft.filters?.verificationStatus || '',
+      registrationStage: draft.filters?.registrationStage || '',
+    })
+    setActiveDraftId(draft.id)
+    setDraftSavedAtIso(draft.updatedAtIso || '')
+    showToast?.('success', 'Draft loaded for editing.')
+  }, [showToast])
+
+  const scheduledForIso = Number.isFinite(Date.parse(scheduledForLocal || ''))
+    ? new Date(scheduledForLocal).toISOString()
+    : ''
+  const isScheduledForFuture = deliveryMode !== 'scheduled'
+    || (scheduledForIso && (Date.parse(scheduledForIso) > Date.now()))
+  const hasAnyDraftContent = Boolean(
+    scheduledForLocal
+    || title.trim()
+    || message.trim()
+    || link.trim()
+    || searchUser.trim()
+    || selectedUsers.length > 0
+    || Object.values(filters).some((value) => toTrimmedValue(value)),
+  )
+  const isMessageReadyToSend = Boolean(
+    title.trim()
+    && message.trim()
+    && (mode === 'bulk' || selectedUsers.length > 0)
+    && isScheduledForFuture,
+  )
+
+  const buildDraftPayload = (draftId = activeDraftId || createNotificationDraftId()) => ({
+    id: draftId,
+    mode,
+    bulkAudience,
+    deliveryMode,
+    scheduledForIso: deliveryMode === 'scheduled' ? scheduledForIso : '',
+    title,
+    message,
+    link,
+    priority,
+    searchUser,
+    selectedUsers,
+    filters,
+    createdAtIso: draftSavedAtIso || new Date().toISOString(),
+    updatedAtIso: new Date().toISOString(),
+  })
+
+  const saveDraft = ({ announce = false } = {}) => {
+    if (!hasAnyDraftContent) {
+      if (announce) showToast?.('error', 'Add content before saving a draft.')
+      return null
+    }
+    const draft = upsertAdminNotificationDraftInStorage(buildDraftPayload())
+    setActiveDraftId(draft.id)
+    setDraftSavedAtIso(draft.updatedAtIso)
+    if (announce) showToast?.('success', 'Draft saved.')
+    return draft
+  }
+
+  useEffect(() => {
+    if (!hasAnyDraftContent) {
+      if (activeDraftId) {
+        removeAdminNotificationDraftFromStorage(activeDraftId)
+        setActiveDraftId('')
+        setDraftSavedAtIso('')
+      }
+      return
+    }
+    if (isMessageReadyToSend) return
+    const autosaveId = window.setTimeout(() => {
+      saveDraft({ announce: false })
+    }, 450)
+    return () => window.clearTimeout(autosaveId)
+  }, [
+    hasAnyDraftContent,
+    isMessageReadyToSend,
+    activeDraftId,
+    mode,
+    bulkAudience,
+    deliveryMode,
+    scheduledForLocal,
+    title,
+    message,
+    link,
+    priority,
+    searchUser,
+    selectedUsers,
+    filters,
+  ])
+
+  const filteredUsers = recipientsDirectory.filter(user => {
     const matchesSearch = searchUser === '' || 
       user.fullName.toLowerCase().includes(searchUser.toLowerCase()) ||
       user.email.toLowerCase().includes(searchUser.toLowerCase()) ||
@@ -3534,6 +5054,21 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
 
   const handleSend = () => {
     if (isSending) return
+    if (deliveryMode === 'scheduled' && !scheduledForIso) {
+      saveDraft({ announce: true })
+      showToast('error', 'Select a valid schedule date and time.')
+      return
+    }
+    if (deliveryMode === 'scheduled' && !isScheduledForFuture) {
+      saveDraft({ announce: true })
+      showToast('error', 'Scheduled time must be in the future.')
+      return
+    }
+    if (!isMessageReadyToSend) {
+      saveDraft({ announce: true })
+      showToast('error', 'Complete required fields before sending. Saved to drafts.')
+      return
+    }
     setShowConfirm(true)
   }
 
@@ -3542,18 +5077,89 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
     setIsSending(true)
     const executeSend = async () => {
       await waitForNetworkAwareDelay('search')
-      showToast('success', mode === 'bulk'
-        ? `Notification sent successfully to ${getAudienceCount()} users.`
-        : `Notification sent successfully to ${selectedUsers.length} users.`)
+      if (deliveryMode === 'scheduled') {
+        const scheduledAtIso = Number.isFinite(Date.parse(scheduledForLocal || ''))
+          ? new Date(scheduledForLocal).toISOString()
+          : ''
+        if (!scheduledAtIso || Date.parse(scheduledAtIso) <= Date.now()) {
+          showToast('error', 'Scheduled time must be in the future.')
+          return
+        }
+
+        const recipients = resolveNotificationRecipients({
+          mode,
+          bulkAudience,
+          selectedUsers,
+        })
+        if (recipients.length === 0) {
+          showToast('error', 'No recipients matched this notification.')
+          return
+        }
+
+        upsertAdminScheduledNotificationInStorage({
+          id: createScheduledNotificationId(),
+          mode,
+          bulkAudience,
+          title,
+          message,
+          link,
+          priority,
+          selectedUsers,
+          status: 'Scheduled',
+          createdAtIso: new Date().toISOString(),
+          updatedAtIso: new Date().toISOString(),
+          scheduledForIso: scheduledAtIso,
+          recipientCount: recipients.length,
+          deliveryOrigin: 'scheduled',
+        })
+        showToast('success', `Notification scheduled for ${formatTimestamp(scheduledAtIso)}.`)
+      } else {
+        const sendResult = await dispatchAdminNotification({
+          mode,
+          bulkAudience,
+          selectedUsers,
+          title,
+          message,
+          link,
+          priority,
+          deliveryOrigin: 'manual',
+        })
+        if (!sendResult.ok) {
+          showToast('error', 'No recipients matched this notification.')
+          return
+        }
+        showToast('success', mode === 'bulk'
+          ? `Notification sent successfully to ${sendResult.recipientCount} users.`
+          : `Notification sent successfully to ${sendResult.recipientCount} users.`)
+      }
+
+      if (activeDraftId) {
+        removeAdminNotificationDraftFromStorage(activeDraftId)
+      }
       setShowConfirm(false)
+      setActiveDraftId('')
+      setDraftSavedAtIso('')
+      setDeliveryMode('now')
+      setScheduledForLocal('')
       setTitle('')
       setMessage('')
       setLink('')
+      setSearchUser('')
+      setFilters({
+        business: '',
+        country: '',
+        role: '',
+        verificationStatus: '',
+        registrationStage: '',
+      })
       setSelectedUsers([])
     }
     try {
       if (typeof runWithSlowRuntimeWatch === 'function') {
-        await runWithSlowRuntimeWatch(executeSend, 'Sending notification...')
+        await runWithSlowRuntimeWatch(
+          executeSend,
+          deliveryMode === 'scheduled' ? 'Scheduling notification...' : 'Sending notification...',
+        )
       } else {
         await executeSend()
       }
@@ -3563,14 +5169,26 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
   }
 
   const getAudienceCount = () => {
-    switch (bulkAudience) {
-      case 'all-users': return '324'
-      case 'all-businesses': return '42'
-      case 'all-accountants': return '18'
-      case 'pending-verification': return '8'
-      default: return '0'
-    }
+    return resolveNotificationRecipients({
+      mode: 'bulk',
+      bulkAudience,
+      selectedUsers: [],
+    }).length
   }
+
+  const bulkAudienceOptions = [
+    { id: 'all-users', label: 'All Users', icon: Users },
+    { id: 'all-businesses', label: 'All Businesses', icon: Building },
+    { id: 'all-accountants', label: 'All Accountants', icon: UsersRound },
+    { id: 'pending-verification', label: 'Pending Verification Users', icon: AlertTriangle },
+  ].map((option) => ({
+    ...option,
+    count: resolveNotificationRecipients({
+      mode: 'bulk',
+      bulkAudience: option.id,
+      selectedUsers: [],
+    }).length,
+  }))
 
   const getPriorityStyle = (p) => {
     switch (p) {
@@ -3623,12 +5241,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
             <div>
               <label className="block text-sm font-medium text-text-primary mb-2">Select Audience</label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {[
-                  { id: 'all-users', label: 'All Users', icon: Users, count: 324 },
-                  { id: 'all-businesses', label: 'All Businesses', icon: Building, count: 42 },
-                  { id: 'all-accountants', label: 'All Accountants', icon: UsersRound, count: 18 },
-                  { id: 'pending-verification', label: 'Pending Verification Users', icon: AlertTriangle, count: 8 },
-                ].map(option => (
+                {bulkAudienceOptions.map(option => (
                   <button
                     key={option.id}
                     onClick={() => setBulkAudience(option.id)}
@@ -3679,7 +5292,45 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
               />
             </div>
 
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">Delivery</label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setDeliveryMode('now')}
+                  className={`h-10 px-3 rounded-md border-2 text-sm font-medium transition-colors ${deliveryMode === 'now' ? 'border-primary text-primary bg-primary-tint' : 'border-border text-text-secondary hover:border-border-light'}`}
+                >
+                  Send Now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeliveryMode('scheduled')}
+                  className={`h-10 px-3 rounded-md border-2 text-sm font-medium transition-colors ${deliveryMode === 'scheduled' ? 'border-primary text-primary bg-primary-tint' : 'border-border text-text-secondary hover:border-border-light'}`}
+                >
+                  Schedule
+                </button>
+              </div>
+              {deliveryMode === 'scheduled' && (
+                <div className="mt-3">
+                  <input
+                    type="datetime-local"
+                    value={scheduledForLocal}
+                    onChange={(event) => setScheduledForLocal(event.target.value)}
+                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                  />
+                  <p className="text-xs text-text-muted mt-1">Scheduled messages send automatically and trigger brief client notifications.</p>
+                </div>
+              )}
+            </div>
+
             <div className="flex items-center gap-3 pt-4 border-t border-border-light">
+              <button
+                type="button"
+                onClick={() => saveDraft({ announce: true })}
+                className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background"
+              >
+                Save Draft
+              </button>
               <button
                 onClick={() => setShowPreview(true)}
                 disabled={!title || !message}
@@ -3689,12 +5340,17 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
               </button>
               <button
                 onClick={handleSend}
-                disabled={!title || !message || isSending}
+                disabled={!isMessageReadyToSend || isSending}
                 className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
               >
                 <Send className="w-4 h-4" />
-                Send Notification
+                {deliveryMode === 'scheduled' ? 'Schedule Notification' : 'Send Notification'}
               </button>
+              {draftSavedAtIso && (
+                <span className="text-xs text-text-muted ml-auto">
+                  Draft saved {formatTimestamp(draftSavedAtIso)}
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -3718,7 +5374,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                   className="w-full h-9 px-2 border border-border rounded text-sm focus:outline-none focus:border-primary"
                 >
                   <option value="">All</option>
-                  {[...new Set(mockUsers.map(u => u.businessName))].map(b => (
+                  {[...new Set(recipientsDirectory.map(u => u.businessName))].filter(Boolean).map(b => (
                     <option key={b} value={b}>{b}</option>
                   ))}
                 </select>
@@ -3731,7 +5387,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                   className="w-full h-9 px-2 border border-border rounded text-sm focus:outline-none focus:border-primary"
                 >
                   <option value="">All</option>
-                  {[...new Set(mockUsers.map(u => u.country))].map(c => (
+                  {[...new Set(recipientsDirectory.map(u => u.country))].filter(Boolean).map(c => (
                     <option key={c} value={c}>{c}</option>
                   ))}
                 </select>
@@ -3744,7 +5400,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                   className="w-full h-9 px-2 border border-border rounded text-sm focus:outline-none focus:border-primary"
                 >
                   <option value="">All</option>
-                  {[...new Set(mockUsers.map(u => u.role))].map(r => (
+                  {[...new Set(recipientsDirectory.map(u => u.role))].filter(Boolean).map(r => (
                     <option key={r} value={r}>{r}</option>
                   ))}
                 </select>
@@ -3897,7 +5553,45 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 </div>
               </div>
 
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-2">Delivery</label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryMode('now')}
+                    className={`h-10 px-3 rounded-md border-2 text-sm font-medium transition-colors ${deliveryMode === 'now' ? 'border-primary text-primary bg-primary-tint' : 'border-border text-text-secondary hover:border-border-light'}`}
+                  >
+                    Send Now
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeliveryMode('scheduled')}
+                    className={`h-10 px-3 rounded-md border-2 text-sm font-medium transition-colors ${deliveryMode === 'scheduled' ? 'border-primary text-primary bg-primary-tint' : 'border-border text-text-secondary hover:border-border-light'}`}
+                  >
+                    Schedule
+                  </button>
+                </div>
+                {deliveryMode === 'scheduled' && (
+                  <div className="mt-3">
+                    <input
+                      type="datetime-local"
+                      value={scheduledForLocal}
+                      onChange={(event) => setScheduledForLocal(event.target.value)}
+                      className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                    />
+                    <p className="text-xs text-text-muted mt-1">Scheduled messages send automatically and trigger brief client notifications.</p>
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center gap-3 pt-4 border-t border-border-light">
+                <button
+                  type="button"
+                  onClick={() => saveDraft({ announce: true })}
+                  className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background"
+                >
+                  Save Draft
+                </button>
                 <button
                   onClick={() => setShowPreview(true)}
                   disabled={!title || !message || selectedUsers.length === 0}
@@ -3905,14 +5599,21 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 >
                   Preview
                 </button>
-                <button
-                  onClick={handleSend}
-                  disabled={!title || !message || selectedUsers.length === 0 || isSending}
-                  className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-                >
-                  <Send className="w-4 h-4" />
-                  Send to {selectedUsers.length} Users
-                </button>
+              <button
+                onClick={handleSend}
+                disabled={!isMessageReadyToSend || isSending}
+                className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+              >
+                <Send className="w-4 h-4" />
+                {deliveryMode === 'scheduled'
+                  ? `Schedule for ${selectedUsers.length} Users`
+                  : `Send to ${selectedUsers.length} Users`}
+              </button>
+                {draftSavedAtIso && (
+                  <span className="text-xs text-text-muted ml-auto">
+                    Draft saved {formatTimestamp(draftSavedAtIso)}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -3949,7 +5650,8 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 )}
               </div>
               <p className="text-xs text-text-muted mt-3">
-                This notification will be sent to {mode === 'bulk' ? getAudienceCount() : selectedUsers.length} recipient(s).
+                This notification will be sent to {mode === 'bulk' ? getAudienceCount() : selectedUsers.length} recipient(s)
+                {deliveryMode === 'scheduled' && scheduledForIso ? ` on ${formatTimestamp(scheduledForIso)}` : ' immediately'}.
               </p>
             </div>
             <div className="p-4 border-t border-border-light flex justify-end">
@@ -3976,9 +5678,15 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 <AlertCircle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm text-text-primary">
-                    Are you sure you want to send this notification to {mode === 'bulk' ? `${getAudienceCount()} users` : `${selectedUsers.length} users`}?
+                    {deliveryMode === 'scheduled'
+                      ? `Schedule this notification for ${mode === 'bulk' ? `${getAudienceCount()} users` : `${selectedUsers.length} users`}?`
+                      : `Are you sure you want to send this notification to ${mode === 'bulk' ? `${getAudienceCount()} users` : `${selectedUsers.length} users`}?`}
                   </p>
-                  <p className="text-xs text-text-muted mt-2">This action cannot be undone.</p>
+                  <p className="text-xs text-text-muted mt-2">
+                    {deliveryMode === 'scheduled' && scheduledForIso
+                      ? `Scheduled time: ${formatTimestamp(scheduledForIso)}.`
+                      : 'This action cannot be undone.'}
+                  </p>
                 </div>
               </div>
             </div>
@@ -3998,9 +5706,9 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 {isSending ? (
                   <>
                     <DotLottiePreloader size={18} />
-                    <span>Sending...</span>
+                    <span>{deliveryMode === 'scheduled' ? 'Scheduling...' : 'Sending...'}</span>
                   </>
-                ) : 'Confirm & Send'}
+                ) : (deliveryMode === 'scheduled' ? 'Confirm & Schedule' : 'Confirm & Send')}
               </button>
             </div>
           </div>
@@ -4115,6 +5823,8 @@ export {
   AdminClientDocumentsPage,
   AdminClientUploadHistoryPage,
   AdminDocumentReviewCenter,
+  AdminSupportLeadsPage,
+  AdminTrashPage,
   AdminCommunicationsCenter,
   AdminSendNotificationPage,
   AdminActivityLogPage,

@@ -10,6 +10,7 @@ import {
   Trash2,
   KeyRound,
   Info,
+  LogOut,
 } from 'lucide-react'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
 import {
@@ -30,6 +31,13 @@ const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
+const CLIENT_SESSION_CONTROL_STORAGE_KEY = 'kiaminaClientSessionControl'
+const adminEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const maskPhoneNumber = (value = '') => {
+  const digits = String(value || '').replace(/\D/g, '')
+  if (digits.length <= 4) return value || 'your registered phone number'
+  return `*** *** ${digits.slice(-4)}`
+}
 
 const passwordStrengthRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
 const waitForNetworkAwareDelay = () => new Promise((resolve) => {
@@ -67,6 +75,11 @@ const readInvites = () => readArrayFromStorage(ADMIN_INVITES_STORAGE_KEY).map(no
 const writeInvites = (invites) => writeArrayToStorage(ADMIN_INVITES_STORAGE_KEY, invites.map(normalizeAdminInvite))
 
 const getAdminAccounts = (accounts) => accounts.filter((account) => isAdminAccount(account))
+const getClientAccounts = (accounts) => (
+  accounts
+    .filter((account) => normalizeRoleWithLegacyFallback(account.role, account.email || '') === 'client')
+    .sort((left, right) => String(left.fullName || left.email || '').localeCompare(String(right.fullName || right.email || '')))
+)
 
 const createInviteToken = () => (
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -87,6 +100,28 @@ const formatDateTime = (value) => {
 
 const getProfileStorageKey = (email = '') => `kiaminaAdminProfile:${email.trim().toLowerCase()}`
 const getSecurityStorageKey = (email = '') => `kiaminaAdminSecurity:${email.trim().toLowerCase()}`
+const getClientSessionControl = () => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CLIENT_SESSION_CONTROL_STORAGE_KEY) || '{}')
+    const byEmail = parsed?.byEmail && typeof parsed.byEmail === 'object' ? parsed.byEmail : {}
+    return {
+      globalLogoutAtIso: parsed?.globalLogoutAtIso || '',
+      byEmail,
+      updatedAtIso: parsed?.updatedAtIso || '',
+      updatedBy: parsed?.updatedBy || '',
+    }
+  } catch {
+    return {
+      globalLogoutAtIso: '',
+      byEmail: {},
+      updatedAtIso: '',
+      updatedBy: '',
+    }
+  }
+}
+const writeClientSessionControl = (value) => {
+  localStorage.setItem(CLIENT_SESSION_CONTROL_STORAGE_KEY, JSON.stringify(value))
+}
 
 const appendActivityLog = (entry) => {
   const existingLogs = readArrayFromStorage(ADMIN_ACTIVITY_STORAGE_KEY)
@@ -129,7 +164,12 @@ const getAdminSettings = () => {
   }
 }
 
-function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeWatch }) {
+function AdminSettingsPage({
+  showToast,
+  currentAdminAccount,
+  runWithSlowRuntimeWatch,
+  onCurrentAdminEmailUpdated,
+}) {
   const currentAdmin = useMemo(
     () => normalizeAdminAccount(currentAdminAccount || {}),
     [currentAdminAccount],
@@ -138,6 +178,8 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
   const isSeniorAdmin = currentAdminLevel === ADMIN_LEVELS.SENIOR
 
   const [adminAccounts, setAdminAccounts] = useState(() => getAdminAccounts(readAccounts()))
+  const [clientAccounts, setClientAccounts] = useState(() => getClientAccounts(readAccounts()))
+  const [selectedClientEmails, setSelectedClientEmails] = useState([])
   const [adminInvites, setAdminInvites] = useState(readInvites)
   const [systemSettings, setSystemSettings] = useState(getAdminSettings)
   const [lockedFieldNotice, setLockedFieldNotice] = useState('')
@@ -159,6 +201,13 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
     newPassword: '',
     confirmPassword: '',
   })
+
+  const [emailChangeForm, setEmailChangeForm] = useState({
+    nextEmail: '',
+    otpCode: '',
+  })
+  const [emailChangeChallenge, setEmailChangeChallenge] = useState(null)
+  const [emailChangeOtpPreview, setEmailChangeOtpPreview] = useState('')
 
   const [securityForm, setSecurityForm] = useState({
     sessionTimeout: '30',
@@ -182,9 +231,20 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
   })
 
   const refreshAdminData = () => {
-    setAdminAccounts(getAdminAccounts(readAccounts()))
+    const accounts = readAccounts()
+    setAdminAccounts(getAdminAccounts(accounts))
+    setClientAccounts(getClientAccounts(accounts))
     setAdminInvites(readInvites())
   }
+
+  useEffect(() => {
+    const validClientEmailSet = new Set(
+      clientAccounts
+        .map((account) => account.email?.trim()?.toLowerCase())
+        .filter(Boolean),
+    )
+    setSelectedClientEmails((previous) => previous.filter((email) => validClientEmailSet.has(email)))
+  }, [clientAccounts])
 
   useEffect(() => {
     const normalizedEmail = currentAdmin.email?.trim()?.toLowerCase() || ''
@@ -241,6 +301,12 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
       })
     }
   }, [currentAdmin.email, currentAdmin.fullName, currentAdmin.roleInCompany, currentAdmin.department, currentAdmin.phoneNumber])
+
+  useEffect(() => {
+    setEmailChangeForm({ nextEmail: '', otpCode: '' })
+    setEmailChangeChallenge(null)
+    setEmailChangeOtpPreview('')
+  }, [currentAdmin.email])
 
   const operationalPermissionOptions = ADMIN_PERMISSION_DEFINITIONS
   const currentAdminPermissions = getEffectiveAdminPermissions(currentAdmin)
@@ -371,6 +437,170 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
     notify('success', 'Password updated.')
   }
 
+  const requestEmailChangeOtp = async () => {
+    if (!isSeniorAdmin) {
+      setFormError('Only Senior Admin can change login email.')
+      return
+    }
+
+    const currentEmail = currentAdmin.email?.trim()?.toLowerCase() || ''
+    const nextEmail = emailChangeForm.nextEmail.trim().toLowerCase()
+    const smsPhone = (profileForm.phoneNumber || currentAdmin.phoneNumber || '').trim()
+
+    if (!currentEmail) {
+      setFormError('Unable to locate your current login email.')
+      return
+    }
+    if (!nextEmail || !adminEmailRegex.test(nextEmail)) {
+      setFormError('Enter a valid new login email.')
+      return
+    }
+    if (nextEmail === currentEmail) {
+      setFormError('New login email must be different from current email.')
+      return
+    }
+    if (!smsPhone) {
+      setFormError('Add a phone number in Profile Settings before requesting SMS OTP.')
+      return
+    }
+
+    const allAccounts = readAccounts()
+    const alreadyExists = allAccounts.some(
+      (account) => account.email?.trim()?.toLowerCase() === nextEmail,
+    )
+    if (alreadyExists) {
+      setFormError('An account with that email already exists.')
+      return
+    }
+
+    const otpCode = `${Math.floor(100000 + Math.random() * 900000)}`
+    const expiresAt = Date.now() + (5 * 60 * 1000)
+    const nextChallenge = {
+      requestId: Date.now(),
+      currentEmail,
+      nextEmail,
+      phoneNumber: smsPhone,
+      otpCode,
+      expiresAt,
+    }
+
+    setFormError('')
+    setEmailChangeForm((prev) => ({ ...prev, otpCode: '' }))
+    setEmailChangeChallenge(nextChallenge)
+    setEmailChangeOtpPreview(import.meta.env.DEV ? otpCode : '')
+
+    try {
+      await fetch('/api/auth/send-sms-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phoneNumber: smsPhone,
+          otp: otpCode,
+          purpose: 'admin-email-change',
+          email: nextEmail,
+        }),
+      })
+    } catch {
+      // Fallback to local demo OTP flow when SMS backend is unavailable.
+    }
+
+    notify('success', `SMS OTP sent to ${maskPhoneNumber(smsPhone)}.`)
+  }
+
+  const verifyEmailChangeOtpAndUpdate = () => {
+    if (!isSeniorAdmin) {
+      setFormError('Only Senior Admin can change login email.')
+      return
+    }
+    if (!emailChangeChallenge?.nextEmail || !emailChangeChallenge?.currentEmail) {
+      setFormError('Request an SMS OTP before verification.')
+      return
+    }
+
+    const code = emailChangeForm.otpCode.trim()
+    if (!/^\d{6}$/.test(code)) {
+      setFormError('Enter the 6-digit OTP sent to your phone.')
+      return
+    }
+    if (Date.now() > Number(emailChangeChallenge.expiresAt || 0)) {
+      setEmailChangeChallenge(null)
+      setEmailChangeOtpPreview('')
+      setEmailChangeForm((prev) => ({ ...prev, otpCode: '' }))
+      setFormError('OTP expired. Request a new SMS OTP.')
+      return
+    }
+    if (code !== emailChangeChallenge.otpCode) {
+      setFormError('Incorrect OTP code.')
+      return
+    }
+
+    const previousEmail = emailChangeChallenge.currentEmail
+    const nextEmail = emailChangeChallenge.nextEmail
+    const allAccounts = readAccounts()
+    const accountIndex = allAccounts.findIndex(
+      (account) => account.email?.trim()?.toLowerCase() === previousEmail,
+    )
+    if (accountIndex === -1) {
+      setFormError('Unable to locate your admin account.')
+      return
+    }
+    const conflictingIndex = allAccounts.findIndex(
+      (account) => account.email?.trim()?.toLowerCase() === nextEmail,
+    )
+    if (conflictingIndex !== -1 && conflictingIndex !== accountIndex) {
+      setFormError('An account with that email already exists.')
+      return
+    }
+
+    const nextAccounts = [...allAccounts]
+    nextAccounts[accountIndex] = normalizeAdminAccount({
+      ...nextAccounts[accountIndex],
+      email: nextEmail,
+    })
+    writeAccounts(nextAccounts)
+
+    const previousProfileKey = getProfileStorageKey(previousEmail)
+    const nextProfileKey = getProfileStorageKey(nextEmail)
+    const profileValue = localStorage.getItem(previousProfileKey)
+    if (profileValue) {
+      localStorage.setItem(nextProfileKey, profileValue)
+      if (nextProfileKey !== previousProfileKey) {
+        localStorage.removeItem(previousProfileKey)
+      }
+    }
+
+    const previousSecurityKey = getSecurityStorageKey(previousEmail)
+    const nextSecurityKey = getSecurityStorageKey(nextEmail)
+    const securityValue = localStorage.getItem(previousSecurityKey)
+    if (securityValue) {
+      localStorage.setItem(nextSecurityKey, securityValue)
+      if (nextSecurityKey !== previousSecurityKey) {
+        localStorage.removeItem(previousSecurityKey)
+      }
+    }
+
+    appendActivityLog({
+      adminName: currentAdmin.fullName || 'Admin User',
+      action: 'Changed admin login email',
+      details: `${previousEmail} -> ${nextEmail}`,
+    })
+
+    if (typeof onCurrentAdminEmailUpdated === 'function') {
+      onCurrentAdminEmailUpdated({
+        previousEmail,
+        nextEmail,
+      })
+    }
+
+    setProfileForm((prev) => ({ ...prev, email: nextEmail }))
+    setEmailChangeForm({ nextEmail: '', otpCode: '' })
+    setEmailChangeChallenge(null)
+    setEmailChangeOtpPreview('')
+    setFormError('')
+    refreshAdminData()
+    notify('success', 'Login email updated successfully.')
+  }
+
   const queueCreateAdmin = () => {
     if (!createAdminForm.fullName.trim() || !createAdminForm.email.trim() || !createAdminForm.password) {
       setFormError('Complete all create-admin fields.')
@@ -422,6 +652,55 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
         email: account.email,
         fullName: account.fullName,
       },
+    })
+  }
+
+  const toggleClientSelection = (email = '') => {
+    const normalizedEmail = email.trim().toLowerCase()
+    if (!normalizedEmail) return
+    setSelectedClientEmails((previous) => (
+      previous.includes(normalizedEmail)
+        ? previous.filter((value) => value !== normalizedEmail)
+        : [...previous, normalizedEmail]
+    ))
+  }
+
+  const toggleSelectAllClients = () => {
+    const normalizedClientEmails = clientAccounts
+      .map((account) => account.email?.trim()?.toLowerCase())
+      .filter(Boolean)
+    if (normalizedClientEmails.length === 0) {
+      setSelectedClientEmails([])
+      return
+    }
+    setSelectedClientEmails((previous) => (
+      previous.length === normalizedClientEmails.length ? [] : normalizedClientEmails
+    ))
+  }
+
+  const queueLogoutSelectedClients = () => {
+    const emails = [...new Set(selectedClientEmails.map((email) => email.trim().toLowerCase()).filter(Boolean))]
+    if (emails.length === 0) {
+      setFormError('Select at least one client user to log out.')
+      return
+    }
+    setFormError('')
+    setConfirmAction({
+      type: 'logout-selected-clients',
+      payload: { emails },
+    })
+  }
+
+  const queueLogoutAllClients = () => {
+    const totalClients = clientAccounts.length
+    if (totalClients === 0) {
+      setFormError('No client users found.')
+      return
+    }
+    setFormError('')
+    setConfirmAction({
+      type: 'logout-all-clients',
+      payload: { totalClients },
     })
   }
 
@@ -589,6 +868,53 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
           refreshAdminData()
           notify('success', 'Admin account deleted.')
         }
+
+        if (confirmAction.type === 'logout-all-clients' || confirmAction.type === 'logout-selected-clients') {
+          const nowIso = new Date().toISOString()
+          const controlState = getClientSessionControl()
+          const nextByEmail = {
+            ...(controlState.byEmail || {}),
+          }
+
+          if (confirmAction.type === 'logout-selected-clients') {
+            const targetEmails = Array.isArray(confirmAction.payload?.emails)
+              ? confirmAction.payload.emails.map((email) => String(email || '').trim().toLowerCase()).filter(Boolean)
+              : []
+            targetEmails.forEach((email) => {
+              nextByEmail[email] = nowIso
+            })
+            writeClientSessionControl({
+              ...controlState,
+              byEmail: nextByEmail,
+              updatedAtIso: nowIso,
+              updatedBy: currentAdmin.email || '',
+            })
+            appendActivityLog({
+              adminName: currentAdmin.fullName || 'Admin User',
+              action: 'Forced logout for selected client users',
+              details: `${targetEmails.length} user(s)`,
+            })
+            notify('success', `${targetEmails.length} selected user(s) have been logged out.`)
+            setSelectedClientEmails([])
+          }
+
+          if (confirmAction.type === 'logout-all-clients') {
+            writeClientSessionControl({
+              ...controlState,
+              byEmail: nextByEmail,
+              globalLogoutAtIso: nowIso,
+              updatedAtIso: nowIso,
+              updatedBy: currentAdmin.email || '',
+            })
+            appendActivityLog({
+              adminName: currentAdmin.fullName || 'Admin User',
+              action: 'Forced logout for all client users',
+              details: `${confirmAction.payload?.totalClients || clientAccounts.length} user(s)`,
+            })
+            notify('success', 'All client users have been logged out.')
+            setSelectedClientEmails([])
+          }
+        }
       }
 
       if (typeof runWithSlowRuntimeWatch === 'function') {
@@ -649,11 +975,15 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
                 <label className="block text-sm font-medium text-text-primary">Email</label>
                 <button
                   type="button"
-                  onClick={() => setLockedFieldNotice('This field cannot be modified.')}
+                  onClick={() => setLockedFieldNotice(
+                    isSeniorAdmin
+                      ? 'Use "Change Login Email (SMS OTP)" in Security Settings to update this field.'
+                      : 'Only Senior Admin can change login email.',
+                  )}
                   className="text-xs text-primary hover:text-primary-light"
-                  title="This field cannot be modified."
+                  title={isSeniorAdmin ? 'Use SMS OTP verification to update login email.' : 'This field cannot be modified.'}
                 >
-                  Why locked?
+                  {isSeniorAdmin ? 'How to change?' : 'Why locked?'}
                 </button>
               </div>
               <input
@@ -791,42 +1121,157 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
                   Logout All Devices
                 </button>
               </div>
+              <div className="mt-4 rounded-lg border border-border-light p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-text-primary">Client Session Control</p>
+                  <span className="text-xs text-text-muted">{selectedClientEmails.length} selected</span>
+                </div>
+                <p className="text-xs text-text-muted mt-1">
+                  Force logout selected users or all users. They will be redirected to login.
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={toggleSelectAllClients}
+                    className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background transition-colors"
+                  >
+                    {selectedClientEmails.length === clientAccounts.length && clientAccounts.length > 0 ? 'Clear Selection' : 'Select All'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={queueLogoutSelectedClients}
+                    disabled={selectedClientEmails.length === 0}
+                    className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Logout Selected
+                  </button>
+                  <button
+                    type="button"
+                    onClick={queueLogoutAllClients}
+                    disabled={clientAccounts.length === 0}
+                    className="h-8 px-2.5 border border-error/50 rounded text-xs font-medium text-error hover:bg-error-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Logout All Users
+                  </button>
+                </div>
+                <div className="mt-3 max-h-40 overflow-y-auto rounded border border-border-light">
+                  {clientAccounts.length === 0 ? (
+                    <div className="px-3 py-4 text-xs text-text-muted text-center">No client users found.</div>
+                  ) : (
+                    clientAccounts.map((account) => {
+                      const normalizedEmail = account.email?.trim()?.toLowerCase() || ''
+                      const isChecked = selectedClientEmails.includes(normalizedEmail)
+                      return (
+                        <label key={account.email} className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-light last:border-b-0 text-xs">
+                          <span className="inline-flex items-center gap-2 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleClientSelection(normalizedEmail)}
+                              className="w-4 h-4 accent-primary"
+                            />
+                            <span className="text-text-primary truncate">{account.fullName || account.email}</span>
+                          </span>
+                          <span className="text-text-muted truncate">{account.email}</span>
+                        </label>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
             </div>
 
-            <div className="rounded-lg border border-border-light p-4">
-              <h4 className="text-sm font-semibold text-text-primary inline-flex items-center gap-2">
-                <KeyRound className="w-4 h-4 text-primary" />
-                Change Password
-              </h4>
-              <div className="space-y-3 mt-4">
-                <input
-                  type="password"
-                  placeholder="Current Password"
-                  value={passwordForm.currentPassword}
-                  onChange={(event) => setPasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-                <input
-                  type="password"
-                  placeholder="New Password"
-                  value={passwordForm.newPassword}
-                  onChange={(event) => setPasswordForm((prev) => ({ ...prev, newPassword: event.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-                <input
-                  type="password"
-                  placeholder="Confirm New Password"
-                  value={passwordForm.confirmPassword}
-                  onChange={(event) => setPasswordForm((prev) => ({ ...prev, confirmPassword: event.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-                <button
-                  type="button"
-                  onClick={updatePassword}
-                  className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
-                >
-                  Update Password
-                </button>
+            <div className="space-y-4">
+              <div className="rounded-lg border border-border-light p-4">
+                <h4 className="text-sm font-semibold text-text-primary inline-flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-primary" />
+                  Change Password
+                </h4>
+                <div className="space-y-3 mt-4">
+                  <input
+                    type="password"
+                    placeholder="Current Password"
+                    value={passwordForm.currentPassword}
+                    onChange={(event) => setPasswordForm((prev) => ({ ...prev, currentPassword: event.target.value }))}
+                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                  />
+                  <input
+                    type="password"
+                    placeholder="New Password"
+                    value={passwordForm.newPassword}
+                    onChange={(event) => setPasswordForm((prev) => ({ ...prev, newPassword: event.target.value }))}
+                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                  />
+                  <input
+                    type="password"
+                    placeholder="Confirm New Password"
+                    value={passwordForm.confirmPassword}
+                    onChange={(event) => setPasswordForm((prev) => ({ ...prev, confirmPassword: event.target.value }))}
+                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                  />
+                  <button
+                    type="button"
+                    onClick={updatePassword}
+                    className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
+                  >
+                    Update Password
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border-light p-4">
+                <h4 className="text-sm font-semibold text-text-primary">Change Login Email (SMS OTP)</h4>
+                <p className="text-xs text-text-muted mt-1">
+                  Available to Senior Admin only. OTP is sent to your profile phone number.
+                </p>
+                {!isSeniorAdmin ? (
+                  <p className="text-xs text-text-muted mt-3">Only Senior Admin can update login email.</p>
+                ) : (
+                  <div className="space-y-3 mt-4">
+                    <input
+                      type="email"
+                      placeholder="New Login Email"
+                      value={emailChangeForm.nextEmail}
+                      onChange={(event) => setEmailChangeForm((prev) => ({ ...prev, nextEmail: event.target.value }))}
+                      className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={requestEmailChangeOtp}
+                        className="h-9 px-3 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors"
+                      >
+                        Send SMS OTP
+                      </button>
+                    </div>
+                    {emailChangeChallenge && (
+                      <p className="text-xs text-text-secondary">
+                        OTP sent to {maskPhoneNumber(emailChangeChallenge.phoneNumber)}. It expires in 5 minutes.
+                      </p>
+                    )}
+                    {import.meta.env.DEV && emailChangeOtpPreview && (
+                      <p className="text-xs text-primary">Dev OTP Preview: {emailChangeOtpPreview}</p>
+                    )}
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      placeholder="Enter 6-digit OTP"
+                      value={emailChangeForm.otpCode}
+                      onChange={(event) => setEmailChangeForm((prev) => ({ ...prev, otpCode: event.target.value.replace(/\D/g, '').slice(0, 6) }))}
+                      className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                    />
+                    <button
+                      type="button"
+                      onClick={verifyEmailChangeOtpAndUpdate}
+                      className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
+                    >
+                      Verify OTP & Update Email
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -1135,6 +1580,8 @@ function AdminSettingsPage({ showToast, currentAdminAccount, runWithSlowRuntimeW
               {confirmAction.type === 'suspend-admin' && 'Suspend this admin account?'}
               {confirmAction.type === 'activate-admin' && 'Activate this admin account?'}
               {confirmAction.type === 'delete-admin' && 'Delete this admin account? This cannot be undone.'}
+              {confirmAction.type === 'logout-selected-clients' && `Force logout for ${confirmAction.payload?.emails?.length || 0} selected user(s)?`}
+              {confirmAction.type === 'logout-all-clients' && `Force logout for all ${confirmAction.payload?.totalClients || 0} user(s)?`}
             </p>
 
             <div className="mt-6 flex justify-end gap-3">

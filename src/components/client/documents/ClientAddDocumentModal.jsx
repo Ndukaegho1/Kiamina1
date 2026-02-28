@@ -1,17 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Building2, DollarSign, FileUp, FolderUp, TrendingUp, X } from 'lucide-react'
+import { Building2, DollarSign, FileUp, TrendingUp, X } from 'lucide-react'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
 
-const DEFAULT_CLASS_OPTIONS = [
-  'Office Expense',
-  'Fuel',
-  'Utilities',
-  'Inventory',
-  'Marketing',
-  'Payroll',
-  'Tax',
-  'Bank Charges',
-]
+const PAYMENT_METHOD_OPTIONS = ['Cash', 'Bank Transfer', 'Card', 'Cheque', 'Mobile Money', 'POS', 'Other']
 
 const ALLOWED_EXTENSIONS = [
   'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp',
@@ -25,7 +16,24 @@ const createEmptyDetails = () => ({
   confidentialityLevel: 'Standard',
   processingPriority: 'Normal',
   internalNotes: '',
+  paymentMethod: '',
+  invoice: '',
+  invoiceNumber: '',
 })
+
+const normalizeClassName = (value = '') => String(value || '').replace(/\s+/g, ' ').trim()
+
+const dedupeClassOptions = (values = []) => {
+  const byKey = new Map()
+  ;(Array.isArray(values) ? values : []).forEach((value) => {
+    const normalized = normalizeClassName(value)
+    if (!normalized) return
+    const key = normalized.toLowerCase()
+    if (byKey.has(key)) return
+    byKey.set(key, normalized)
+  })
+  return Array.from(byKey.values())
+}
 
 const formatFileSize = (bytes = 0) => {
   if (bytes < 1024) return `${bytes} B`
@@ -39,15 +47,6 @@ const isVideoFile = (file) => {
   const videoExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.3gp']
   if (type.startsWith('video/')) return true
   return videoExtensions.some((ext) => lowerName.endsWith(ext))
-}
-
-const getRootFolderName = (fileList = []) => {
-  for (const item of fileList) {
-    const relativePath = item?.webkitRelativePath || ''
-    if (!relativePath.includes('/')) continue
-    return relativePath.split('/')[0]
-  }
-  return ''
 }
 
 const PREVIEWABLE_EXTENSIONS = new Set([
@@ -76,33 +75,213 @@ const buildPreviewUrl = async (file, extensionLower = '') => {
   return URL.createObjectURL(file)
 }
 
+function ClassCreatableField({
+  value,
+  options = [],
+  onChange,
+  onCreate,
+  error = '',
+}) {
+  const [query, setQuery] = useState('')
+  const [isOpen, setIsOpen] = useState(false)
+  const [highlightedIndex, setHighlightedIndex] = useState(-1)
+  const wrapperRef = useRef(null)
+  const inputRef = useRef(null)
+
+  const normalizedOptions = useMemo(() => dedupeClassOptions(options), [options])
+  const selectedClass = normalizeClassName(value)
+  const normalizedQuery = normalizeClassName(query)
+  const filteredOptions = useMemo(() => {
+    if (!normalizedQuery) return normalizedOptions
+    const lowered = normalizedQuery.toLowerCase()
+    return normalizedOptions.filter((item) => item.toLowerCase().includes(lowered))
+  }, [normalizedQuery, normalizedOptions])
+  const exactMatch = normalizedQuery
+    ? normalizedOptions.some((item) => item.toLowerCase() === normalizedQuery.toLowerCase())
+    : false
+  const canCreate = Boolean(normalizedQuery) && !exactMatch
+  const dropdownItems = [
+    ...filteredOptions.map((item) => ({ type: 'option', value: item })),
+    ...(canCreate ? [{ type: 'create', value: normalizedQuery }] : []),
+  ]
+
+  useEffect(() => {
+    const handleOutsideClick = (event) => {
+      if (!wrapperRef.current?.contains(event.target)) {
+        setIsOpen(false)
+      }
+    }
+    window.addEventListener('mousedown', handleOutsideClick)
+    return () => window.removeEventListener('mousedown', handleOutsideClick)
+  }, [])
+
+  useEffect(() => {
+    setHighlightedIndex(dropdownItems.length > 0 ? 0 : -1)
+  }, [query, isOpen, dropdownItems.length])
+
+  const resolveCanonicalValue = (nextValue = '') => {
+    const normalized = normalizeClassName(nextValue)
+    if (!normalized) return ''
+    const existing = normalizedOptions.find((item) => item.toLowerCase() === normalized.toLowerCase())
+    return existing || normalized
+  }
+
+  const selectClassValue = (nextValue, { shouldCreate = false } = {}) => {
+    const canonical = resolveCanonicalValue(nextValue)
+    if (!canonical) return
+    onChange(canonical)
+    if (shouldCreate) onCreate?.(canonical)
+    setQuery('')
+    setIsOpen(false)
+  }
+
+  const clearClassValue = () => {
+    onChange('')
+    setQuery('')
+    setIsOpen(true)
+    setTimeout(() => inputRef.current?.focus(), 0)
+  }
+
+  return (
+    <div ref={wrapperRef} className="relative">
+      <label className="block text-sm font-medium text-text-primary mb-1.5">
+        Class <span className="text-error">*</span>
+      </label>
+      <div className={`min-h-10 w-full rounded-md border px-2 py-1.5 flex flex-wrap items-center gap-1.5 bg-white ${error ? 'border-error' : 'border-border'}`}>
+        {selectedClass && (
+          <span className="inline-flex items-center h-7 px-2.5 rounded-full bg-[#153585]/10 text-[#153585] text-xs font-medium">
+            {selectedClass}
+            <button
+              type="button"
+              onClick={clearClassValue}
+              className="ml-1.5 text-[#153585] hover:text-[#0f275f]"
+              aria-label="Remove class"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </span>
+        )}
+        <input
+          ref={inputRef}
+          type="text"
+          value={query}
+          onFocus={() => setIsOpen(true)}
+          onChange={(event) => {
+            const nextValue = event.target.value
+            if (selectedClass) onChange('')
+            setQuery(nextValue)
+            setIsOpen(true)
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Backspace' && !query && selectedClass) {
+              event.preventDefault()
+              clearClassValue()
+              return
+            }
+            if (event.key === 'ArrowDown') {
+              if (dropdownItems.length === 0) return
+              event.preventDefault()
+              setIsOpen(true)
+              setHighlightedIndex((prev) => (
+                prev < dropdownItems.length - 1 ? prev + 1 : 0
+              ))
+              return
+            }
+            if (event.key === 'ArrowUp') {
+              if (dropdownItems.length === 0) return
+              event.preventDefault()
+              setIsOpen(true)
+              setHighlightedIndex((prev) => (
+                prev > 0 ? prev - 1 : dropdownItems.length - 1
+              ))
+              return
+            }
+            if (event.key === 'Escape') {
+              setIsOpen(false)
+              return
+            }
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+
+            if (dropdownItems.length > 0 && highlightedIndex >= 0) {
+              const highlighted = dropdownItems[highlightedIndex]
+              if (highlighted?.type === 'create') {
+                selectClassValue(highlighted.value, { shouldCreate: true })
+              } else if (highlighted?.value) {
+                selectClassValue(highlighted.value)
+              }
+              return
+            }
+
+            const candidate = normalizeClassName(query)
+            if (!candidate) return
+            if (exactMatch) {
+              selectClassValue(candidate)
+              return
+            }
+            selectClassValue(candidate, { shouldCreate: true })
+          }}
+          placeholder={selectedClass ? '' : 'e.g. HeadOffice'}
+          className="flex-1 min-w-[170px] h-7 px-1 text-sm text-text-primary focus:outline-none"
+        />
+      </div>
+      <p className="text-xs text-text-muted mt-1">Type to create or select an existing class.</p>
+      {error && <p className="text-xs text-error mt-1">{error}</p>}
+      {isOpen && dropdownItems.length > 0 && (
+        <div className="absolute z-20 mt-1 w-full bg-white border border-border rounded-md shadow-sm max-h-48 overflow-y-auto">
+          {dropdownItems.map((item, index) => {
+            const active = index === highlightedIndex
+            if (item.type === 'create') {
+              return (
+                <button
+                  key={`create-${item.value}`}
+                  type="button"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setHighlightedIndex(index)}
+                  onClick={() => selectClassValue(item.value, { shouldCreate: true })}
+                  className={`w-full h-9 px-3 text-left text-sm ${active ? 'bg-[#153585]/10 text-[#153585]' : 'text-text-primary hover:bg-[#153585]/10'}`}
+                >
+                  Create "{item.value}"
+                </button>
+              )
+            }
+            return (
+              <button
+                key={`option-${item.value}`}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setHighlightedIndex(index)}
+                onClick={() => selectClassValue(item.value)}
+                className={`w-full h-9 px-3 text-left text-sm ${active ? 'bg-[#153585]/10 text-[#153585]' : 'text-text-primary hover:bg-[#153585]/10'}`}
+              >
+                {item.value}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DocumentDetailsForm({
+  category,
   details,
   onChange,
   classError,
   options,
-  classInputId,
+  onCreateClass,
 }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <div>
-        <label className="block text-sm font-medium text-text-primary mb-1.5">
-          Class <span className="text-error">*</span>
-        </label>
-        <input
-          type="text"
-          list={classInputId}
+      <div className="md:col-span-2">
+        <ClassCreatableField
           value={details.class}
-          onChange={(event) => onChange('class', event.target.value)}
-          placeholder="Enter class"
-          className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${classError ? 'border-error' : 'border-border'}`}
+          options={options}
+          onChange={(value) => onChange('class', value)}
+          onCreate={onCreateClass}
+          error={classError}
         />
-        <datalist id={classInputId}>
-          {options.map((item) => (
-            <option key={item} value={item} />
-          ))}
-        </datalist>
-        {classError && <p className="text-xs text-error mt-1">{classError}</p>}
       </div>
 
       <div>
@@ -142,6 +321,47 @@ function DocumentDetailsForm({
         </select>
       </div>
 
+      {category === 'expenses' && (
+        <div>
+          <label className="block text-sm font-medium text-text-primary mb-1.5">Payment Method</label>
+          <select
+            value={details.paymentMethod || ''}
+            onChange={(event) => onChange('paymentMethod', event.target.value)}
+            className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          >
+            <option value="">Select payment method</option>
+            {PAYMENT_METHOD_OPTIONS.map((item) => (
+              <option key={item} value={item}>{item}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {category === 'sales' && (
+        <>
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Invoice</label>
+            <input
+              type="text"
+              value={details.invoice || ''}
+              onChange={(event) => onChange('invoice', event.target.value)}
+              placeholder="Optional"
+              className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Invoice Number</label>
+            <input
+              type="text"
+              value={details.invoiceNumber || ''}
+              onChange={(event) => onChange('invoiceNumber', event.target.value)}
+              placeholder="Optional"
+              className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+        </>
+      )}
+
       <div className="md:col-span-2">
         <label className="block text-sm font-medium text-text-primary mb-1.5">Notes</label>
         <textarea
@@ -164,6 +384,7 @@ function AddDocumentModal({
   showToast,
   expenseClassOptions = [],
   salesClassOptions = [],
+  onCreateClassOption,
 }) {
   const [category, setCategory] = useState(initialCategory || '')
   const [folderName, setFolderName] = useState('')
@@ -175,14 +396,18 @@ function AddDocumentModal({
   const [errors, setErrors] = useState({})
   const [isDragOver, setIsDragOver] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [sessionClassOptions, setSessionClassOptions] = useState([])
 
   const fileInputRef = useRef(null)
-  const folderInputRef = useRef(null)
 
-  const classOptions = useMemo(
-    () => Array.from(new Set([...DEFAULT_CLASS_OPTIONS, ...expenseClassOptions, ...salesClassOptions].filter(Boolean))),
-    [expenseClassOptions, salesClassOptions],
-  )
+  const classOptions = useMemo(() => {
+    const persistedOptions = category === 'sales'
+      ? salesClassOptions
+      : category === 'expenses'
+        ? expenseClassOptions
+        : [...expenseClassOptions, ...salesClassOptions]
+    return dedupeClassOptions([...persistedOptions, ...sessionClassOptions])
+  }, [category, expenseClassOptions, salesClassOptions, sessionClassOptions])
 
   useEffect(() => {
     if (!isOpen) return
@@ -196,6 +421,7 @@ function AddDocumentModal({
     setErrors({})
     setIsDragOver(false)
     setIsSubmitting(false)
+    setSessionClassOptions([])
   }, [isOpen, initialCategory])
 
   if (!isOpen) return null
@@ -266,12 +492,6 @@ function AddDocumentModal({
     })))
     nextItems.push(...preparedItems)
 
-    let discoveredRoot = ''
-    if (source === 'browse-folder' && !folderName.trim()) {
-      discoveredRoot = getRootFolderName(files)
-      if (discoveredRoot) setFolderName(discoveredRoot)
-    }
-
     if (rejectedVideos.length > 0) {
       showToast('error', 'Video files are not supported.')
     }
@@ -287,7 +507,7 @@ function AddDocumentModal({
     setErrors((prev) => ({
       ...prev,
       files: '',
-      ...(folderName.trim() || discoveredRoot ? { folderName: '' } : {}),
+      ...(folderName.trim() ? { folderName: '' } : {}),
     }))
   }
 
@@ -296,21 +516,8 @@ function AddDocumentModal({
     event.target.value = ''
   }
 
-  const handleFolderSelect = (event) => {
-    addFiles(Array.from(event.target.files || []), 'browse-folder')
-    event.target.value = ''
-  }
-
   const openFilePicker = () => {
     fileInputRef.current?.click()
-  }
-
-  const openFolderPicker = () => {
-    const node = folderInputRef.current
-    if (!node) return
-    node.setAttribute('webkitdirectory', '')
-    node.setAttribute('directory', '')
-    node.click()
   }
 
   const removeFile = (targetKey) => {
@@ -327,7 +534,8 @@ function AddDocumentModal({
   }
 
   const updateSharedDetails = (field, value) => {
-    setSharedDetails((prev) => ({ ...prev, [field]: value }))
+    const nextValue = field === 'class' ? normalizeClassName(value) : value
+    setSharedDetails((prev) => ({ ...prev, [field]: nextValue }))
     if (field === 'class') {
       setErrors((prev) => ({ ...prev, sharedClass: '' }))
     }
@@ -338,12 +546,19 @@ function AddDocumentModal({
       ...prev,
       [key]: {
         ...(prev[key] || createEmptyDetails()),
-        [field]: value,
+        [field]: field === 'class' ? normalizeClassName(value) : value,
       },
     }))
     if (field === 'class') {
       setErrors((prev) => ({ ...prev, [`class-${key}`]: '' }))
     }
+  }
+
+  const handleCreateClassOption = (value = '') => {
+    const normalized = normalizeClassName(value)
+    if (!normalized) return
+    setSessionClassOptions((prev) => dedupeClassOptions([...prev, normalized]))
+    onCreateClassOption?.(category, normalized)
   }
 
   const isClassSelectionComplete = (() => {
@@ -357,6 +572,7 @@ function AddDocumentModal({
   const canSubmit = Boolean(
     category
     && folderName.trim()
+    && documentOwner.trim()
     && uploadedItems.length > 0
     && isClassSelectionComplete
     && !isSubmitting,
@@ -366,6 +582,7 @@ function AddDocumentModal({
     const next = {}
     if (!category) next.category = 'Select a category.'
     if (!folderName.trim()) next.folderName = 'Folder name is required.'
+    if (!documentOwner.trim()) next.documentOwner = 'Document owner is required.'
     if (uploadedItems.length === 0) next.files = 'Select at least one file.'
 
     if (uploadedItems.length === 1 || multiMode === 'same') {
@@ -385,7 +602,11 @@ function AddDocumentModal({
     const validationErrors = buildErrors()
     if (Object.keys(validationErrors).length > 0) {
       setErrors(validationErrors)
-      showToast('error', 'Please complete the required fields.')
+      const hasClassError = Boolean(
+        validationErrors.sharedClass
+        || Object.keys(validationErrors).some((key) => key.startsWith('class-')),
+      )
+      showToast('error', hasClassError ? 'Class is required before uploading.' : 'Please complete the required fields.')
       return
     }
 
@@ -478,14 +699,20 @@ function AddDocumentModal({
             </div>
 
             <div className="mt-4">
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Document Owner</label>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">
+                Document Owner <span className="text-error">*</span>
+              </label>
               <input
                 type="text"
                 value={documentOwner}
-                onChange={(event) => setDocumentOwner(event.target.value)}
-                placeholder="Optional"
-                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                onChange={(event) => {
+                  setDocumentOwner(event.target.value)
+                  setErrors((prev) => ({ ...prev, documentOwner: '' }))
+                }}
+                placeholder="Enter document owner"
+                className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.documentOwner ? 'border-error' : 'border-border'}`}
               />
+              {errors.documentOwner && <p className="text-xs text-error mt-1.5">{errors.documentOwner}</p>}
             </div>
           </div>
 
@@ -508,22 +735,14 @@ function AddDocumentModal({
                 <FileUp className="w-6 h-6 text-text-muted" />
               </div>
               <p className="text-sm font-medium text-text-primary">Upload area</p>
-              <p className="text-sm text-text-muted mt-1">Drag files here or use file/folder picker</p>
+              <p className="text-sm text-text-muted mt-1">Drag files here or use file picker</p>
               <div className="mt-3 flex items-center justify-center gap-3">
                 <button
                   type="button"
                   onClick={openFilePicker}
                   className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
                 >
-                  Select Files
-                </button>
-                <button
-                  type="button"
-                  onClick={openFolderPicker}
-                  className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors inline-flex items-center gap-2"
-                >
-                  <FolderUp className="w-4 h-4" />
-                  Select Folder
+                  Select File(s)
                 </button>
               </div>
               <p className="text-xs text-text-muted mt-3">Accepted: PDF, images, Office docs, CSV, TXT, ZIP.</p>
@@ -531,7 +750,6 @@ function AddDocumentModal({
             </div>
 
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} />
-            <input ref={folderInputRef} type="file" multiple className="hidden" onChange={handleFolderSelect} />
 
             {errors.files && <p className="text-xs text-error mt-2">{errors.files}</p>}
 
@@ -569,11 +787,12 @@ function AddDocumentModal({
 
               {uploadedItems.length === 1 ? (
                 <DocumentDetailsForm
+                  category={category}
                   details={sharedDetails}
                   onChange={updateSharedDetails}
                   classError={errors.sharedClass}
                   options={classOptions}
-                  classInputId="kiamina-shared-class"
+                  onCreateClass={handleCreateClassOption}
                 />
               ) : (
                 <>
@@ -600,11 +819,12 @@ function AddDocumentModal({
 
                   {multiMode === 'same' ? (
                     <DocumentDetailsForm
+                      category={category}
                       details={sharedDetails}
                       onChange={updateSharedDetails}
                       classError={errors.sharedClass}
                       options={classOptions}
-                      classInputId="kiamina-multi-shared-class"
+                      onCreateClass={handleCreateClassOption}
                     />
                   ) : (
                     <div className="space-y-4">
@@ -614,11 +834,12 @@ function AddDocumentModal({
                             File {index + 1}: {item.relativePath || item.name}
                           </p>
                           <DocumentDetailsForm
+                            category={category}
                             details={perFileDetails[item.key] || createEmptyDetails()}
                             onChange={(field, value) => updateFileDetails(item.key, field, value)}
                             classError={errors[`class-${item.key}`]}
                             options={classOptions}
-                            classInputId={`kiamina-class-${index}`}
+                            onCreateClass={handleCreateClassOption}
                           />
                         </div>
                       ))}

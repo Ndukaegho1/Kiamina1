@@ -3,6 +3,7 @@ export const ADMIN_DEFAULT_PAGE = 'admin-dashboard'
 export const ADMIN_PAGE_IDS = [
   'admin-dashboard',
   'admin-documents',
+  'admin-leads',
   'admin-communications',
   'admin-notifications',
   'admin-clients',
@@ -10,5 +11,6 @@ export const ADMIN_PAGE_IDS = [
   'admin-client-documents',
   'admin-client-upload-history',
   'admin-activity',
+  'admin-trash',
   'admin-settings',
 ]

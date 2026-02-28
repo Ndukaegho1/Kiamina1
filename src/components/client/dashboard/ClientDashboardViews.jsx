@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+﻿import { useState, useEffect, useRef } from 'react'
 import {
   LayoutDashboard,
   DollarSign,
@@ -58,7 +58,10 @@ import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import KiaminaLogo from '../../common/KiaminaLogo'
 import { getCachedFileBlob } from '../../../utils/fileCache'
+import { buildClientDownloadFilename } from '../../../utils/downloadFilename'
+import { ClientSupportPageExperience, ClientSupportWidgetExperience } from '../support/ClientSupportExperience'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
+import { registerNewsletterSubscriberLead } from '../../../utils/supportCenter'
 
 ChartJS.register(
   CategoryScale,
@@ -1521,6 +1524,40 @@ function ExpensesPage({ onAddDocument, records, setRecords }) {
 
 // Home / Landing Page for unauthenticated users
 function HomePage({ onGetStarted, onLogin }) {
+  const [newsletterName, setNewsletterName] = useState('')
+  const [newsletterEmail, setNewsletterEmail] = useState('')
+  const [newsletterStatus, setNewsletterStatus] = useState({ type: '', message: '' })
+
+  const handleSubscribeNewsletter = () => {
+    const normalizedEmail = String(newsletterEmail || '').trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setNewsletterStatus({
+        type: 'error',
+        message: 'Please enter a valid email address.',
+      })
+      return
+    }
+
+    const result = registerNewsletterSubscriberLead({
+      contactEmail: normalizedEmail,
+      fullName: String(newsletterName || '').trim(),
+    })
+    if (!result.ok) {
+      setNewsletterStatus({
+        type: 'error',
+        message: result.message || 'Unable to subscribe right now.',
+      })
+      return
+    }
+
+    setNewsletterStatus({
+      type: 'success',
+      message: 'You are subscribed. We will share useful accounting updates.',
+    })
+    setNewsletterName('')
+    setNewsletterEmail('')
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-6">
       <div className="max-w-4xl w-full bg-white rounded-lg shadow-card p-10 text-center">
@@ -1538,6 +1575,38 @@ function HomePage({ onGetStarted, onLogin }) {
         </div>
 
         <div className="mt-8 text-sm text-text-muted">
+          <div className="max-w-xl mx-auto rounded-lg border border-border-light bg-background/40 p-4 mb-6 text-left">
+            <p className="text-sm font-semibold text-text-primary">Subscribe to Newsletter</p>
+            <p className="text-xs text-text-muted mt-1">Get updates and tips from Kiamina Accounting Services.</p>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
+              <input
+                type="text"
+                value={newsletterName}
+                onChange={(event) => setNewsletterName(event.target.value)}
+                placeholder="Full name (optional)"
+                className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary bg-white"
+              />
+              <input
+                type="email"
+                value={newsletterEmail}
+                onChange={(event) => setNewsletterEmail(event.target.value)}
+                placeholder="you@company.com"
+                className="h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary bg-white"
+              />
+              <button
+                type="button"
+                onClick={handleSubscribeNewsletter}
+                className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+              >
+                Subscribe
+              </button>
+            </div>
+            {newsletterStatus.message && (
+              <p className={`mt-2 text-xs ${newsletterStatus.type === 'error' ? 'text-error' : 'text-success'}`}>
+                {newsletterStatus.message}
+              </p>
+            )}
+          </div>
           <nav className="flex items-center gap-4 justify-center">
             <a className="hover:underline">Features</a>
             <a className="hover:underline">Pricing</a>
@@ -2088,6 +2157,7 @@ function UploadHistoryPage({
   salesRecords = [],
   bankStatementRecords = [],
   ownerEmail = '',
+  downloadBusinessName = '',
   onOpenFileLocation,
   showToast,
   globalSearchTerm = '',
@@ -2389,7 +2459,10 @@ function UploadHistoryPage({
     }
     const link = document.createElement('a')
     link.href = url
-    link.download = source.filename || item.filename || 'document'
+    link.download = buildClientDownloadFilename({
+      businessName: downloadBusinessName,
+      fileName: source.filename || item.filename || 'document',
+    })
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -2640,6 +2713,7 @@ function UploadHistoryPage({
       {viewingFile && (
         <FileViewerModal
           file={viewingFile}
+          downloadNamePrefix={downloadBusinessName}
           readOnly
           onClose={() => setViewingFile(null)}
         />
@@ -2668,6 +2742,7 @@ function RecentActivitiesPage({
   const [dateTo, setDateTo] = useState('')
   const maxFilterDate = toIsoDate(new Date())
   const [activityType, setActivityType] = useState('')
+  const [activitySortBy, setActivitySortBy] = useState('date-desc')
   const toDateMs = (value = '') => {
     const parsed = Date.parse(value)
     return Number.isFinite(parsed) ? parsed : NaN
@@ -2773,6 +2848,22 @@ function RecentActivitiesPage({
     const matchesTo = !normalizedTo || (Number.isFinite(stamp) && stamp <= toMs)
     return matchesQuery && matchesType && matchesFrom && matchesTo
   })
+  const sortedActivities = [...filteredActivities].sort((left, right) => {
+    if (activitySortBy === 'date-asc') {
+      return (left.timestampMs || 0) - (right.timestampMs || 0)
+    }
+    if (activitySortBy === 'role-asc') {
+      const compared = String(left.actorRole || '').localeCompare(String(right.actorRole || ''), undefined, { sensitivity: 'base' })
+      if (compared !== 0) return compared
+      return (right.timestampMs || 0) - (left.timestampMs || 0)
+    }
+    if (activitySortBy === 'role-desc') {
+      const compared = String(right.actorRole || '').localeCompare(String(left.actorRole || ''), undefined, { sensitivity: 'base' })
+      if (compared !== 0) return compared
+      return (right.timestampMs || 0) - (left.timestampMs || 0)
+    }
+    return (right.timestampMs || 0) - (left.timestampMs || 0)
+  })
 
   const renderTypeIcon = (type) => {
     if (type === 'approved') return <CheckCircle className="w-4 h-4 text-success" />
@@ -2834,6 +2925,17 @@ function RecentActivitiesPage({
             className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             title="To date"
           />
+          <select
+            value={activitySortBy}
+            onChange={(event) => setActivitySortBy(event.target.value)}
+            className="h-9 w-full sm:w-auto px-3 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            title="Sort activities"
+          >
+            <option value="date-desc">Sort: Date (Newest)</option>
+            <option value="date-asc">Sort: Date (Oldest)</option>
+            <option value="role-asc">Sort: Role (A-Z)</option>
+            <option value="role-desc">Sort: Role (Z-A)</option>
+          </select>
           {(searchTerm || activityType || dateFrom || dateTo) && (
             <button
               type="button"
@@ -2842,6 +2944,7 @@ function RecentActivitiesPage({
                 setActivityType('')
                 setDateFrom('')
                 setDateTo('')
+                setActivitySortBy('date-desc')
               }}
               className="h-9 px-3 text-sm text-error hover:bg-error-bg rounded-md"
             >
@@ -2864,12 +2967,12 @@ function RecentActivitiesPage({
               </tr>
             </thead>
             <tbody>
-              {filteredActivities.length === 0 ? (
+              {sortedActivities.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="px-4 py-10 text-center text-sm text-text-muted">No activity found.</td>
                 </tr>
               ) : (
-                filteredActivities.map((row) => (
+                sortedActivities.map((row) => (
                   <tr key={row.id} className="border-b border-border-light hover:bg-[#F9FAFB]">
                     <td className="px-4 py-3.5 text-sm text-text-primary">
                       <div className="inline-flex items-center gap-2">
@@ -2896,325 +2999,25 @@ function RecentActivitiesPage({
   )
 }
 
-function SupportPage() {
-  const [draftMessage, setDraftMessage] = useState('')
-  const [agentConnected, setAgentConnected] = useState(false)
-  const [isSending, setIsSending] = useState(false)
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      sender: 'bot',
-      text: 'Hi. I am Kiamina Chat Bot. Ask about uploads, expenses, sales, or settings. Type \"agent\" for human support.',
-    },
-  ])
-
-  const appendMessage = (sender, text) => {
-    setMessages((prev) => [...prev, { id: Date.now() + Math.random(), sender, text }])
-  }
-
-  const getBotReply = (inputText) => {
-    const text = inputText.toLowerCase()
-    if (text.includes('upload')) return 'Upload guide: 1) Choose category. 2) Create folder name. 3) Upload files/folder. 4) Set Class for every file. 5) Submit.'
-    if (text.includes('expense')) return 'Expenses guide: 1) Open Expenses. 2) Upload into a folder. 3) Set Class, Vendor, Priority, Notes per file. 4) Track status in folder table.'
-    if (text.includes('sales')) return 'Sales guide: 1) Open Sales. 2) Upload into folder. 3) Set Class and metadata per file. 4) Review status updates in the folder table.'
-    if (text.includes('setting') || text.includes('profile')) return 'Settings guide: update profile photo, company logo, business info, tax profile, and verification documents.'
-    if (text.includes('verification')) return 'Verification path: Settings > Identity Verification. Upload required documents and submit for review.'
-    return 'I can help with uploads, dashboard navigation, settings, expenses, and sales. Ask a specific question or type \"agent\".'
-  }
-
-  const quickAsk = (prompt) => setDraftMessage(prompt)
-
-  const connectHumanAgent = () => {
-    if (agentConnected) {
-      appendMessage('agent', 'I am here. Please share your issue and I will assist now.')
-      return
-    }
-    appendMessage('bot', 'Connecting you to a human support agent...')
-    setAgentConnected(true)
-    setTimeout(() => {
-      appendMessage('agent', 'Hi, this is Kiamina Support. I have joined the chat. How can I help you today?')
-    }, 500)
-  }
-
-  const handleSend = () => {
-    const text = draftMessage.trim()
-    if (!text || isSending) return
-
-    appendMessage('user', text)
-    setDraftMessage('')
-
-    const asksForAgent = /(agent|human|person|representative|support team)/i.test(text)
-    if (asksForAgent) {
-      connectHumanAgent()
-      return
-    }
-
-    setIsSending(true)
-    setTimeout(() => {
-      if (agentConnected) appendMessage('agent', 'Thanks. I am reviewing this now and will help you resolve it.')
-      else appendMessage('bot', getBotReply(text))
-      setIsSending(false)
-    }, 350)
-  }
-
-  return (
-    <div className="animate-fade-in">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-        <h1 className="text-2xl font-semibold text-text-primary">Support</h1>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="bg-white rounded-lg shadow-card border border-border-light p-5">
-          <h3 className="text-base font-semibold text-text-primary">Contact Section</h3>
-          <p className="text-sm text-text-secondary mt-2">Use chat for fast support. For escalations, contact the team directly.</p>
-          <div className="mt-4 space-y-3 text-sm">
-            <div className="rounded-md border border-border-light bg-background p-3">
-              <p className="text-xs text-text-muted uppercase tracking-wide">Email</p>
-              <p className="text-text-primary mt-1">support@kiamina.com</p>
-            </div>
-            <div className="rounded-md border border-border-light bg-background p-3">
-              <p className="text-xs text-text-muted uppercase tracking-wide">Phone</p>
-              <p className="text-text-primary mt-1">+234 700 KIAMINA</p>
-            </div>
-            <div className="rounded-md border border-border-light bg-background p-3">
-              <p className="text-xs text-text-muted uppercase tracking-wide">Hours</p>
-              <p className="text-text-primary mt-1">Mon-Fri, 8:00 AM - 6:00 PM</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="lg:col-span-2 bg-white border border-border-light rounded-lg shadow-card overflow-hidden">
-          <div className="px-4 py-3 border-b border-border-light bg-background/60">
-            <h3 className="text-sm font-semibold text-text-primary">Support Chat</h3>
-            <p className="text-xs text-text-muted mt-0.5">
-              {agentConnected ? 'Human agent connected' : 'Bot available. Type \"agent\" for human support.'}
-            </p>
-          </div>
-
-          <div className="h-[420px] overflow-y-auto p-3 space-y-2 bg-white">
-            {messages.map((message) => {
-              const isUser = message.sender === 'user'
-              const roleLabel = message.sender === 'agent' ? 'AGENT' : message.sender === 'bot' ? 'BOT' : 'YOU'
-              return (
-                <div key={message.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-lg px-3 py-2 ${isUser ? 'bg-primary text-white' : 'bg-background border border-border-light text-text-primary'}`}>
-                    <div className={`text-[10px] font-semibold tracking-wide ${isUser ? 'text-white/80' : 'text-text-muted'}`}>{roleLabel}</div>
-                    <p className="text-sm mt-1 leading-snug">{message.text}</p>
-                  </div>
-                </div>
-              )
-            })}
-
-            {isSending && (
-              <div className="flex justify-start">
-                <div className="bg-background border border-border-light rounded-lg px-3 py-2 text-sm text-text-muted">
-                  <DotLottiePreloader size={20} label="Typing..." className="w-full justify-start" />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="px-3 pt-3 pb-2 border-t border-border-light">
-            {!agentConnected && (
-              <div className="flex flex-wrap gap-2 mb-2">
-                <button type="button" onClick={() => quickAsk('How do I upload documents?')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Upload help</button>
-                <button type="button" onClick={() => quickAsk('Show me expenses guidance')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Expenses help</button>
-                <button type="button" onClick={() => quickAsk('Connect me to an agent')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Talk to agent</button>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={draftMessage}
-                onChange={(e) => setDraftMessage(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleSend() }}
-                placeholder={agentConnected ? 'Message the human support agent...' : 'Ask the support bot or type \"agent\"...'}
-                className="flex-1 h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              />
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!draftMessage.trim() || isSending}
-                className="h-10 px-3 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1"
-              >
-                {isSending ? (
-                  <DotLottiePreloader size={18} label="Sending..." labelClassName="text-sm text-white" />
-                ) : (
-                  <>Send <ArrowUpRight className="w-4 h-4" /></>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
+function SupportPage(props) {
+  return <ClientSupportPageExperience {...props} />
 }
 
-function ClientSupportWidget() {
-  const [isOpen, setIsOpen] = useState(false)
-  const [draftMessage, setDraftMessage] = useState('')
-  const [agentConnected, setAgentConnected] = useState(false)
-  const [isSending, setIsSending] = useState(false)
-  const [messages, setMessages] = useState([
-    {
-      id: 1,
-      sender: 'bot',
-      text: 'Hi. I am Kiamina Support Bot. Ask me about uploads, expenses, sales, or settings. Type "agent" for a human support agent.',
-    },
-  ])
-
-  const appendMessage = (sender, text) => {
-    setMessages((prev) => [...prev, { id: Date.now() + Math.random(), sender, text }])
-  }
-
-  const getBotReply = (inputText) => {
-    const text = inputText.toLowerCase()
-    if (text.includes('upload')) return 'Upload guide: 1) Choose category. 2) Enter folder name. 3) Upload files or a folder. 4) Set Class for every file. 5) Submit.'
-    if (text.includes('expense')) return 'Expenses guide: open Expenses, upload into folder, set Class and Vendor per file, then monitor status in the folder table.'
-    if (text.includes('sales')) return 'Sales guide: open Sales, upload into folder, set Class and metadata per file, then track review status.'
-    if (text.includes('setting') || text.includes('profile')) return 'Settings guide: update profile photo, company logo, business profile, and tax details.'
-    if (text.includes('verification')) return 'Verification guide: Settings > Identity Verification, upload required documents, then submit for approval.'
-    return 'I can help with uploads, dashboard navigation, settings, expenses, and sales. Ask me a specific question or type "agent".'
-  }
-
-  const connectHumanAgent = () => {
-    if (agentConnected) {
-      appendMessage('agent', 'I am here. Please share your issue and I will assist now.')
-      return
-    }
-
-    appendMessage('bot', 'Connecting you to a human support agent...')
-    setAgentConnected(true)
-
-    setTimeout(() => {
-      appendMessage('agent', 'Hi, this is Kiamina Support. I have joined the chat. How can I help you today?')
-    }, 500)
-  }
-
-  const handleSend = () => {
-    const text = draftMessage.trim()
-    if (!text || isSending) return
-
-    appendMessage('user', text)
-    setDraftMessage('')
-
-    const asksForAgent = /(agent|human|person|representative|support team)/i.test(text)
-    if (asksForAgent) {
-      connectHumanAgent()
-      return
-    }
-
-    setIsSending(true)
-    setTimeout(() => {
-      if (agentConnected) {
-        appendMessage('agent', 'Thanks. I am reviewing this now and will help you resolve it.')
-      } else {
-        appendMessage('bot', getBotReply(text))
-      }
-      setIsSending(false)
-    }, 350)
-  }
-
-  const quickAsk = (prompt) => {
-    setDraftMessage(prompt)
-  }
-
-  return (
-    <div className="fixed bottom-5 right-5 z-[120]">
-      {isOpen && (
-        <div className="w-[360px] max-w-[calc(100vw-2rem)] bg-white border border-border rounded-xl shadow-card mb-3 overflow-hidden">
-          <div className="px-4 py-3 border-b border-border-light bg-background/60">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <h4 className="text-sm font-semibold text-text-primary">Support Chat</h4>
-                <p className="text-xs text-text-muted">
-                  {agentConnected ? 'Human agent connected' : 'Bot available. Type "agent" for human support.'}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsOpen(false)}
-                className="w-7 h-7 rounded-md border border-border-light text-text-secondary hover:text-text-primary hover:bg-white"
-              >
-                <X className="w-4 h-4 mx-auto" />
-              </button>
-            </div>
-          </div>
-
-          <div className="h-72 overflow-y-auto p-3 space-y-2 bg-white">
-            {messages.map((message) => {
-              const isUser = message.sender === 'user'
-              const roleLabel = message.sender === 'agent' ? 'AGENT' : message.sender === 'bot' ? 'BOT' : 'YOU'
-              return (
-                <div key={message.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[85%] rounded-lg px-3 py-2 ${isUser ? 'bg-primary text-white' : 'bg-background border border-border-light text-text-primary'}`}>
-                    <div className={`text-[10px] font-semibold tracking-wide ${isUser ? 'text-white/80' : 'text-text-muted'}`}>{roleLabel}</div>
-                    <p className="text-sm mt-1 leading-snug">{message.text}</p>
-                  </div>
-                </div>
-              )
-            })}
-
-            {isSending && (
-              <div className="flex justify-start">
-                <div className="bg-background border border-border-light rounded-lg px-3 py-2 text-sm text-text-muted">
-                  <DotLottiePreloader size={20} label="Typing..." className="w-full justify-start" />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div className="px-3 pt-3 pb-2 border-t border-border-light">
-            {!agentConnected && (
-              <div className="flex flex-wrap gap-2 mb-2">
-                <button type="button" onClick={() => quickAsk('How do I upload documents?')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Upload help</button>
-                <button type="button" onClick={() => quickAsk('Show me expenses guidance')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Expenses help</button>
-                <button type="button" onClick={() => quickAsk('Connect me to an agent')} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">Talk to agent</button>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={draftMessage}
-                onChange={(e) => setDraftMessage(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleSend() }}
-                placeholder={agentConnected ? 'Message the human support agent...' : 'Ask the support bot or type "agent"...'}
-                className="flex-1 h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              />
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!draftMessage.trim() || isSending}
-                className="h-10 px-3 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1"
-              >
-                {isSending ? (
-                  <DotLottiePreloader size={18} label="Sending..." labelClassName="text-sm text-white" />
-                ) : (
-                  <>Send <ArrowUpRight className="w-4 h-4" /></>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <button
-        type="button"
-        onClick={() => setIsOpen((prev) => !prev)}
-        className="h-11 px-4 rounded-full bg-primary text-white shadow-card hover:bg-primary-light inline-flex items-center gap-2"
-      >
-        <MessageCircle className="w-4 h-4" />
-        <span className="text-sm font-medium">Support</span>
-      </button>
-    </div>
-  )
+function ClientSupportWidget(props) {
+  return <ClientSupportWidgetExperience {...props} />
 }
 
 // Reusable file viewer modal used by pages
-function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResubmit, readOnly = false }) {
+function FileViewerModal({
+  file: incomingFile,
+  onClose,
+  onSave,
+  onDelete,
+  onResubmit,
+  readOnly = false,
+  tagOptions = [],
+  downloadNamePrefix = '',
+}) {
   const file = incomingFile && typeof incomingFile === 'object' ? incomingFile : EMPTY_FILE_RECORD
   const [editData, setEditData] = useState(file)
   const [textPreview, setTextPreview] = useState(null)
@@ -3226,6 +3029,7 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
   const [selectedVersion, setSelectedVersion] = useState(null)
   const [isEditing, setIsEditing] = useState(false)
   const [showLockedEditNotice, setShowLockedEditNotice] = useState(false)
+  const [isCustomTagMode, setIsCustomTagMode] = useState(false)
   const [cachedFileBlob, setCachedFileBlob] = useState(null)
   const [cachedFileCacheKey, setCachedFileCacheKey] = useState('')
   const resubmitInputRef = useRef(null)
@@ -3279,6 +3083,7 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
     setSelectedVersion(null)
     setIsEditing(false)
     setShowLockedEditNotice(false)
+    setIsCustomTagMode(false)
   }, [file, readOnly])
 
   const safeEditData = editData && typeof editData === 'object' ? editData : EMPTY_FILE_RECORD
@@ -3674,7 +3479,37 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
   const hasAdminFeedback = Boolean(adminComment || requiredAction || adminNotes || infoRequestDetails)
   const paymentMethodOptions = ['Cash', 'Bank Transfer', 'Card', 'Cheque', 'Mobile Money', 'POS', 'Other']
   const versions = Array.isArray(file.versions) ? file.versions : []
+  const dynamicTagValues = versions.map((entry) => (
+    entry?.fileSnapshot?.class
+    || entry?.fileSnapshot?.className
+    || entry?.fileSnapshot?.expenseClass
+    || entry?.fileSnapshot?.salesClass
+    || ''
+  ))
+  const computedTagOptions = (() => {
+    const byKey = new Map()
+    ;[
+      ...(Array.isArray(tagOptions) ? tagOptions : []),
+      ...dynamicTagValues,
+    ].forEach((value) => {
+      const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+      if (!normalized) return
+      const key = normalized.toLowerCase()
+      if (byKey.has(key)) return
+      byKey.set(key, normalized)
+    })
+    return Array.from(byKey.values())
+  })()
+  const normalizedCurrentTag = String(safeEditData.class || safeEditData.expenseClass || safeEditData.salesClass || '').trim()
+  const matchingTag = computedTagOptions.find((option) => option.toLowerCase() === normalizedCurrentTag.toLowerCase()) || ''
+  const showCustomTagInput = isCustomTagMode || Boolean(normalizedCurrentTag && !matchingTag)
+  const selectedTagValue = showCustomTagInput ? '__create_new__' : matchingTag
   const currentDownloadUrl = resolvePreviewUrl(editData || file)
+  const baseDownloadFileName = safeEditData.filename || file.filename || 'document'
+  const resolvedDownloadFileName = buildClientDownloadFilename({
+    businessName: downloadNamePrefix,
+    fileName: baseDownloadFileName,
+  })
   const uploadInfo = file.uploadInfo || {}
   const sourceLabelMap = {
     'drag-drop': 'Drag & Drop',
@@ -3795,19 +3630,58 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
             </div>
             <div>
               <label className="block text-xs text-text-muted">Class</label>
-              <input
-                value={safeEditData.class || safeEditData.expenseClass || safeEditData.salesClass || ''}
-                onChange={(e) => {
-                  const nextClass = e.target.value
-                  setEditData(prev => ({
-                    ...prev,
-                    class: nextClass,
-                    expenseClass: nextClass,
-                    salesClass: nextClass,
-                  }))
+              <select
+                value={selectedTagValue}
+                onChange={(event) => {
+                  const nextValue = event.target.value
+                  if (nextValue === '__create_new__') {
+                    setIsCustomTagMode(true)
+                    setEditData(prev => ({
+                      ...prev,
+                      class: '',
+                      classId: '',
+                      className: '',
+                      expenseClass: '',
+                      salesClass: '',
+                    }))
+                    return
+                  }
+                  setIsCustomTagMode(false)
+                    setEditData(prev => ({
+                      ...prev,
+                      class: nextValue,
+                      classId: nextValue ? `CLS-${nextValue.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 16)}` : '',
+                      className: nextValue,
+                      expenseClass: nextValue,
+                      salesClass: nextValue,
+                    }))
                 }}
                 className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
-              />
+              >
+                <option value="">Select class</option>
+                {computedTagOptions.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+                <option value="__create_new__">Create new class</option>
+              </select>
+              {showCustomTagInput && (
+                <input
+                  value={safeEditData.class || safeEditData.expenseClass || safeEditData.salesClass || ''}
+                  onChange={(event) => {
+                    const nextClass = event.target.value
+                    setEditData(prev => ({
+                      ...prev,
+                      class: nextClass,
+                      classId: nextClass ? `CLS-${nextClass.toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 16)}` : '',
+                      className: nextClass,
+                      expenseClass: nextClass,
+                      salesClass: nextClass,
+                    }))
+                  }}
+                  placeholder="Enter new class"
+                  className="w-full h-10 mt-2 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary"
+                />
+              )}
             </div>
             <div>
               <label className="block text-xs text-text-muted">Vendor</label>
@@ -3836,15 +3710,6 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
                 <option value="High">High</option>
                 <option value="Urgent">Urgent</option>
               </select>
-            </div>
-            <div className="md:col-span-2">
-              <label className="block text-xs text-text-muted">Notes</label>
-              <textarea
-                value={safeEditData.internalNotes || ''}
-                onChange={(e) => setEditData(prev => ({ ...prev, internalNotes: e.target.value }))}
-                className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary"
-                rows={3}
-              />
             </div>
             {('expenseDate' in safeEditData || 'expenseDate' in file) && (
               <div>
@@ -3876,12 +3741,27 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
                 <input value={safeEditData.customerName || ''} onChange={(e) => setEditData(prev => ({ ...prev, customerName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
+            {('invoice' in safeEditData || 'invoice' in file) && (
+              <div>
+                <label className="block text-xs text-text-muted">Invoice</label>
+                <input value={safeEditData.invoice || ''} onChange={(e) => setEditData(prev => ({ ...prev, invoice: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
+              </div>
+            )}
             {('invoiceNumber' in safeEditData || 'invoiceNumber' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Invoice #</label>
                 <input value={safeEditData.invoiceNumber || ''} onChange={(e) => setEditData(prev => ({ ...prev, invoiceNumber: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm disabled:bg-background disabled:text-text-secondary" />
               </div>
             )}
+            <div className="md:col-span-2">
+              <label className="block text-xs text-text-muted">Notes</label>
+              <textarea
+                value={safeEditData.internalNotes || ''}
+                onChange={(e) => setEditData(prev => ({ ...prev, internalNotes: e.target.value }))}
+                className="w-full px-3 py-2 border border-border rounded-md text-sm resize-none disabled:bg-background disabled:text-text-secondary"
+                rows={3}
+              />
+            </div>
             {('bankName' in safeEditData || 'bankName' in file) && (
               <div>
                 <label className="block text-xs text-text-muted">Bank Name</label>
@@ -3930,9 +3810,7 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
               ) : (
                 <StatusBadge status={displayStatus} />
               )}
-              <span className="text-xs text-text-muted">
-                {isDeletedFile ? 'Soft deleted file' : 'Managed by admin'}
-              </span>
+              {isDeletedFile && <span className="text-xs text-text-muted">Soft deleted file</span>}
             </div>
           </div>
           {displayStatus === 'Approved' && (
@@ -4043,6 +3921,10 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
                       const snapshot = version.fileSnapshot || {}
                       const previewUrl = normalizeRuntimePreviewUrl(snapshot.previewUrl || version.previewUrl || '', { allowBlob: false })
                       const filename = snapshot.filename || version.filename || file.filename
+                      const versionDownloadFileName = buildClientDownloadFilename({
+                        businessName: downloadNamePrefix,
+                        fileName: filename || 'document',
+                      })
                       const versionNumber = version.versionNumber || version.version || idx + 1
                       return (
                         <tr key={`version-row-${versionNumber}-${idx}`} className="border-b border-border-light last:border-b-0">
@@ -4067,7 +3949,7 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
                           <td className="px-3 py-2 text-sm text-text-secondary">{formatTime(version.timestamp || version.date)}</td>
                           <td className="px-3 py-2 text-sm">
                             {previewUrl && !isDeletedFile ? (
-                              <a href={previewUrl} download={filename} className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background">
+                              <a href={previewUrl} download={versionDownloadFileName} className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background">
                                 Download
                               </a>
                             ) : (
@@ -4085,7 +3967,7 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
 
           <div className="pt-4 flex items-center gap-2 justify-end">
             {currentDownloadUrl ? (
-              <a href={currentDownloadUrl} download={safeEditData.filename || file.filename || 'document'} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
+              <a href={currentDownloadUrl} download={resolvedDownloadFileName} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
             ) : (
               <span className="h-9 px-4 inline-flex items-center rounded-md bg-background text-xs text-text-secondary border border-border">
                 Download unavailable
@@ -4121,8 +4003,8 @@ function FileViewerModal({ file: incomingFile, onClose, onSave, onDelete, onResu
                   </button>
                 ) : (
                   <>
-                    <button onClick={() => { setEditData(file); setSelectedVersion(null); setIsEditing(false) }} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background">Cancel</button>
-                    <button onClick={() => { onSave?.(safeEditData); setIsEditing(false) }} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Save</button>
+                    <button onClick={() => { setEditData(file); setSelectedVersion(null); setIsEditing(false); setIsCustomTagMode(false) }} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background">Cancel</button>
+                    <button onClick={() => { onSave?.(safeEditData); setIsEditing(false); setIsCustomTagMode(false) }} className="h-9 px-4 bg-primary text-white rounded-md text-sm">Save</button>
                   </>
                 )}
               </>
@@ -4165,3 +4047,4 @@ export {
   ClientSupportWidget,
   FileViewerModal,
 }
+
