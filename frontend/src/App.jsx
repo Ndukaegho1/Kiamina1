@@ -10,7 +10,10 @@ import {
   SupportPage as ClientSupportPage,
   ClientSupportWidget,
 } from './components/client/dashboard/ClientDashboardViews'
-import AccountingRecordsPage from './components/client/accounting/AccountingRecordsPage'
+import {
+  DocumentFoldersPage as ClientDocumentFoldersPage,
+  FolderFilesPage as ClientFolderFilesPage,
+} from './components/client/dashboard/ClientDocumentsWorkspace'
 import ClientSettingsPage from './components/client/settings/ClientSettingsPage'
 import ClientAddDocumentModal from './components/client/documents/ClientAddDocumentModal'
 import AuthExperience from './components/auth/AuthExperience'
@@ -34,13 +37,6 @@ import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
 import DotLottiePreloader from './components/common/DotLottiePreloader'
 import { getNetworkAwareDurationMs, isPageReloadNavigation } from './utils/networkRuntime'
 import { apiFetch, clearApiAccessToken, setApiAccessToken } from './utils/apiClient'
-import {
-  createAccountingRecord,
-  deleteAccountingRecord,
-  importAccountingRecords,
-  listAccountingRecords,
-  updateAccountingRecord,
-} from './utils/accountingRecordsApi'
 
 const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
@@ -724,89 +720,12 @@ const buildClassId = (name = '') => {
   return token ? `CLS-${token}` : `CLS-${Date.now().toString(36).toUpperCase()}`
 }
 
-const normalizeAccountingCategory = (value = '') => {
-  const normalized = String(value || '').trim().toLowerCase()
-  if (normalized === 'bank' || normalized === 'bankstatement' || normalized === 'bank statements') return 'bank-statements'
-  if (normalized === 'sales') return 'sales'
-  if (normalized === 'expenses' || normalized === 'expense') return 'expenses'
-  return 'other'
-}
-
-const mapRecordStatusToUiStatus = (status = '') => {
-  const normalized = String(status || '').trim().toLowerCase()
-  if (normalized === 'posted') return 'Approved'
-  if (normalized === 'archived') return 'Deleted'
-  return 'Pending Review'
-}
-
 const mapUiStatusToRecordStatus = (status = '') => {
   const normalized = String(status || '').trim().toLowerCase()
   if (normalized === 'approved') return 'posted'
   if (normalized === 'deleted' || normalized === 'archived' || normalized === 'rejected') return 'archived'
   return 'draft'
 }
-
-const mapAccountingRecordToDocumentRow = (record = {}, categoryFallback = 'expenses') => {
-  const categoryId = normalizeAccountingCategory(record.category || categoryFallback)
-  const transactionDateIso = record.transactionDate || record.createdAt || new Date().toISOString()
-  const transactionDateDisplay = formatClientDocumentTimestamp(transactionDateIso)
-  const classValue = String(record.className || '').trim()
-  const safeRecordId = String(record.id || record._id || `REC-${Date.now().toString(36).toUpperCase()}`)
-  const categoryLabel = categoryId === 'sales'
-    ? 'Sales'
-    : categoryId === 'bank-statements'
-      ? 'Bank Statement'
-      : 'Expense'
-
-  return {
-    id: safeRecordId,
-    recordId: safeRecordId,
-    fileId: record.reference || `REC-${safeRecordId.slice(-8).toUpperCase()}`,
-    filename: record.description || `${categoryLabel} Record`,
-    categoryId,
-    category: categoryLabel,
-    class: classValue,
-    className: classValue,
-    classId: classValue ? buildClassId(classValue) : '',
-    expenseClass: categoryId === 'expenses' ? classValue : '',
-    salesClass: categoryId === 'sales' ? classValue : '',
-    user: record.ownerUserId || '',
-    date: transactionDateDisplay,
-    transactionDate: transactionDateIso,
-    transactionDateIso,
-    status: mapRecordStatusToUiStatus(record.status),
-    recordStatus: String(record.status || 'draft').trim().toLowerCase() || 'draft',
-    amount: Number(record.amount || 0),
-    currency: String(record.currency || 'NGN').toUpperCase(),
-    transactionType: record.transactionType || 'unknown',
-    description: record.description || '',
-    vendorName: record.vendorName || '',
-    customerName: record.customerName || '',
-    paymentMethod: record.paymentMethod || '',
-    invoiceNumber: record.invoiceNumber || '',
-    reference: record.reference || '',
-    metadata: record.metadata && typeof record.metadata === 'object' ? record.metadata : {},
-    createdAtIso: record.createdAt || transactionDateIso,
-    updatedAtIso: record.updatedAt || transactionDateIso,
-  }
-}
-
-const buildAccountingRecordPayloadFromDocumentRow = (row = {}, categoryId = 'expenses') => ({
-  category: normalizeAccountingCategory(categoryId || row.categoryId || row.category),
-  className: row.className || row.class || '',
-  amount: Number(row.amount || 0),
-  currency: String(row.currency || 'NGN').toUpperCase(),
-  transactionType: row.transactionType || 'unknown',
-  transactionDate: row.transactionDateIso || row.transactionDate || row.createdAtIso || new Date().toISOString(),
-  description: row.description || row.filename || '',
-  vendorName: row.vendorName || '',
-  customerName: row.customerName || '',
-  paymentMethod: row.paymentMethod || '',
-  invoiceNumber: row.invoiceNumber || '',
-  reference: row.reference || row.fileId || '',
-  status: row.recordStatus || mapUiStatusToRecordStatus(row.status),
-  metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
-})
 
 const createDefaultClientDocuments = () => {
   return {
@@ -1397,7 +1316,6 @@ function App() {
   const [expenseClassOptions, setExpenseClassOptions] = useState(() => normalizeClassOptions(initialClientDocuments.expenseClassOptions))
   const [salesClassOptions, setSalesClassOptions] = useState(() => normalizeClassOptions(initialClientDocuments.salesClassOptions))
   const [uploadHistoryRecords, setUploadHistoryRecords] = useState(initialClientDocuments.uploadHistory)
-  const [isAccountingRecordsLoading, setIsAccountingRecordsLoading] = useState(false)
   const [clientActivityRecords, setClientActivityRecords] = useState(initialClientActivityRecords)
   const [toast, setToast] = useState(null)
   const [profilePhoto, setProfilePhoto] = useState(() => getSavedProfilePhoto(initialScopedClientEmail))
@@ -1614,144 +1532,6 @@ function App() {
     ? impersonationSession.clientEmail
     : authUser?.email
   const normalizedScopedClientEmail = (scopedClientEmail || '').trim().toLowerCase()
-  const buildUploadHistoryFromCategoryRows = (categoryId, rows = []) => {
-    const categoryLabel = categoryId === 'sales'
-      ? 'Sales'
-      : categoryId === 'bank-statements'
-        ? 'Bank Statement'
-        : 'Expense'
-    return (Array.isArray(rows) ? rows : [])
-      .filter((row) => row && typeof row === 'object' && !row.isFolder)
-      .map((row) => ({
-        id: `UP-${row.recordId || row.id || Math.random().toString(36).slice(2)}`,
-        filename: row.filename || row.description || 'Record',
-        type: 'REC',
-        categoryId,
-        category: categoryLabel,
-        date: row.date || formatClientDocumentTimestamp(row.transactionDateIso || row.createdAtIso || new Date().toISOString()),
-        user: row.user || clientFirstName || 'Client User',
-        ownerEmail: normalizedScopedClientEmail,
-        status: row.status || mapRecordStatusToUiStatus(row.recordStatus || 'draft'),
-        isFolder: false,
-        folderId: '',
-        fileId: row.fileId || row.reference || row.recordId || row.id || '',
-      }))
-  }
-  const refreshUploadHistoryFromRecordStates = ({
-    expenses = expenseDocuments,
-    sales = salesDocuments,
-    bankStatements = bankStatementDocuments,
-  } = {}) => {
-    setUploadHistoryRecords([
-      ...buildUploadHistoryFromCategoryRows('expenses', expenses),
-      ...buildUploadHistoryFromCategoryRows('sales', sales),
-      ...buildUploadHistoryFromCategoryRows('bank-statements', bankStatements),
-    ])
-  }
-  const setCategoryRecordsState = (categoryId, rows = []) => {
-    if (categoryId === 'sales') {
-      setSalesDocuments(rows)
-      return
-    }
-    if (categoryId === 'bank-statements') {
-      setBankStatementDocuments(rows)
-      return
-    }
-    setExpenseDocuments(rows)
-  }
-  const fetchAccountingRecordsByCategory = async (categoryId) => {
-    const response = await listAccountingRecords({
-      category: categoryId,
-      limit: 200,
-      skip: 0,
-    })
-    const items = Array.isArray(response?.items) ? response.items : []
-    return items.map((item) => mapAccountingRecordToDocumentRow(item, categoryId))
-  }
-  const refreshAllAccountingRecords = async () => {
-    if (!isAuthenticated || currentUserRole !== 'client') return
-
-    setIsAccountingRecordsLoading(true)
-    try {
-      const [expenses, sales, bankStatements] = await Promise.all([
-        fetchAccountingRecordsByCategory('expenses'),
-        fetchAccountingRecordsByCategory('sales'),
-        fetchAccountingRecordsByCategory('bank-statements'),
-      ])
-      setExpenseDocuments(expenses)
-      setSalesDocuments(sales)
-      setBankStatementDocuments(bankStatements)
-      refreshUploadHistoryFromRecordStates({ expenses, sales, bankStatements })
-    } finally {
-      setIsAccountingRecordsLoading(false)
-    }
-  }
-  const createCategoryAccountingRecord = async (categoryId, payload = {}) => {
-    const created = await createAccountingRecord({
-      ...payload,
-      category: normalizeAccountingCategory(categoryId),
-      status: payload.status || 'draft',
-    })
-    const rows = await fetchAccountingRecordsByCategory(categoryId)
-    setCategoryRecordsState(categoryId, rows)
-    const nextExpenses = categoryId === 'expenses' ? rows : expenseDocuments
-    const nextSales = categoryId === 'sales' ? rows : salesDocuments
-    const nextBankStatements = categoryId === 'bank-statements' ? rows : bankStatementDocuments
-    refreshUploadHistoryFromRecordStates({
-      expenses: nextExpenses,
-      sales: nextSales,
-      bankStatements: nextBankStatements,
-    })
-    return mapAccountingRecordToDocumentRow(created, categoryId)
-  }
-  const updateCategoryAccountingRecord = async (categoryId, recordId, payload = {}) => {
-    const updated = await updateAccountingRecord(recordId, payload)
-    const rows = await fetchAccountingRecordsByCategory(categoryId)
-    setCategoryRecordsState(categoryId, rows)
-    const nextExpenses = categoryId === 'expenses' ? rows : expenseDocuments
-    const nextSales = categoryId === 'sales' ? rows : salesDocuments
-    const nextBank = categoryId === 'bank-statements' ? rows : bankStatementDocuments
-    refreshUploadHistoryFromRecordStates({
-      expenses: nextExpenses,
-      sales: nextSales,
-      bankStatements: nextBank,
-    })
-    return mapAccountingRecordToDocumentRow(updated, categoryId)
-  }
-  const deleteCategoryAccountingRecord = async (categoryId, recordId) => {
-    await deleteAccountingRecord(recordId)
-    const rows = await fetchAccountingRecordsByCategory(categoryId)
-    setCategoryRecordsState(categoryId, rows)
-    const nextExpenses = categoryId === 'expenses' ? rows : expenseDocuments
-    const nextSales = categoryId === 'sales' ? rows : salesDocuments
-    const nextBank = categoryId === 'bank-statements' ? rows : bankStatementDocuments
-    refreshUploadHistoryFromRecordStates({
-      expenses: nextExpenses,
-      sales: nextSales,
-      bankStatements: nextBank,
-    })
-  }
-  const bulkImportCategoryAccountingRecords = async (categoryId, file) => {
-    const result = await importAccountingRecords({
-      file,
-      category: normalizeAccountingCategory(categoryId),
-      status: 'draft',
-      transactionType: categoryId === 'sales' ? 'credit' : categoryId === 'expenses' ? 'debit' : 'unknown',
-      currency: 'NGN',
-      dryRun: false,
-    })
-    const rows = await fetchAccountingRecordsByCategory(categoryId)
-    setCategoryRecordsState(categoryId, rows)
-    const nextExpenses = categoryId === 'expenses' ? rows : expenseDocuments
-    const nextSales = categoryId === 'sales' ? rows : salesDocuments
-    const nextBank = categoryId === 'bank-statements' ? rows : bankStatementDocuments
-    refreshUploadHistoryFromRecordStates({
-      expenses: nextExpenses,
-      sales: nextSales,
-      bankStatements: nextBank,
-    })
-    return result
-  }
   const verificationProgress = useMemo(() => (
     resolveVerificationProgress({
       onboardingData: onboardingState.data,
@@ -2417,38 +2197,6 @@ function App() {
     setUploadHistoryRecords(scopedDocuments.uploadHistory)
     setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
   }, [scopedClientEmail, impersonationSession?.businessName, impersonationSession?.clientName, authUser?.fullName])
-
-  useEffect(() => {
-    if (!isAuthenticated || currentUserRole !== 'client') return
-    let cancelled = false
-
-    const load = async () => {
-      setIsAccountingRecordsLoading(true)
-      try {
-        const [expenses, sales, bankStatements] = await Promise.all([
-          fetchAccountingRecordsByCategory('expenses'),
-          fetchAccountingRecordsByCategory('sales'),
-          fetchAccountingRecordsByCategory('bank-statements'),
-        ])
-        if (cancelled) return
-        setExpenseDocuments(expenses)
-        setSalesDocuments(sales)
-        setBankStatementDocuments(bankStatements)
-        refreshUploadHistoryFromRecordStates({ expenses, sales, bankStatements })
-      } catch {
-        if (cancelled) return
-      } finally {
-        if (!cancelled) {
-          setIsAccountingRecordsLoading(false)
-        }
-      }
-    }
-
-    void load()
-    return () => {
-      cancelled = true
-    }
-  }, [isAuthenticated, currentUserRole, normalizedScopedClientEmail])
 
   useEffect(() => {
     if (!isImpersonatingClient || !impersonationSession) return
@@ -4117,9 +3865,9 @@ function App() {
 
     return runWithSlowRuntimeWatch(async () => {
       const categoryConfig = {
-        expenses: { prefix: 'EXP', label: 'Expense' },
-        sales: { prefix: 'SAL', label: 'Sales' },
-        'bank-statements': { prefix: 'BNK', label: 'Bank Statement' },
+        expenses: { prefix: 'EXP', label: 'Expense', setter: setExpenseDocuments },
+        sales: { prefix: 'SAL', label: 'Sales', setter: setSalesDocuments },
+        'bank-statements': { prefix: 'BNK', label: 'Bank Statement', setter: setBankStatementDocuments },
       }
 
       const selectedConfig = categoryConfig[category]
@@ -4140,84 +3888,171 @@ function App() {
         || authUser?.email
         || ''
       ).trim().toLowerCase()
-      const folderToken = String(folderName || 'Upload').trim().replace(/\s+/g, '-').toUpperCase().slice(0, 12) || 'UPLOAD'
+      const createdAtIso = new Date().toISOString()
+      const createdAtDisplay = formatClientDocumentTimestamp(createdAtIso)
+      const folderId = `F-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
+      const folderToken = folderId.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-8)
+      const buildFileReference = (index) => `${selectedConfig.prefix}-${folderToken}-${String(index + 1).padStart(3, '0')}`
 
-      const createdRows = []
-      for (let index = 0; index < uploadedItems.length; index += 1) {
-        const item = uploadedItems[index]
+      const files = await Promise.all(uploadedItems.map(async (item, index) => {
         const metadata = resolveFileDetails(item)
         const classValue = String(metadata?.class || '').replace(/\s+/g, ' ').trim()
+        const classId = buildClassId(classValue)
+        const confidentialityLevel = metadata?.confidentialityLevel || 'Standard'
+        const processingPriority = metadata?.processingPriority || 'Normal'
+        const internalNotes = (metadata?.internalNotes || '').trim()
+        const vendorName = (metadata?.vendorName || '').trim()
         const paymentMethod = String(metadata?.paymentMethod || '').trim()
-        const vendorName = String(metadata?.vendorName || '').trim()
-        const customerName = String(metadata?.customerName || '').trim()
-        const invoiceNumber = String(metadata?.invoiceNumber || metadata?.invoice || '').trim()
-        const processingPriority = String(metadata?.processingPriority || 'Normal').trim()
-        const confidentialityLevel = String(metadata?.confidentialityLevel || 'Standard').trim()
+        const invoice = String(metadata?.invoice || '').trim()
+        const invoiceNumber = String(metadata?.invoiceNumber || '').trim()
+        const fileCreatedAtIso = new Date().toISOString()
         const uploadSource = item.uploadSource || 'browse-file'
-        const fileReference = `${selectedConfig.prefix}-${folderToken}-${String(index + 1).padStart(3, '0')}`
-        const fileCacheKey = buildFileCacheKey({ ownerEmail, fileId: fileReference })
+        const fileId = buildFileReference(index)
+        const fileCacheKey = buildFileCacheKey({ ownerEmail, fileId })
         if (item.rawFile instanceof Blob && fileCacheKey) {
           await putCachedFileBlob(fileCacheKey, item.rawFile, { filename: item.name })
         }
-
-        const payload = {
-          ...buildAccountingRecordPayloadFromDocumentRow({
-            className: classValue,
-            amount: Number.isFinite(Number(metadata?.amount)) ? Number(metadata?.amount) : 0,
-            currency: metadata?.currency || 'NGN',
-            transactionType: metadata?.transactionType || (category === 'sales' ? 'credit' : category === 'expenses' ? 'debit' : 'unknown'),
-            transactionDate: metadata?.transactionDate || new Date().toISOString(),
-            description: metadata?.description || item.name || `${selectedConfig.label} upload`,
-            vendorName,
-            customerName,
-            paymentMethod,
-            invoiceNumber,
-            reference: metadata?.reference || fileReference,
-            status: 'draft',
-            metadata: {
-              folderName: folderName?.trim() || '',
-              documentName: item.name || '',
-              extension: item.extension || (item.name?.split('.').pop()?.toUpperCase() || 'FILE'),
-              uploadSource,
-              fileCacheKey,
-              processingPriority,
-              confidentialityLevel,
-              uploader: ownerName,
-            },
-          }, category),
+        const previewUrl = item.previewUrl || (item.rawFile ? URL.createObjectURL(item.rawFile) : null)
+        const uploadSourceLabel = uploadSource === 'drag-drop'
+          ? 'Drag & Drop'
+          : uploadSource === 'browse-folder'
+            ? 'Browse Folder'
+            : 'Browse Files'
+        const baseFile = {
+          folderId,
+          folderName: folderName.trim(),
+          filename: item.name,
+          extension: item.extension || (item.name?.split('.').pop()?.toUpperCase() || 'FILE'),
+          status: 'Pending Review',
+          class: classValue,
+          classId,
+          className: classValue,
+          expenseClass: category === 'expenses' ? classValue : '',
+          salesClass: category === 'sales' ? classValue : '',
+          fileCacheKey,
+          previewUrl,
+          ...(category === 'expenses' ? { paymentMethod } : {}),
+          ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
         }
 
-        const created = await createAccountingRecord({
-          ...payload,
-          category: normalizeAccountingCategory(category),
-          status: payload.status || 'draft',
-        })
-        createdRows.push(mapAccountingRecordToDocumentRow(created, category))
-      }
+        return {
+          id: `${folderId}-FILE-${String(index + 1).padStart(3, '0')}`,
+          folderId,
+          folderName: folderName.trim(),
+          fileId,
+          fileCacheKey,
+          filename: item.name,
+          extension: baseFile.extension,
+          status: 'Pending Review',
+          user: ownerName,
+          date: createdAtDisplay,
+          createdAtIso: fileCreatedAtIso,
+          updatedAtIso: fileCreatedAtIso,
+          deletedAtIso: null,
+          isDeleted: false,
+          isLocked: false,
+          lockedAtIso: null,
+          approvedBy: '',
+          approvedAtIso: null,
+          rejectedBy: '',
+          rejectedAtIso: null,
+          rejectionReason: '',
+          unlockedBy: '',
+          unlockedAtIso: null,
+          unlockReason: '',
+          class: classValue,
+          classId,
+          className: classValue,
+          expenseClass: category === 'expenses' ? classValue : '',
+          salesClass: category === 'sales' ? classValue : '',
+          vendorName,
+          confidentialityLevel,
+          processingPriority,
+          internalNotes,
+          ...(category === 'expenses' ? { paymentMethod } : {}),
+          ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
+          previewUrl,
+          rawFile: item.rawFile || null,
+          uploadSource,
+          uploadInfo: {
+            originalUploadedAtIso: fileCreatedAtIso,
+            originalUploadSource: uploadSource,
+            originalUploadedBy: ownerName,
+            device: 'Web Browser',
+            ipAddress: '--',
+            lastModifiedAtIso: fileCreatedAtIso,
+            replacements: [],
+            totalVersions: 1,
+          },
+          versions: [
+            createVersionEntry({
+              versionNumber: 1,
+              action: 'Uploaded',
+              performedBy: ownerName,
+              timestamp: fileCreatedAtIso,
+              notes: `Initial upload via ${uploadSourceLabel}.`,
+              fileSnapshot: baseFile,
+            }),
+          ],
+          activityLog: [
+            createFileActivityEntry({
+              actionType: 'upload',
+              description: `File uploaded via ${uploadSourceLabel}.`,
+              performedBy: ownerName,
+              timestamp: fileCreatedAtIso,
+            }),
+          ],
+        }
+      }))
 
-      const refreshedRows = await fetchAccountingRecordsByCategory(category)
-      setCategoryRecordsState(category, refreshedRows)
-      const nextExpenses = category === 'expenses' ? refreshedRows : expenseDocuments
-      const nextSales = category === 'sales' ? refreshedRows : salesDocuments
-      const nextBankStatements = category === 'bank-statements' ? refreshedRows : bankStatementDocuments
-      refreshUploadHistoryFromRecordStates({
-        expenses: nextExpenses,
-        sales: nextSales,
-        bankStatements: nextBankStatements,
-      })
-
-      const classValues = refreshedRows.map((row) => row.className || row.class).filter(Boolean)
-      if (classValues.length > 0) {
-        if (category === 'sales') {
-          setSalesClassOptions((prev) => normalizeClassOptions([...prev, ...classValues]))
-        } else if (category === 'expenses') {
+      if (category === 'expenses') {
+        const classValues = files.map((file) => file.class).filter(Boolean)
+        if (classValues.length > 0) {
           setExpenseClassOptions((prev) => normalizeClassOptions([...prev, ...classValues]))
         }
       }
+      if (category === 'sales') {
+        const classValues = files.map((file) => file.class).filter(Boolean)
+        if (classValues.length > 0) {
+          setSalesClassOptions((prev) => normalizeClassOptions([...prev, ...classValues]))
+        }
+      }
+
+      const folderRecord = {
+        id: folderId,
+        isFolder: true,
+        folderName: folderName.trim(),
+        category: selectedConfig.label,
+        user: ownerName,
+        createdAtIso,
+        createdAtDisplay,
+        date: createdAtDisplay,
+        files,
+      }
+
+      selectedConfig.setter((prev) => [folderRecord, ...prev])
+      setUploadHistoryRecords((prev) => [
+        ...files.map((file, index) => ({
+          id: `UP-${Date.now()}-${index}-${Math.floor(Math.random() * 1000)}`,
+          filename: file.filename,
+          type: file.extension || 'FILE',
+          categoryId: category,
+          category: selectedConfig.label,
+          date: file.date || createdAtDisplay,
+          user: ownerName,
+          ownerEmail,
+          status: file.status || 'Pending Review',
+          isFolder: false,
+          folderId: folderRecord.id,
+          fileId: file.fileId,
+          uploadSource: file.uploadSource || 'browse-file',
+        })),
+        ...(Array.isArray(prev) ? prev.filter((row) => !row?.isFolder) : []),
+      ])
 
       appendScopedClientLog(
-        'Uploaded records',
-        `[${selectedConfig.label}] Imported ${createdRows.length} record(s) from upload "${folderName || 'Untitled Upload'}".`,
+        'Uploaded files',
+        `[${selectedConfig.label}] Uploaded ${files.length} file(s) to folder "${folderRecord.folderName}" (${folderRecord.id}).`,
       )
 
       setIsModalOpen(false)
@@ -4242,9 +4077,99 @@ function App() {
     || companyName
     || '',
   ).trim()
+  const isClientDashboardPageActive = Boolean(
+    (!isAdminView || isImpersonatingClient)
+    && activePage === 'dashboard',
+  )
+  const isClientDashboardOverviewLoading = Boolean(
+    isClientDashboardPageActive
+    && isDashboardBootstrapLoading,
+  )
 
   const renderClientPage = () => {
+    const logDocumentWorkspaceActivity = (categoryId, action, details) => {
+      const categoryLabel = categoryId === 'sales'
+        ? 'Sales'
+        : categoryId === 'bank-statements'
+          ? 'Bank Statements'
+          : 'Expenses'
+      appendScopedClientLog(action, `[${categoryLabel}] ${details}`)
+    }
+
     const downloadBusinessName = String(impersonationSession?.businessName || companyName || '').trim()
+    const renderDocumentWorkspace = ({ categoryId, title, records, setRecords }) => {
+      const impersonationBusinessName = impersonationSession?.businessName || companyName || 'Client Account'
+      const appendFileUploadHistory = ({
+        filename,
+        extension,
+        fileId,
+        folderId,
+        uploadedBy,
+        ownerEmail,
+        uploadSource,
+        timestampIso,
+        status = 'Pending Review',
+      } = {}) => {
+        const timestamp = timestampIso || new Date().toISOString()
+        setUploadHistoryRecords((prev) => [{
+          id: `UP-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          filename: filename || '--',
+          type: extension || 'FILE',
+          categoryId,
+          category: title,
+          date: formatClientDocumentTimestamp(timestamp),
+          user: uploadedBy || authUser?.fullName || clientFirstName || 'Client User',
+          ownerEmail: String(ownerEmail || normalizedScopedClientEmail || scopedClientEmail || authUser?.email || '').trim().toLowerCase(),
+          status,
+          isFolder: false,
+          folderId: folderId || '',
+          fileId: fileId || '',
+          uploadSource: uploadSource || 'browse-file',
+        }, ...(Array.isArray(prev) ? prev.filter((row) => !row?.isFolder) : [])])
+      }
+      const isFolderRoute = activeFolderRoute?.category === categoryId && Boolean(activeFolderRoute?.folderId)
+      if (isFolderRoute) {
+        const folder = records.find((row) => row?.isFolder && row.id === activeFolderRoute.folderId) || null
+        return (
+          <ClientFolderFilesPage
+            categoryId={categoryId}
+            categoryTitle={title}
+            records={records}
+            folder={folder}
+            setRecords={setRecords}
+            onLogActivity={(action, details) => logDocumentWorkspaceActivity(categoryId, action, details)}
+            onBack={() => handleSetActivePage(categoryId, { replace: true })}
+            onOpenFolder={(folderId) => handleOpenFolderRoute(categoryId, folderId)}
+            onNavigateDashboard={() => handleSetActivePage('dashboard')}
+            isImpersonatingClient={isImpersonatingClient}
+            impersonationBusinessName={impersonationBusinessName}
+            downloadBusinessName={downloadBusinessName}
+            showToast={showClientToast}
+            onRecordUploadHistory={appendFileUploadHistory}
+            globalSearchTerm={dashboardSearchTerm}
+            onGlobalSearchTermChange={setDashboardSearchTerm}
+          />
+        )
+      }
+
+      return (
+        <ClientDocumentFoldersPage
+          categoryId={categoryId}
+          title={title}
+          records={records}
+          setRecords={setRecords}
+          onLogActivity={(action, details) => logDocumentWorkspaceActivity(categoryId, action, details)}
+          onAddDocument={handleAddDocument}
+          onOpenFolder={(folderId) => handleOpenFolderRoute(categoryId, folderId)}
+          onNavigateDashboard={() => handleSetActivePage('dashboard')}
+          isImpersonatingClient={isImpersonatingClient}
+          impersonationBusinessName={impersonationBusinessName}
+          showToast={showClientToast}
+          globalSearchTerm={dashboardSearchTerm}
+          onGlobalSearchTermChange={setDashboardSearchTerm}
+        />
+      )
+    }
 
     switch (activePage) {
       case 'dashboard':
@@ -4256,53 +4181,31 @@ function App() {
             verificationState={dashboardVerificationState}
             records={dashboardRecords}
             activityLogs={clientActivityRecords}
+            isLoading={isClientDashboardOverviewLoading}
+            showSlowNetworkOverlay={isSlowRuntimeOverlayVisible}
           />
         )
       case 'expenses':
-        return (
-          <AccountingRecordsPage
-            categoryId="expenses"
-            title="Expenses"
-            records={expenseDocuments.filter((row) => !row?.isFolder)}
-            isLoading={isAccountingRecordsLoading}
-            onRefresh={() => { void refreshAllAccountingRecords().catch(() => showClientToast('error', 'Unable to refresh records.')) }}
-            onCreateRecord={(payload) => createCategoryAccountingRecord('expenses', payload)}
-            onUpdateRecord={(recordId, payload) => updateCategoryAccountingRecord('expenses', recordId, payload)}
-            onDeleteRecord={(recordId) => deleteCategoryAccountingRecord('expenses', recordId)}
-            onBulkImport={(file) => bulkImportCategoryAccountingRecords('expenses', file)}
-            showToast={showClientToast}
-          />
-        )
+        return renderDocumentWorkspace({
+          categoryId: 'expenses',
+          title: 'Expenses',
+          records: expenseDocuments,
+          setRecords: setExpenseDocuments,
+        })
       case 'sales':
-        return (
-          <AccountingRecordsPage
-            categoryId="sales"
-            title="Sales"
-            records={salesDocuments.filter((row) => !row?.isFolder)}
-            isLoading={isAccountingRecordsLoading}
-            onRefresh={() => { void refreshAllAccountingRecords().catch(() => showClientToast('error', 'Unable to refresh records.')) }}
-            onCreateRecord={(payload) => createCategoryAccountingRecord('sales', payload)}
-            onUpdateRecord={(recordId, payload) => updateCategoryAccountingRecord('sales', recordId, payload)}
-            onDeleteRecord={(recordId) => deleteCategoryAccountingRecord('sales', recordId)}
-            onBulkImport={(file) => bulkImportCategoryAccountingRecords('sales', file)}
-            showToast={showClientToast}
-          />
-        )
+        return renderDocumentWorkspace({
+          categoryId: 'sales',
+          title: 'Sales',
+          records: salesDocuments,
+          setRecords: setSalesDocuments,
+        })
       case 'bank-statements':
-        return (
-          <AccountingRecordsPage
-            categoryId="bank-statements"
-            title="Bank Statements"
-            records={bankStatementDocuments.filter((row) => !row?.isFolder)}
-            isLoading={isAccountingRecordsLoading}
-            onRefresh={() => { void refreshAllAccountingRecords().catch(() => showClientToast('error', 'Unable to refresh records.')) }}
-            onCreateRecord={(payload) => createCategoryAccountingRecord('bank-statements', payload)}
-            onUpdateRecord={(recordId, payload) => updateCategoryAccountingRecord('bank-statements', recordId, payload)}
-            onDeleteRecord={(recordId) => deleteCategoryAccountingRecord('bank-statements', recordId)}
-            onBulkImport={(file) => bulkImportCategoryAccountingRecords('bank-statements', file)}
-            showToast={showClientToast}
-          />
-        )
+        return renderDocumentWorkspace({
+          categoryId: 'bank-statements',
+          title: 'Bank Statements',
+          records: bankStatementDocuments,
+          setRecords: setBankStatementDocuments,
+        })
       case 'upload-history':
         return (
           <ClientUploadHistoryPage
@@ -4368,6 +4271,8 @@ function App() {
             verificationState={dashboardVerificationState}
             records={dashboardRecords}
             activityLogs={clientActivityRecords}
+            isLoading={isClientDashboardOverviewLoading}
+            showSlowNetworkOverlay={isSlowRuntimeOverlayVisible}
           />
         )
     }
@@ -4390,7 +4295,8 @@ function App() {
     && isAuthenticated
     && !showAuth
     && !showAdminLogin
-    && !adminSetupToken,
+    && !adminSetupToken
+    && !isClientDashboardOverviewLoading
   )
 
   return (
@@ -4402,7 +4308,7 @@ function App() {
           </div>
         </div>
       )}
-      {isSlowRuntimeOverlayVisible && (
+      {isSlowRuntimeOverlayVisible && !isClientDashboardOverviewLoading && (
         <div className="fixed inset-0 z-[225] bg-black/25 flex items-center justify-center p-6">
           <div className="w-full max-w-lg rounded-2xl border border-border-light bg-white shadow-card px-6 py-10 text-center">
             <DotLottiePreloader size={220} className="w-full justify-center" />

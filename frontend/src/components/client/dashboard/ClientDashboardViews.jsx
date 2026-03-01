@@ -735,6 +735,8 @@ function DashboardPage({
   verificationState = 'pending',
   records = [],
   activityLogs = [],
+  isLoading = false,
+  showSlowNetworkOverlay = false,
 }) {
   const displayName = clientFirstName?.trim() || 'Client'
   const hour = new Date().getHours()
@@ -778,42 +780,9 @@ function DashboardPage({
   const approvedCount = sortedRecords.filter(r => r.status === 'Approved').length
   const pendingCount = sortedRecords.filter(r => r.status === 'Pending Review').length
   const rejectedCount = sortedRecords.filter(r => r.status === 'Rejected').length
-  const needsClarificationCount = sortedRecords.filter(r => r.status === 'Needs Clarification' || r.status === 'Info Requested').length
   const totalExpenseFiles = sortedRecords.filter(r => r.categoryId === 'expenses' || r.category === 'Expense').length
   const totalSalesFiles = sortedRecords.filter(r => r.categoryId === 'sales' || r.category === 'Sales').length
   const totalBankFiles = sortedRecords.filter(r => r.categoryId === 'bank-statements' || r.category === 'Bank Statement' || r.category === 'Bank').length
-
-  // Compliance Status - determines overall health from document statuses
-  let complianceStatus = 'compliant'
-  if (rejectedCount > 0 || verificationState === 'rejected' || verificationState === 'suspended') complianceStatus = 'rejected'
-  else if (verificationState === 'unverified') complianceStatus = 'pending'
-  else if (needsClarificationCount > 0 || pendingCount > 0 || verificationState === 'pending') complianceStatus = 'pending'
-
-  const getComplianceWidget = () => {
-    const styles = {
-      compliant: { bg: 'bg-success-bg', border: 'border-success', text: 'text-success', icon: CheckCircle, label: 'Fully Compliant' },
-      pending: { bg: 'bg-warning-bg', border: 'border-warning', text: 'text-warning', icon: AlertCircle, label: 'Action Required' },
-      rejected: { bg: 'bg-error-bg', border: 'border-error', text: 'text-error', icon: XCircle, label: 'Verification Pending' },
-    }
-    const style = styles[complianceStatus]
-    return (
-      <div className={`rounded-lg border-2 ${style.border} ${style.bg} p-4`}>
-        <div className="flex items-center gap-3">
-          <style.icon className={`w-6 h-6 ${style.text}`} />
-          <div>
-            <p className={`text-sm font-semibold ${style.text}`}>{style.label}</p>
-            <p className="text-xs text-text-secondary">
-              {complianceStatus === 'compliant'
-                ? 'All documents and verification are up to date'
-                : complianceStatus === 'pending'
-                  ? `${pendingCount + needsClarificationCount} document(s) require attention` 
-                  : `${rejectedCount} document(s) were rejected. Please resubmit.`}
-            </p>
-          </div>
-        </div>
-      </div>
-    )
-  }
 
   // Activity Timeline
   const formatActivityTimestamp = (value = '') => {
@@ -880,67 +849,6 @@ function DashboardPage({
     }
   })
   const timelineActivities = logDrivenActivities.length > 0 ? logDrivenActivities : derivedActivities
-
-  // Notifications state (persisted locally)
-  const [notifications, setNotifications] = useState(() => {
-    try {
-      const raw = localStorage.getItem('client_notifications')
-      return raw ? JSON.parse(raw) : []
-    } catch (e) { return [] }
-  })
-
-  const saveNotifications = (items) => {
-    setNotifications(items)
-    try { localStorage.setItem('client_notifications', JSON.stringify(items)) } catch (e) {}
-  }
-
-  // track previous records to detect changes
-  const prevRecordsRef = useRef(records)
-  useEffect(() => {
-    const prev = prevRecordsRef.current || []
-    const prevMap = new Map(prev.map(r => [r.id, r]))
-    const newNotifs = []
-    records.forEach(r => {
-      const p = prevMap.get(r.id)
-      if (!p) {
-        // new upload
-        newNotifs.push({ id: `n-${r.id}-${Date.now()}`, type: 'upload', message: `You uploaded ${r.filename}`, timestamp: r.date || new Date().toLocaleString(), read: false, priority: 'info', linkPage: r.category === 'Sales' ? 'sales' : r.category === 'Bank Statement' ? 'bank-statements' : 'expenses', recordId: r.id })
-      } else if (p.status !== r.status) {
-        if (r.status === 'Approved') newNotifs.push({ id: `n-${r.id}-${Date.now()}`, type: 'approved', message: `Admin approved ${r.filename}`, timestamp: r.date || new Date().toLocaleString(), read: false, priority: 'approved', linkPage: p.category === 'Sales' ? 'sales' : p.category === 'Bank Statement' ? 'bank-statements' : 'expenses', recordId: r.id })
-        if (r.status === 'Rejected') newNotifs.push({ id: `n-${r.id}-${Date.now()}`, type: 'rejected', message: `Admin rejected ${r.filename}`, timestamp: r.date || new Date().toLocaleString(), read: false, priority: 'critical', linkPage: p.category === 'Sales' ? 'sales' : p.category === 'Bank Statement' ? 'bank-statements' : 'expenses', recordId: r.id })
-        if (r.status === 'Needs Clarification' || r.status === 'Info Requested') newNotifs.push({ id: `n-${r.id}-${Date.now()}`, type: 'info', message: `Admin requested info for ${r.filename}`, timestamp: r.date || new Date().toLocaleString(), read: false, priority: 'important', linkPage: p.category === 'Sales' ? 'sales' : p.category === 'Bank Statement' ? 'bank-statements' : 'expenses', recordId: r.id })
-      }
-    })
-    if (newNotifs.length > 0) {
-      const merged = [...newNotifs, ...notifications].slice(0, 100)
-      saveNotifications(merged)
-    }
-    prevRecordsRef.current = records
-  }, [records])
-
-  const unreadCount = notifications.filter(n => !n.read).length
-
-  const handleNotificationClick = (n) => {
-    // mark read and navigate to relevant page + open record viewer
-    const updated = notifications.map(x => x.id === n.id ? { ...x, read: true } : x)
-    saveNotifications(updated)
-    if (setActivePage && n.linkPage) setActivePage(n.linkPage)
-  }
-
-  const markAllRead = () => {
-    const updated = notifications.map(x => ({ ...x, read: true }))
-    saveNotifications(updated)
-  }
-
-  const [showNotif, setShowNotif] = useState(false)
-  const notifRef = useRef(null)
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (notifRef.current && !notifRef.current.contains(e.target)) setShowNotif(false)
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
 
   const chartOptions = {
     responsive: true,
@@ -1030,6 +938,15 @@ function DashboardPage({
     .filter((item) => item.categoryId === 'bank-statements' || item.category === 'Bank Statement' || item.category === 'Bank')
     .slice(0, 4)
 
+  const loadingStatsPlaceholders = [
+    'loading-1',
+    'loading-2',
+    'loading-3',
+    'loading-4',
+    'loading-5',
+    'loading-6',
+  ]
+
   return (
     <div className="animate-fade-in">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
@@ -1047,45 +964,6 @@ function DashboardPage({
           </div>
         </div>
         <div className="flex items-center gap-2 w-full sm:w-auto sm:justify-end">
-          <div className="relative" ref={notifRef}>
-            <button onClick={() => setShowNotif(s => !s)} className="relative w-10 h-9 rounded-md flex items-center justify-center text-text-secondary hover:bg-background">
-              <Bell className="w-5 h-5" />
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 w-5 h-5 bg-error text-white rounded-full text-[10px] flex items-center justify-center">{unreadCount}</span>
-              )}
-            </button>
-            {showNotif && (
-              <div className="absolute right-0 mt-2 w-[min(24rem,calc(100vw-1rem))] bg-white border border-border rounded-lg shadow-card z-50">
-                <div className="p-3 border-b border-border-light flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">Notifications</h3>
-                  <button onClick={markAllRead} className="text-xs text-primary hover:underline">Mark all read</button>
-                </div>
-                <div className="max-h-72 overflow-y-auto">
-                  {notifications.length === 0 ? (
-                    <div className="p-4 text-sm text-text-muted">No notifications</div>
-                  ) : (
-                    notifications.map(n => (
-                      <div key={n.id} className={`p-3 border-b border-border-light hover:bg-background cursor-pointer ${!n.read ? 'bg-primary-tint' : ''}`} onClick={() => handleNotificationClick(n)}>
-                        <div className="flex items-start gap-3">
-                          <div className="flex-shrink-0 mt-0.5">
-                            {n.type === 'approved' ? <CheckCircle className="w-4 h-4 text-success" /> : n.type === 'rejected' ? <XCircle className="w-4 h-4 text-error" /> : n.type === 'info' ? <AlertCircle className="w-4 h-4 text-warning" /> : <UploadCloud className="w-4 h-4 text-primary" />}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm text-text-primary">{n.message}</p>
-                            <div className="flex items-center gap-2 mt-1">
-                              <Clock className="w-3 h-3 text-text-muted" />
-                              <span className="text-xs text-text-muted">{n.timestamp}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
           <button
             onClick={onAddDocument}
             className="flex items-center justify-center gap-2 h-10 px-5 w-full sm:w-auto sm:shrink-0 whitespace-nowrap bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
@@ -1096,156 +974,217 @@ function DashboardPage({
         </div>
       </div>
 
-      {/* Stats Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6 mb-8">
-        {stats.map((stat) => (
-          <div
-            key={stat.label}
-            className="bg-white rounded-lg shadow-card p-5 flex items-start gap-4 hover:shadow-card-hover transition-shadow cursor-pointer"
-          >
-            <div className={`w-12 h-12 rounded-md flex items-center justify-center ${stat.color}`}>
-              <stat.icon className="w-6 h-6" />
+      <div className="relative">
+        {isLoading ? (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6">
+              {loadingStatsPlaceholders.map((id) => (
+                <div key={id} className="bg-white rounded-lg shadow-card p-5 flex items-start gap-4 animate-pulse">
+                  <div className="w-12 h-12 rounded-md bg-background" />
+                  <div className="flex-1">
+                    <div className="h-8 w-20 bg-background rounded" />
+                    <div className="h-3 w-36 bg-background rounded mt-2" />
+                    <div className="h-3 w-24 bg-background rounded mt-3" />
+                  </div>
+                </div>
+              ))}
             </div>
-            <div className="flex-1">
-              <div className="text-[28px] font-semibold text-text-primary leading-tight">{stat.value}</div>
-              <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wide mt-1">{stat.label}</div>
-              <div className={`flex items-center gap-1 text-xs mt-2 ${stat.up ? 'text-success' : 'text-error'}`}>
-                {stat.up ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-                {stat.trend}
+
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="px-5 py-4 border-b border-border-light animate-pulse">
+                  <div className="h-4 w-36 bg-background rounded" />
+                </div>
+                <div className="p-5 space-y-4 animate-pulse">
+                  <div className="h-12 bg-background rounded" />
+                  <div className="h-12 bg-background rounded" />
+                  <div className="h-12 bg-background rounded" />
+                  <div className="h-12 bg-background rounded" />
+                </div>
+              </div>
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="px-5 py-4 border-b border-border-light animate-pulse">
+                  <div className="h-4 w-32 bg-background rounded" />
+                </div>
+                <div className="p-5 space-y-4 animate-pulse">
+                  <div className="h-10 bg-background rounded" />
+                  <div className="h-10 bg-background rounded" />
+                  <div className="h-10 bg-background rounded" />
+                  <div className="h-10 bg-background rounded" />
+                </div>
+              </div>
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="px-5 py-4 border-b border-border-light animate-pulse">
+                  <div className="h-4 w-32 bg-background rounded" />
+                </div>
+                <div className="p-5 space-y-4 animate-pulse">
+                  <div className="h-10 bg-background rounded" />
+                  <div className="h-10 bg-background rounded" />
+                  <div className="h-10 bg-background rounded" />
+                  <div className="h-10 bg-background rounded" />
+                </div>
               </div>
             </div>
           </div>
-        ))}
-      </div>
-
-      {/* Compliance Status Widget */}
-      <div className="mb-6">
-        {getComplianceWidget()}
-      </div>
-
-      {/* Activity Timeline & Recent Uploads */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        {/* Activity Timeline */}
-        <div className="bg-white rounded-lg shadow-card">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
-            <h3 className="text-base font-semibold text-text-primary">Recent Activity</h3>
-            <button
-              onClick={() => setActivePage('recent-activities')}
-              className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
-            >
-              See All <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="divide-y divide-border-light max-h-80 overflow-y-auto">
-            {(timelineActivities.length === 0) ? (
-              <div className="p-4 text-sm text-text-muted">No recent activity</div>
-            ) : (
-              timelineActivities.map((activity) => (
-                <div key={activity.id} className="px-5 py-3 hover:bg-background transition-colors">
-                  <div className="flex items-start gap-3">
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center ${getActivityIcon(activity.type)}`}>
-                      <activity.icon className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-text-primary">{activity.message}</p>
-                      {activity.details && <p className="text-xs text-text-secondary mt-0.5">{activity.details}</p>}
-                      <p className="text-xs text-text-muted mt-0.5">{activity.timestamp}</p>
+        ) : (
+          <>
+            {/* Stats Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6 mb-8">
+              {stats.map((stat) => (
+                <div
+                  key={stat.label}
+                  className="bg-white rounded-lg shadow-card p-5 flex items-start gap-4 hover:shadow-card-hover transition-shadow"
+                >
+                  <div className={`w-12 h-12 rounded-md flex items-center justify-center ${stat.color}`}>
+                    <stat.icon className="w-6 h-6" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[28px] font-semibold text-text-primary leading-tight">{stat.value}</div>
+                    <div className="text-[11px] font-medium text-text-secondary uppercase tracking-wide mt-1">{stat.label}</div>
+                    <div className={`flex items-center gap-1 text-xs mt-2 ${stat.up ? 'text-success' : 'text-error'}`}>
+                      {stat.up ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                      {stat.trend}
                     </div>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
-        </div>
-        {/* Recent Expenses */}
-        <div className="bg-white rounded-lg shadow-card">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
-            <h3 className="text-base font-semibold text-text-primary">Recent Expenses</h3>
-            <button 
-              onClick={() => setActivePage('expenses')}
-              className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
-            >
-              See All <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="divide-y divide-border-light">
-            {recentExpenses.length === 0 ? (
-              <div className="px-5 py-4 text-sm text-text-muted">No expense files yet.</div>
-            ) : (
-              recentExpenses.map((item) => (
-                <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
-                      <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
-                    </div>
-                    <StatusBadge status={item.status || 'Pending Review'} />
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+              ))}
+            </div>
 
-        {/* Recent Sales */}
-        <div className="bg-white rounded-lg shadow-card">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
-            <h3 className="text-base font-semibold text-text-primary">Recent Sales</h3>
-            <button 
-              onClick={() => setActivePage('sales')}
-              className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
-            >
-              See All <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="divide-y divide-border-light">
-            {recentSales.length === 0 ? (
-              <div className="px-5 py-4 text-sm text-text-muted">No sales files yet.</div>
-            ) : (
-              recentSales.map((item) => (
-                <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
-                      <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
-                    </div>
-                    <StatusBadge status={item.status || 'Pending Review'} />
-                  </div>
+            {/* Activity Timeline & Recent Uploads */}
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+              {/* Activity Timeline */}
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
+                  <h3 className="text-base font-semibold text-text-primary">Recent Activity</h3>
+                  <button
+                    onClick={() => setActivePage('recent-activities')}
+                    className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
+                  >
+                    See All <ChevronRight className="w-4 h-4" />
+                  </button>
                 </div>
-              ))
-            )}
-          </div>
-        </div>
+                <div className="divide-y divide-border-light max-h-80 overflow-y-auto">
+                  {(timelineActivities.length === 0) ? (
+                    <div className="p-4 text-sm text-text-muted">No recent activity</div>
+                  ) : (
+                    timelineActivities.map((activity) => (
+                      <div key={activity.id} className="px-5 py-3 hover:bg-background transition-colors">
+                        <div className="flex items-start gap-3">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center ${getActivityIcon(activity.type)}`}>
+                            <activity.icon className="w-4 h-4" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-text-primary">{activity.message}</p>
+                            {activity.details && <p className="text-xs text-text-secondary mt-0.5">{activity.details}</p>}
+                            <p className="text-xs text-text-muted mt-0.5">{activity.timestamp}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+              {/* Recent Expenses */}
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
+                  <h3 className="text-base font-semibold text-text-primary">Recent Expenses</h3>
+                  <button 
+                    onClick={() => setActivePage('expenses')}
+                    className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
+                  >
+                    See All <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="divide-y divide-border-light">
+                  {recentExpenses.length === 0 ? (
+                    <div className="px-5 py-4 text-sm text-text-muted">No expense files yet.</div>
+                  ) : (
+                    recentExpenses.map((item) => (
+                      <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
+                            <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
+                          </div>
+                          <StatusBadge status={item.status || 'Pending Review'} />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
 
-        {/* Recent Bank Statements */}
-        <div className="bg-white rounded-lg shadow-card">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
-            <h3 className="text-base font-semibold text-text-primary">Recent Bank Statements</h3>
-            <button 
-              onClick={() => setActivePage('bank-statements')}
-              className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
-            >
-              See All <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="divide-y divide-border-light">
-            {recentBankStatements.length === 0 ? (
-              <div className="px-5 py-4 text-sm text-text-muted">No bank statement files yet.</div>
-            ) : (
-              recentBankStatements.map((item) => (
-                <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
-                      <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
-                    </div>
-                    <StatusBadge status={item.status || 'Pending Review'} />
-                  </div>
+              {/* Recent Sales */}
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
+                  <h3 className="text-base font-semibold text-text-primary">Recent Sales</h3>
+                  <button 
+                    onClick={() => setActivePage('sales')}
+                    className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
+                  >
+                    See All <ChevronRight className="w-4 h-4" />
+                  </button>
                 </div>
-              ))
-            )}
+                <div className="divide-y divide-border-light">
+                  {recentSales.length === 0 ? (
+                    <div className="px-5 py-4 text-sm text-text-muted">No sales files yet.</div>
+                  ) : (
+                    recentSales.map((item) => (
+                      <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
+                            <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
+                          </div>
+                          <StatusBadge status={item.status || 'Pending Review'} />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Recent Bank Statements */}
+              <div className="bg-white rounded-lg shadow-card">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border-light">
+                  <h3 className="text-base font-semibold text-text-primary">Recent Bank Statements</h3>
+                  <button 
+                    onClick={() => setActivePage('bank-statements')}
+                    className="text-sm text-primary hover:text-primary-light font-medium flex items-center gap-1"
+                  >
+                    See All <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="divide-y divide-border-light">
+                  {recentBankStatements.length === 0 ? (
+                    <div className="px-5 py-4 text-sm text-text-muted">No bank statement files yet.</div>
+                  ) : (
+                    recentBankStatements.map((item) => (
+                      <div key={item.fileId || item.id} className="px-5 py-3 hover:bg-background transition-colors">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-text-primary truncate">{item.filename}</div>
+                            <div className="text-xs text-text-muted mt-0.5 truncate">{item.class || 'Unclassified'} | {item.date || '--'}</div>
+                          </div>
+                          <StatusBadge status={item.status || 'Pending Review'} />
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {isLoading && showSlowNetworkOverlay && (
+          <div className="absolute inset-0 z-20 rounded-lg bg-white/65 backdrop-blur-[1px] flex items-center justify-center p-4">
+            <div className="w-full max-w-md rounded-xl border border-border-light bg-white/90 shadow-card px-4 py-5 text-center">
+              <DotLottiePreloader size={170} className="w-full justify-center" />
+              <p className="mt-2 text-xs text-text-secondary">Network is taking longer than expected...</p>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   )
