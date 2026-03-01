@@ -6,8 +6,8 @@ import {
   upsertUserFromAuth
 } from "../repositories/users.repository.js";
 
-export const syncUserFromAuth = async ({ uid, email, displayName }) =>
-  upsertUserFromAuth({ uid, email, displayName });
+export const syncUserFromAuth = async ({ uid, email, displayName, roles }) =>
+  upsertUserFromAuth({ uid, email, displayName, roles });
 
 export const getMeByUid = async (uid) => findUserByUid(uid);
 

@@ -5,15 +5,52 @@ import {
   replaceNotificationLog,
   updateNotificationStatus
 } from "../services/notifications.service.js";
+import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
+import {
+  buildNotificationLogUpdatePayload,
+  validatePatchStatusPayload,
+  validateSendEmailPayload
+} from "../validation/notifications.validation.js";
+
+const requireActor = (req, res) => {
+  const actor = getRequestActor(req);
+  if (!actor.uid) {
+    res.status(401).json({
+      message: "Missing x-user-id header from authenticated gateway request"
+    });
+    return null;
+  }
+
+  return actor;
+};
+
+const requireAdminActor = (req, res) => {
+  const actor = requireActor(req, res);
+  if (!actor) {
+    return null;
+  }
+
+  if (!isAdminActor(actor)) {
+    res.status(403).json({ message: "Only admin users can perform this action." });
+    return null;
+  }
+
+  return actor;
+};
 
 export const sendEmail = async (req, res, next) => {
   try {
-    const { to, subject, message } = req.body;
-    if (!to || !message) {
-      return res.status(400).json({ message: "to and message are required" });
+    const actor = requireAdminActor(req, res);
+    if (!actor) {
+      return;
     }
 
-    const log = await queueEmailNotification({ to, subject, message });
+    const { errors, payload } = validateSendEmailPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const log = await queueEmailNotification(payload);
     return res.status(202).json({
       message: "Notification queued.",
       log
@@ -25,6 +62,11 @@ export const sendEmail = async (req, res, next) => {
 
 export const listLogs = async (req, res, next) => {
   try {
+    const actor = requireAdminActor(req, res);
+    if (!actor) {
+      return;
+    }
+
     const limit = Number(req.query.limit || 50);
     const logs = await getRecentNotificationLogs(limit);
     return res.status(200).json(logs);
@@ -35,9 +77,14 @@ export const listLogs = async (req, res, next) => {
 
 export const patchLogStatus = async (req, res, next) => {
   try {
-    const { status, errorMessage } = req.body;
-    if (!status) {
-      return res.status(400).json({ message: "status is required" });
+    const actor = requireAdminActor(req, res);
+    if (!actor) {
+      return;
+    }
+
+    const { status, errorMessage, error } = validatePatchStatusPayload(req.body);
+    if (error) {
+      return res.status(400).json({ message: error });
     }
 
     const updated = await updateNotificationStatus({
@@ -58,45 +105,14 @@ export const patchLogStatus = async (req, res, next) => {
 
 export const putLog = async (req, res, next) => {
   try {
-    const {
-      channel,
-      to,
-      subject,
-      message,
-      status,
-      providerMessageId,
-      scheduledAt,
-      sentAt,
-      errorMessage
-    } = req.body;
-    const payload = {};
+    const actor = requireAdminActor(req, res);
+    if (!actor) {
+      return;
+    }
 
-    if (channel !== undefined) {
-      payload.channel = channel;
-    }
-    if (to !== undefined) {
-      payload.to = to;
-    }
-    if (subject !== undefined) {
-      payload.subject = subject;
-    }
-    if (message !== undefined) {
-      payload.message = message;
-    }
-    if (status !== undefined) {
-      payload.status = status;
-    }
-    if (providerMessageId !== undefined) {
-      payload.providerMessageId = providerMessageId;
-    }
-    if (scheduledAt !== undefined) {
-      payload.scheduledAt = scheduledAt;
-    }
-    if (sentAt !== undefined) {
-      payload.sentAt = sentAt;
-    }
-    if (errorMessage !== undefined) {
-      payload.errorMessage = errorMessage;
+    const { payload, errors } = buildNotificationLogUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
     }
 
     if (Object.keys(payload).length === 0) {
@@ -123,6 +139,11 @@ export const putLog = async (req, res, next) => {
 
 export const deleteLog = async (req, res, next) => {
   try {
+    const actor = requireAdminActor(req, res);
+    if (!actor) {
+      return;
+    }
+
     const deleted = await removeNotificationLog(req.params.id);
     if (!deleted) {
       return res.status(404).json({ message: "Notification log not found" });

@@ -1,13 +1,19 @@
 import { User } from "../models/User.model.js";
 
-export const upsertUserFromAuth = async ({ uid, email, displayName }) =>
-  User.findOneAndUpdate(
+export const upsertUserFromAuth = async ({ uid, email, displayName, roles }) => {
+  const updatePayload = {
+    email: email.toLowerCase(),
+    displayName: displayName || ""
+  };
+
+  if (Array.isArray(roles) && roles.length > 0) {
+    updatePayload.roles = roles;
+  }
+
+  return User.findOneAndUpdate(
     { uid },
     {
-      $set: {
-        email: email.toLowerCase(),
-        displayName: displayName || ""
-      }
+      $set: updatePayload
     },
     {
       new: true,
@@ -15,6 +21,7 @@ export const upsertUserFromAuth = async ({ uid, email, displayName }) =>
       setDefaultsOnInsert: true
     }
   );
+};
 
 export const findUserByUid = async (uid) => User.findOne({ uid });
 

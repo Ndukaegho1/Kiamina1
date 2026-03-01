@@ -5,17 +5,28 @@ import {
   updateNotificationLog
 } from "../repositories/notifications.repository.js";
 import { publishToQstash } from "./qstash.service.js";
+import { sendEmailViaSmtp } from "./smtp.service.js";
 
 export const queueEmailNotification = async ({ to, subject, message }) => {
   const log = await createNotificationLog({
     channel: "email",
-    to,
+    to: Array.isArray(to) ? to.join(",") : String(to),
     subject: subject || "",
     message,
     status: "queued"
   });
 
   try {
+    const smtpResult = await sendEmailViaSmtp({ to, subject, message });
+    if (smtpResult.sent) {
+      const updated = await updateNotificationLog(log.id, {
+        status: "sent",
+        providerMessageId: smtpResult.messageId || "",
+        sentAt: new Date()
+      });
+      return updated;
+    }
+
     const publishResult = await publishToQstash({
       logId: log.id,
       channel: "email",

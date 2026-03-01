@@ -1,15 +1,41 @@
 import { env } from "../config/env.js";
 import { issueOtpChallenge, verifyOtpChallenge } from "../services/otp.service.js";
 import { verifyFirebaseIdToken } from "../services/firebase-admin.service.js";
+import {
+  validateSendOtpPayload,
+  validateVerifyOtpPayload,
+  validateVerifyTokenPayload
+} from "../validation/auth.validation.js";
+
+const normalizeRoles = (decodedToken) => {
+  const rawRoles = decodedToken?.roles ?? decodedToken?.role;
+
+  if (Array.isArray(rawRoles)) {
+    return [...new Set(rawRoles.map((role) => String(role).trim().toLowerCase()).filter(Boolean))];
+  }
+
+  if (typeof rawRoles === "string") {
+    return [
+      ...new Set(
+        rawRoles
+          .split(",")
+          .map((role) => role.trim().toLowerCase())
+          .filter(Boolean)
+      )
+    ];
+  }
+
+  return [];
+};
 
 export const sendOtp = async (req, res, next) => {
   try {
-    const { email, purpose = "login" } = req.body;
-    if (!email) {
-      return res.status(400).json({ message: "email is required" });
+    const { errors, payload } = validateSendOtpPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
     }
 
-    const result = await issueOtpChallenge({ email, purpose });
+    const result = await issueOtpChallenge(payload);
 
     return res.status(202).json({
       message: "OTP challenge created.",
@@ -24,12 +50,12 @@ export const sendOtp = async (req, res, next) => {
 
 export const verifyOtp = async (req, res, next) => {
   try {
-    const { email, purpose = "login", otp } = req.body;
-    if (!email || !otp) {
-      return res.status(400).json({ message: "email and otp are required" });
+    const { errors, payload } = validateVerifyOtpPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
     }
 
-    const result = await verifyOtpChallenge({ email, purpose, otp });
+    const result = await verifyOtpChallenge(payload);
     if (!result.success) {
       return res.status(400).json({ message: result.reason });
     }
@@ -44,9 +70,9 @@ export const verifyOtp = async (req, res, next) => {
 
 export const verifyToken = async (req, res, next) => {
   try {
-    const { idToken } = req.body;
-    if (!idToken) {
-      return res.status(400).json({ message: "idToken is required" });
+    const { idToken, error } = validateVerifyTokenPayload(req.body);
+    if (error) {
+      return res.status(400).json({ message: error });
     }
 
     const decoded = await verifyFirebaseIdToken(idToken);
@@ -57,11 +83,14 @@ export const verifyToken = async (req, res, next) => {
       });
     }
 
+    const roles = normalizeRoles(decoded);
+
     return res.status(200).json({
       uid: decoded.uid,
       email: decoded.email || null,
       emailVerified: Boolean(decoded.email_verified),
-      authTime: decoded.auth_time || null
+      authTime: decoded.auth_time || null,
+      roles
     });
   } catch (error) {
     return next(error);

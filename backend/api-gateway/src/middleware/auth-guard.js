@@ -37,6 +37,23 @@ const extractBearerToken = (authorizationHeader) => {
   return token.trim();
 };
 
+const normalizeRoles = (rolesValue) => {
+  if (Array.isArray(rolesValue)) {
+    return rolesValue
+      .map((role) => String(role).trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  if (typeof rolesValue === "string") {
+    return rolesValue
+      .split(",")
+      .map((role) => role.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
 const verifyTokenWithAuthService = async ({ idToken, requestId }) => {
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {
@@ -100,7 +117,8 @@ export const authGuardMiddleware = async (req, res, next) => {
     req.user = {
       uid: identity.uid,
       email: identity.email || "",
-      emailVerified: Boolean(identity.emailVerified)
+      emailVerified: Boolean(identity.emailVerified),
+      roles: normalizeRoles(identity.roles)
     };
 
     return next();
