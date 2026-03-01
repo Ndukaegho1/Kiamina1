@@ -10,9 +10,11 @@ import {
   updateStatus
 } from "../../controllers/documents.controller.js";
 import { singleDocumentUploadMiddleware } from "../../middleware/upload.js";
+import accountingRecordsRoutes from "./accounting-records.routes.js";
 
 const router = express.Router();
 
+router.use("/records", accountingRecordsRoutes);
 router.post("/", createOne);
 router.post("/upload", singleDocumentUploadMiddleware, uploadOne);
 router.get("/owner/:ownerUserId", listByOwner);
