@@ -1,5 +1,6 @@
 import {
   createNotificationLog,
+  deleteNotificationLog,
   listNotificationLogs,
   updateNotificationLog
 } from "../repositories/notifications.repository.js";
@@ -57,3 +58,8 @@ export const updateNotificationStatus = async ({ id, status, errorMessage }) => 
 
   return updateNotificationLog(id, payload);
 };
+
+export const replaceNotificationLog = async ({ id, payload }) =>
+  updateNotificationLog(id, payload);
+
+export const removeNotificationLog = async (id) => deleteNotificationLog(id);

@@ -7,4 +7,10 @@ export const listNotificationLogs = async (limit = 50) =>
   NotificationLog.find().sort({ createdAt: -1 }).limit(limit);
 
 export const updateNotificationLog = async (id, payload) =>
-  NotificationLog.findByIdAndUpdate(id, payload, { new: true });
+  NotificationLog.findByIdAndUpdate(id, payload, {
+    new: true,
+    runValidators: true
+  });
+
+export const deleteNotificationLog = async (id) =>
+  NotificationLog.findByIdAndDelete(id);

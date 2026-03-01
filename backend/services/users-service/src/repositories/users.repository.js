@@ -19,3 +19,11 @@ export const upsertUserFromAuth = async ({ uid, email, displayName }) =>
 export const findUserByUid = async (uid) => User.findOne({ uid });
 
 export const findUserById = async (id) => User.findById(id);
+
+export const updateUserById = async (id, payload) =>
+  User.findByIdAndUpdate(id, payload, {
+    new: true,
+    runValidators: true
+  });
+
+export const deleteUserById = async (id) => User.findByIdAndDelete(id);
