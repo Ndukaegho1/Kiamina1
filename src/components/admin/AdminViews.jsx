@@ -598,6 +598,33 @@ const appendScopedClientActivityLog = (email, entry = {}) => {
 }
 
 const toTrimmedValue = (value) => String(value || '').trim()
+const PHONE_COUNTRY_CODE_OPTIONS = ['+234', '+1', '+44', '+61']
+const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
+  const raw = String(value || '').trim()
+  const option = PHONE_COUNTRY_CODE_OPTIONS.find((countryCode) => raw.startsWith(countryCode))
+  if (!raw) {
+    return {
+      code: fallbackCode,
+      number: '',
+    }
+  }
+  if (!option) {
+    return {
+      code: fallbackCode,
+      number: raw,
+    }
+  }
+  return {
+    code: option,
+    number: raw.slice(option.length).trim(),
+  }
+}
+const formatPhoneNumber = (code = '+234', number = '') => {
+  const normalizedCode = String(code || '').trim() || '+234'
+  const normalizedNumber = String(number || '').trim()
+  if (!normalizedNumber) return ''
+  return `${normalizedCode} ${normalizedNumber}`.trim()
+}
 
 const toIsoOrFallback = (value, fallback = new Date().toISOString()) => {
   const parsed = Date.parse(value || '')
@@ -3279,13 +3306,15 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     profilePhoto: profilePhoto || '',
     companyLogo: companyLogo || '',
     govId: verificationDocs.govId || '',
-    proofOfAddress: verificationDocs.proofOfAddress || '',
+    govIdType: verificationDocs.govIdType || '',
     businessReg: verificationDocs.businessReg || '',
   }))
   const [profileDraft, setProfileDraft] = useState(() => ({
     primaryContact: safeClient?.primaryContact || settings.fullName || '',
     businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
-    phone: settings.phone || '',
+    businessType: safeClient?.businessType || settings.businessType || onboardingData.businessType || '',
+    phoneCountryCode: resolvePhoneParts(settings.phone || '').code,
+    phone: resolvePhoneParts(settings.phone || '').number,
     roleInCompany: settings.roleInCompany || '',
     country: safeClient?.country || settings.country || onboardingData.country || '',
     industry: settings.industry || onboardingData.industry || '',
@@ -3307,22 +3336,42 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     setSuspensionMessage(statusControl?.suspensionMessage || safeClient?.suspensionMessage || '')
   }, [statusControl?.verificationStatus, statusControl?.suspensionMessage, safeClient?.verificationStatus, safeClient?.suspensionMessage])
 
+  const normalizeBooleanFlag = (value) => {
+    if (value === true) return true
+    const normalized = String(value || '').trim().toLowerCase()
+    return normalized === 'true' || normalized === 'yes' || normalized === '1'
+  }
+  const hasIsoTimestamp = (value) => Number.isFinite(Date.parse(value || ''))
+  const hasIdentityDocumentSubmission = Boolean(
+    toTrimmedValue(verificationDocs.govId) && toTrimmedValue(verificationDocs.govIdType),
+  )
+  const hasBusinessDocumentSubmission = Boolean(toTrimmedValue(verificationDocs.businessReg))
+  const identityVerificationApproved = Boolean(
+    normalizeBooleanFlag(statusControl?.identityVerificationApproved)
+    || hasIsoTimestamp(statusControl?.identityVerificationApprovedAt),
+  )
+  const businessVerificationApproved = Boolean(
+    normalizeBooleanFlag(statusControl?.businessVerificationApproved)
+    || hasIsoTimestamp(statusControl?.businessVerificationApprovedAt),
+  )
+
   useEffect(() => {
     setIdentityDraft({
       profilePhoto: profilePhoto || '',
       companyLogo: companyLogo || '',
       govId: verificationDocs.govId || '',
-      proofOfAddress: verificationDocs.proofOfAddress || '',
+      govIdType: verificationDocs.govIdType || '',
       businessReg: verificationDocs.businessReg || '',
     })
     setIsEditingIdentityAssets(false)
-  }, [safeClient?.id, safeClient?.email, profilePhoto, companyLogo, verificationDocs.govId, verificationDocs.proofOfAddress, verificationDocs.businessReg])
+  }, [safeClient?.id, safeClient?.email, profilePhoto, companyLogo, verificationDocs.govId, verificationDocs.govIdType, verificationDocs.businessReg])
 
   useEffect(() => {
     setProfileDraft({
       primaryContact: safeClient?.primaryContact || settings.fullName || '',
       businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
-      phone: settings.phone || '',
+      phoneCountryCode: resolvePhoneParts(settings.phone || '').code,
+      phone: resolvePhoneParts(settings.phone || '').number,
       roleInCompany: settings.roleInCompany || '',
       country: safeClient?.country || settings.country || onboardingData.country || '',
       industry: settings.industry || onboardingData.industry || '',
@@ -3400,11 +3449,21 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         verificationPending: nextVerificationStatus !== COMPLIANCE_STATUS.FULL,
       })
 
-      writeScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail, {
+      const nowIso = new Date().toISOString()
+      const currentStatusControl = getScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail)
+      const nextStatusControl = {
+        ...currentStatusControl,
         verificationStatus: nextVerificationStatus,
         suspensionMessage: nextSuspensionMessage,
-        updatedAt: new Date().toISOString(),
-      })
+        updatedAt: nowIso,
+      }
+      if (nextVerificationStatus === COMPLIANCE_STATUS.FULL) {
+        nextStatusControl.identityVerificationApproved = true
+        nextStatusControl.businessVerificationApproved = true
+        nextStatusControl.identityVerificationApprovedAt = currentStatusControl?.identityVerificationApprovedAt || nowIso
+        nextStatusControl.businessVerificationApprovedAt = currentStatusControl?.businessVerificationApprovedAt || nowIso
+      }
+      writeScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail, nextStatusControl)
 
       appendScopedClientActivityLog(normalizedEmail, {
         actorName: 'Admin User',
@@ -3429,6 +3488,126 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     }
   }
 
+  const saveIdentityVerificationApproval = (approved) => {
+    if (!canEditClientSettings) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
+    if (!normalizedEmail) return
+    if (approved && !hasIdentityDocumentSubmission) {
+      showToast?.('error', 'Government ID and ID type are required before identity approval.')
+      return
+    }
+    const nowIso = new Date().toISOString()
+    const currentStatusControl = getScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail)
+    const nextStatusControl = {
+      ...currentStatusControl,
+      identityVerificationApproved: Boolean(approved),
+      identityVerificationApprovedAt: approved ? nowIso : '',
+      updatedAt: nowIso,
+    }
+    if (!approved) {
+      nextStatusControl.businessVerificationApproved = false
+      nextStatusControl.businessVerificationApprovedAt = ''
+      if (normalizeComplianceStatus(nextStatusControl.verificationStatus, '') === COMPLIANCE_STATUS.FULL) {
+        nextStatusControl.verificationStatus = COMPLIANCE_STATUS.PENDING
+      }
+    }
+    writeScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail, nextStatusControl)
+
+    const onboardingState = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
+    const businessApprovedNext = Boolean(
+      normalizeBooleanFlag(nextStatusControl.businessVerificationApproved)
+      || hasIsoTimestamp(nextStatusControl.businessVerificationApprovedAt),
+    )
+    writeScopedStorageObject('kiaminaOnboardingState', normalizedEmail, {
+      ...onboardingState,
+      verificationPending: !(approved && businessApprovedNext),
+    })
+
+    appendScopedClientActivityLog(normalizedEmail, {
+      actorName: 'Admin User',
+      actorRole: 'admin',
+      action: approved ? 'Approved identity verification' : 'Revoked identity verification',
+      details: approved
+        ? 'Identity verification approved by admin.'
+        : 'Identity verification approval revoked by admin.',
+    })
+    onAdminActionLog?.({
+      action: approved ? 'Approved identity verification' : 'Revoked identity verification',
+      affectedUser: safeClient.businessName || normalizedEmail,
+      details: approved
+        ? 'Identity verification approved from Admin Client Profile.'
+        : 'Identity verification approval was revoked from Admin Client Profile.',
+    })
+
+    const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
+    if (refreshed) setClientSnapshot(refreshed)
+    if (!approved) {
+      setVerificationStatusDraft(COMPLIANCE_STATUS.PENDING)
+    }
+    showToast?.('success', approved ? 'Identity verification approved.' : 'Identity verification approval revoked.')
+  }
+
+  const saveBusinessVerificationApproval = (approved) => {
+    if (!canEditClientSettings) {
+      showToast?.('error', 'Insufficient Permissions')
+      return
+    }
+    if (!normalizedEmail) return
+    if (approved && !identityVerificationApproved) {
+      showToast?.('error', 'Identity must be approved before business verification.')
+      return
+    }
+    if (approved && !hasBusinessDocumentSubmission) {
+      showToast?.('error', 'Business registration document is required before business approval.')
+      return
+    }
+
+    const nowIso = new Date().toISOString()
+    const currentStatusControl = getScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail)
+    const nextStatusControl = {
+      ...currentStatusControl,
+      businessVerificationApproved: Boolean(approved),
+      businessVerificationApprovedAt: approved ? nowIso : '',
+      updatedAt: nowIso,
+    }
+    if (approved) {
+      nextStatusControl.verificationStatus = COMPLIANCE_STATUS.FULL
+      nextStatusControl.suspensionMessage = ''
+    } else if (normalizeComplianceStatus(nextStatusControl.verificationStatus, '') === COMPLIANCE_STATUS.FULL) {
+      nextStatusControl.verificationStatus = COMPLIANCE_STATUS.PENDING
+    }
+    writeScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail, nextStatusControl)
+
+    const onboardingState = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
+    writeScopedStorageObject('kiaminaOnboardingState', normalizedEmail, {
+      ...onboardingState,
+      verificationPending: !approved,
+    })
+
+    appendScopedClientActivityLog(normalizedEmail, {
+      actorName: 'Admin User',
+      actorRole: 'admin',
+      action: approved ? 'Approved business verification' : 'Revoked business verification',
+      details: approved
+        ? 'Business verification approved by admin.'
+        : 'Business verification approval revoked by admin.',
+    })
+    onAdminActionLog?.({
+      action: approved ? 'Approved business verification' : 'Revoked business verification',
+      affectedUser: safeClient.businessName || normalizedEmail,
+      details: approved
+        ? 'Business verification approved from Admin Client Profile.'
+        : 'Business verification approval was revoked from Admin Client Profile.',
+    })
+
+    const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
+    if (refreshed) setClientSnapshot(refreshed)
+    setVerificationStatusDraft(approved ? COMPLIANCE_STATUS.FULL : COMPLIANCE_STATUS.PENDING)
+    showToast?.('success', approved ? 'Business verification approved.' : 'Business verification approval revoked.')
+  }
+
   const saveProfileChanges = () => {
     if (!canEditClientSettings) {
       showToast?.('error', 'Insufficient Permissions')
@@ -3437,6 +3616,9 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     if (!normalizedEmail) return
     const nextPrimaryContact = toTrimmedValue(profileDraft.primaryContact)
     const nextBusinessName = toTrimmedValue(profileDraft.businessName)
+    const nextBusinessType = toTrimmedValue(profileDraft.businessType)
+    const isIndividualBusinessType = nextBusinessType.toLowerCase() === 'individual'
+    const nextBusinessRegistration = isIndividualBusinessType ? '' : toTrimmedValue(profileDraft.businessReg)
     if (!nextPrimaryContact || !nextBusinessName) {
       showToast?.('error', 'Primary contact and business name are required.')
       return
@@ -3448,7 +3630,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         ...getScopedStorageObject('settingsFormData', normalizedEmail),
         fullName: nextPrimaryContact,
         businessName: nextBusinessName,
-        phone: toTrimmedValue(profileDraft.phone),
+        businessType: nextBusinessType,
+        phone: formatPhoneNumber(profileDraft.phoneCountryCode, profileDraft.phone),
         roleInCompany: toTrimmedValue(profileDraft.roleInCompany),
         country: toTrimmedValue(profileDraft.country),
         industry: toTrimmedValue(profileDraft.industry),
@@ -3457,8 +3640,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         startMonth: toTrimmedValue(profileDraft.startMonth),
         currency: toTrimmedValue(profileDraft.currency) || 'NGN',
         language: toTrimmedValue(profileDraft.language) || 'English',
-        cacNumber: toTrimmedValue(profileDraft.businessReg),
-        businessReg: toTrimmedValue(profileDraft.businessReg),
+        cacNumber: nextBusinessRegistration,
+        businessReg: nextBusinessRegistration,
         address1: toTrimmedValue(profileDraft.address1),
         address2: toTrimmedValue(profileDraft.address2),
         city: toTrimmedValue(profileDraft.city),
@@ -3472,6 +3655,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         ...onboardingState,
         data: {
           ...(onboardingState?.data || {}),
+          businessType: nextBusinessType,
           businessName: nextBusinessName,
           country: toTrimmedValue(profileDraft.country),
           industry: toTrimmedValue(profileDraft.industry),
@@ -3480,8 +3664,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
           startMonth: toTrimmedValue(profileDraft.startMonth),
           currency: toTrimmedValue(profileDraft.currency) || 'NGN',
           language: toTrimmedValue(profileDraft.language) || 'English',
-          cacNumber: toTrimmedValue(profileDraft.businessReg),
-          businessReg: toTrimmedValue(profileDraft.businessReg),
+          cacNumber: nextBusinessRegistration,
+          businessReg: nextBusinessRegistration,
         },
       })
 
@@ -3554,7 +3738,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       const nextVerificationDocs = {
         ...getScopedStorageObject('verificationDocs', normalizedEmail),
         govId: toTrimmedValue(identityDraft.govId),
-        proofOfAddress: toTrimmedValue(identityDraft.proofOfAddress),
+        govIdType: toTrimmedValue(identityDraft.govIdType),
         businessReg: toTrimmedValue(identityDraft.businessReg),
       }
       writeScopedStorageObject('verificationDocs', normalizedEmail, nextVerificationDocs)
@@ -3655,6 +3839,70 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             />
           </div>
         </div>
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3">
+          <div className="rounded-md border border-border-light bg-background p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs uppercase tracking-wide text-text-muted">Identity Verification</p>
+              <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-semibold ${identityVerificationApproved ? 'bg-success-bg text-success' : 'bg-warning-bg text-warning'}`}>
+                {identityVerificationApproved ? 'Approved' : 'Pending'}
+              </span>
+            </div>
+            <p className="text-xs text-text-muted mt-2">
+              {hasIdentityDocumentSubmission
+                ? 'Government ID and ID type submitted.'
+                : 'Waiting for Government ID + ID type submission.'}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => saveIdentityVerificationApproval(true)}
+                disabled={!canEditClientSettings || isSavingVerificationStatus || identityVerificationApproved || !hasIdentityDocumentSubmission}
+                className="h-8 px-3 border border-success text-success rounded-md text-xs font-semibold hover:bg-success-bg transition-colors disabled:opacity-60"
+              >
+                Approve Identity
+              </button>
+              <button
+                type="button"
+                onClick={() => saveIdentityVerificationApproval(false)}
+                disabled={!canEditClientSettings || isSavingVerificationStatus || !identityVerificationApproved}
+                className="h-8 px-3 border border-error text-error rounded-md text-xs font-semibold hover:bg-error-bg transition-colors disabled:opacity-60"
+              >
+                Revoke
+              </button>
+            </div>
+          </div>
+          <div className="rounded-md border border-border-light bg-background p-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs uppercase tracking-wide text-text-muted">Business Verification</p>
+              <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-semibold ${businessVerificationApproved ? 'bg-success-bg text-success' : 'bg-warning-bg text-warning'}`}>
+                {businessVerificationApproved ? 'Approved' : 'Pending'}
+              </span>
+            </div>
+            <p className="text-xs text-text-muted mt-2">
+              {hasBusinessDocumentSubmission
+                ? 'Business registration document submitted.'
+                : 'Waiting for business registration document.'}
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => saveBusinessVerificationApproval(true)}
+                disabled={!canEditClientSettings || isSavingVerificationStatus || businessVerificationApproved || !hasBusinessDocumentSubmission || !identityVerificationApproved}
+                className="h-8 px-3 border border-success text-success rounded-md text-xs font-semibold hover:bg-success-bg transition-colors disabled:opacity-60"
+              >
+                Approve Business
+              </button>
+              <button
+                type="button"
+                onClick={() => saveBusinessVerificationApproval(false)}
+                disabled={!canEditClientSettings || isSavingVerificationStatus || !businessVerificationApproved}
+                className="h-8 px-3 border border-error text-error rounded-md text-xs font-semibold hover:bg-error-bg transition-colors disabled:opacity-60"
+              >
+                Revoke
+              </button>
+            </div>
+          </div>
+        </div>
         <div className="mt-4">
           <button
             type="button"
@@ -3702,7 +3950,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                     profilePhoto: profilePhoto || '',
                     companyLogo: companyLogo || '',
                     govId: verificationDocs.govId || '',
-                    proofOfAddress: verificationDocs.proofOfAddress || '',
+                    govIdType: verificationDocs.govIdType || '',
                     businessReg: verificationDocs.businessReg || '',
                   })
                   setIsEditingIdentityAssets(false)
@@ -3785,8 +4033,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 <input value={identityDraft.govId} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, govId: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
               </div>
               <div>
-                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Proof of Address</label>
-                <input value={identityDraft.proofOfAddress} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, proofOfAddress: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Government ID Type</label>
+                <input value={identityDraft.govIdType} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, govIdType: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
               </div>
               <div>
                 <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Registration Document</label>
@@ -3821,7 +4069,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
               {[
                 ['Government-issued ID', verificationDocs.govId],
-                ['Proof of Address', verificationDocs.proofOfAddress],
+                ['Government ID Type', verificationDocs.govIdType],
                 ['Business Registration Document', verificationDocs.businessReg],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-md border border-border-light bg-background px-3 py-2.5">
@@ -3857,7 +4105,9 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                   setProfileDraft({
                     primaryContact: safeClient?.primaryContact || settings.fullName || '',
                     businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
-                    phone: settings.phone || '',
+                    businessType: safeClient?.businessType || settings.businessType || onboardingData.businessType || '',
+                    phoneCountryCode: resolvePhoneParts(settings.phone || '').code,
+                    phone: resolvePhoneParts(settings.phone || '').number,
                     roleInCompany: settings.roleInCompany || '',
                     country: safeClient?.country || settings.country || onboardingData.country || '',
                     industry: settings.industry || onboardingData.industry || '',
@@ -3904,12 +4154,40 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
               <input value={profileDraft.businessName} onChange={(event) => setProfileDraft((prev) => ({ ...prev, businessName: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
             </div>
             <div>
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Type</label>
+              <select
+                value={profileDraft.businessType}
+                onChange={(event) => setProfileDraft((prev) => ({ ...prev, businessType: event.target.value }))}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary bg-white"
+              >
+                <option value="">Select business type</option>
+                <option value="Business">Business</option>
+                <option value="Non-Profit">Non-Profit</option>
+                <option value="Individual">Individual</option>
+              </select>
+            </div>
+            <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Work Email</label>
               <input value={safeClient.email || ''} disabled className="w-full h-10 px-3 border border-border rounded-md text-sm bg-background text-text-muted" />
             </div>
             <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Phone</label>
-              <input value={profileDraft.phone} onChange={(event) => setProfileDraft((prev) => ({ ...prev, phone: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              <div className="grid grid-cols-[110px_1fr] gap-2">
+                <select
+                  value={profileDraft.phoneCountryCode || '+234'}
+                  onChange={(event) => setProfileDraft((prev) => ({ ...prev, phoneCountryCode: event.target.value }))}
+                  className="h-10 px-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                >
+                  {PHONE_COUNTRY_CODE_OPTIONS.map((countryCode) => (
+                    <option key={countryCode} value={countryCode}>{countryCode}</option>
+                  ))}
+                </select>
+                <input
+                  value={profileDraft.phone}
+                  onChange={(event) => setProfileDraft((prev) => ({ ...prev, phone: event.target.value }))}
+                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                />
+              </div>
             </div>
             <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Role in Company</label>
@@ -3929,7 +4207,15 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             </div>
             <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Reg / CAC</label>
-              <input value={profileDraft.businessReg} onChange={(event) => setProfileDraft((prev) => ({ ...prev, businessReg: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              <input
+                value={profileDraft.businessReg}
+                onChange={(event) => setProfileDraft((prev) => ({ ...prev, businessReg: event.target.value }))}
+                disabled={String(profileDraft.businessType || '').trim().toLowerCase() === 'individual'}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary disabled:bg-background disabled:text-text-muted"
+              />
+              {String(profileDraft.businessType || '').trim().toLowerCase() === 'individual' && (
+                <p className="text-[11px] text-text-muted mt-1">Not required for Individual business type.</p>
+              )}
             </div>
             <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Reporting Cycle</label>

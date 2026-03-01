@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ArrowLeft, CheckCircle2 } from 'lucide-react'
+import { ArrowLeft, CheckCircle2, Loader2 } from 'lucide-react'
 import {
   ADMIN_LEVELS,
   ADMIN_PERMISSION_DEFINITIONS,
@@ -10,6 +10,32 @@ import {
 import AdminOtpModal from './AdminOtpModal'
 import KiaminaLogo from '../../common/KiaminaLogo'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
+import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
+
+const ADMIN_GOV_ID_TYPES_NIGERIA = ['International Passport', 'NIN', "Voter's Card", "Driver's Licence"]
+const ADMIN_GOV_ID_TYPE_INTERNATIONAL = 'Government Issued ID'
+const PHONE_COUNTRY_CODE_OPTIONS = [
+  { value: '+234', label: 'NG +234' },
+  { value: '+1', label: 'US/CA +1' },
+  { value: '+44', label: 'UK +44' },
+  { value: '+61', label: 'AU +61' },
+]
+const normalizeAdminVerificationCountry = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized || normalized === 'nigeria') return 'Nigeria'
+  return 'International'
+}
+const getAdminGovIdTypeOptions = (country = 'Nigeria') => (
+  country === 'Nigeria'
+    ? ADMIN_GOV_ID_TYPES_NIGERIA
+    : [ADMIN_GOV_ID_TYPE_INTERNATIONAL]
+)
+const formatPhoneNumber = (countryCode = '+234', number = '') => {
+  const normalizedCode = String(countryCode || '').trim() || '+234'
+  const normalizedNumber = String(number || '').trim()
+  if (!normalizedNumber) return ''
+  return `${normalizedCode} ${normalizedNumber}`.trim()
+}
 
 function AdminAccountSetup({
   invite,
@@ -25,12 +51,26 @@ function AdminAccountSetup({
     email: invite?.email || '',
     roleInCompany: '',
     department: '',
+    phoneCountryCode: '+234',
     phoneNumber: '',
+    workCountry: 'Nigeria',
+    governmentIdType: '',
+    governmentIdNumber: '',
+    governmentIdFile: '',
+    residentialAddress: '',
     password: '',
     confirmPassword: '',
   })
   const [errorMessage, setErrorMessage] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isIdentityVerifying, setIsIdentityVerifying] = useState(false)
+  const [identityVerificationState, setIdentityVerificationState] = useState({
+    status: '',
+    message: '',
+  })
+  const [idUploadInputKey, setIdUploadInputKey] = useState(0)
+  const normalizedWorkCountry = normalizeAdminVerificationCountry(setupForm.workCountry)
+  const govIdTypeOptions = getAdminGovIdTypeOptions(normalizedWorkCountry)
 
   const isInviteValid = isAdminInvitePending(invite)
   const invitePermissions = useMemo(() => {
@@ -44,9 +84,55 @@ function AdminAccountSetup({
       .filter(Boolean)
   }, [invite])
 
+  const resetIdentityVerificationState = () => {
+    setIdentityVerificationState({ status: '', message: '' })
+  }
+
+  const handleVerifyIdentity = async () => {
+    if (!setupForm.fullName.trim() || !setupForm.governmentIdType || !setupForm.governmentIdNumber.trim()) {
+      setErrorMessage('Full name, government ID type, and ID card number are required before verification.')
+      return
+    }
+    if (!setupForm.governmentIdFile) {
+      setErrorMessage('Upload government ID before verification.')
+      return
+    }
+
+    setErrorMessage('')
+    setIsIdentityVerifying(true)
+    setIdentityVerificationState({ status: 'verifying', message: 'Identifying...' })
+    const verifyResult = await verifyIdentityWithDojah({
+      fullName: setupForm.fullName,
+      idType: setupForm.governmentIdType,
+      cardNumber: setupForm.governmentIdNumber,
+    })
+    if (!verifyResult.ok) {
+      setIdentityVerificationState({
+        status: 'failed',
+        message: 'Verification failed. Please re-upload.',
+      })
+      setSetupForm((prev) => ({
+        ...prev,
+        governmentIdFile: '',
+      }))
+      setIdUploadInputKey((prev) => prev + 1)
+      setIsIdentityVerifying(false)
+      return
+    }
+    setIdentityVerificationState({
+      status: 'verified',
+      message: 'Identity verified successfully.',
+    })
+    setIsIdentityVerifying(false)
+  }
+
   const submitSetup = async (event) => {
     event.preventDefault()
     if (!invite?.token) return
+    if (identityVerificationState.status !== 'verified') {
+      setErrorMessage('Submit identity verification before creating account.')
+      return
+    }
 
     setErrorMessage('')
     setIsSubmitting(true)
@@ -56,7 +142,12 @@ function AdminAccountSetup({
       email: setupForm.email,
       roleInCompany: setupForm.roleInCompany,
       department: setupForm.department,
-      phoneNumber: setupForm.phoneNumber,
+      phoneNumber: formatPhoneNumber(setupForm.phoneCountryCode, setupForm.phoneNumber),
+      workCountry: normalizedWorkCountry,
+      governmentIdType: setupForm.governmentIdType,
+      governmentIdNumber: setupForm.governmentIdNumber,
+      identityVerificationPassed: identityVerificationState.status === 'verified',
+      residentialAddress: setupForm.residentialAddress,
       password: setupForm.password,
       confirmPassword: setupForm.confirmPassword,
     })
@@ -130,7 +221,10 @@ function AdminAccountSetup({
             <input
               type="text"
               value={setupForm.fullName}
-              onChange={(event) => setSetupForm((prev) => ({ ...prev, fullName: event.target.value }))}
+              onChange={(event) => {
+                setSetupForm((prev) => ({ ...prev, fullName: event.target.value }))
+                resetIdentityVerificationState()
+              }}
               className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
           </div>
@@ -169,10 +263,132 @@ function AdminAccountSetup({
 
           <div>
             <label className="block text-sm font-medium text-text-primary mb-1.5">Phone Number</label>
+            <div className="grid grid-cols-[130px_1fr] gap-2">
+              <select
+                value={setupForm.phoneCountryCode || '+234'}
+                onChange={(event) => setSetupForm((prev) => ({ ...prev, phoneCountryCode: event.target.value }))}
+                className="h-11 px-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              >
+                {PHONE_COUNTRY_CODE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <input
+                type="tel"
+                value={setupForm.phoneNumber}
+                onChange={(event) => setSetupForm((prev) => ({ ...prev, phoneNumber: event.target.value }))}
+                placeholder="Enter phone number"
+                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Country</label>
+              <select
+                value={normalizedWorkCountry}
+                onChange={(event) => {
+                  setSetupForm((prev) => ({
+                    ...prev,
+                    workCountry: normalizeAdminVerificationCountry(event.target.value),
+                    governmentIdType: '',
+                  }))
+                  resetIdentityVerificationState()
+                }}
+                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="Nigeria">Nigeria</option>
+                <option value="International">Outside Nigeria</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Type</label>
+              <select
+                value={setupForm.governmentIdType}
+                onChange={(event) => {
+                  setSetupForm((prev) => ({ ...prev, governmentIdType: event.target.value }))
+                  resetIdentityVerificationState()
+                }}
+                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="">Select ID type</option>
+                {govIdTypeOptions.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Number</label>
             <input
-              type="tel"
-              value={setupForm.phoneNumber}
-              onChange={(event) => setSetupForm((prev) => ({ ...prev, phoneNumber: event.target.value }))}
+              type="text"
+              value={setupForm.governmentIdNumber}
+              onChange={(event) => {
+                setSetupForm((prev) => ({ ...prev, governmentIdNumber: event.target.value }))
+                resetIdentityVerificationState()
+              }}
+              placeholder={normalizedWorkCountry === 'Nigeria' ? 'Enter NIN / Passport / Voter ID number' : 'Enter government-issued ID number'}
+              className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+            <p className="text-xs text-text-muted mt-1">
+              Nigeria admins can use International Passport, NIN, Voter&apos;s Card, or Driver&apos;s Licence. Outside Nigeria, use your government-issued ID.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Upload</label>
+            <input
+              key={idUploadInputKey}
+              type="file"
+              accept="image/*"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                setSetupForm((prev) => ({
+                  ...prev,
+                  governmentIdFile: file?.name || '',
+                }))
+                resetIdentityVerificationState()
+              }}
+              className="w-full h-11 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
+            />
+            {setupForm.governmentIdFile && (
+              <p className="text-xs text-success mt-1">Uploaded: {setupForm.governmentIdFile}</p>
+            )}
+          </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={handleVerifyIdentity}
+              disabled={isIdentityVerifying}
+              className="h-10 px-4 border border-primary text-primary rounded-md text-sm font-semibold hover:bg-primary-tint transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+            >
+              {isIdentityVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
+              {isIdentityVerifying ? 'Identifying...' : 'Submit for Verification'}
+            </button>
+            {identityVerificationState.message && (
+              <p className={`text-xs mt-2 ${
+                identityVerificationState.status === 'verified'
+                  ? 'text-success'
+                  : identityVerificationState.status === 'failed'
+                    ? 'text-error'
+                    : 'text-text-muted'
+              }`}
+              >
+                {identityVerificationState.message}
+              </p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Residential Address (Optional)</label>
+            <input
+              type="text"
+              value={setupForm.residentialAddress}
+              onChange={(event) => setSetupForm((prev) => ({ ...prev, residentialAddress: event.target.value }))}
+              placeholder="Enter your full residential address"
               className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
           </div>
@@ -215,7 +431,7 @@ function AdminAccountSetup({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isIdentityVerifying}
               className="h-11 px-5 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
             >
               {isSubmitting && <DotLottiePreloader size={18} />}

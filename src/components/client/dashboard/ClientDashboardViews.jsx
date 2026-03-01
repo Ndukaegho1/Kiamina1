@@ -392,6 +392,7 @@ function Sidebar({
   setActivePage,
   companyLogo,
   companyName,
+  isBusinessVerified = false,
   onLogout,
   isMobileOpen = false,
   onCloseMobile,
@@ -458,7 +459,10 @@ function Sidebar({
               ? <img src={companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
               : <KiaminaLogo className="h-6 w-auto" alt="Kiamina logo" />}
           </div>
-          <div className="text-sm font-medium text-text-primary">{companyName || 'Acme Corporation'}</div>
+          <div className="text-sm font-medium text-text-primary inline-flex items-center gap-1.5">
+            <span>{companyName || 'Acme Corporation'}</span>
+            {isBusinessVerified && <CheckCircle className="w-3.5 h-3.5 text-success" />}
+          </div>
         </div>
         <button className="flex items-center gap-2 w-full px-3 py-2 bg-background rounded-md text-sm text-text-secondary hover:bg-border-light transition-colors mt-2">
           <span>NG</span>
@@ -522,6 +526,7 @@ function Sidebar({
 function TopBar({
   profilePhoto,
   clientFirstName,
+  isIdentityVerified = false,
   notifications = [],
   onNotificationClick,
   onMarkAllRead,
@@ -710,7 +715,10 @@ function TopBar({
             )}
           </div>
           <div className="hidden sm:flex flex-col">
-            <span className="text-sm font-medium text-text-primary">{displayName}</span>
+            <span className="text-sm font-medium text-text-primary inline-flex items-center gap-1.5">
+              <span>{displayName}</span>
+              {isIdentityVerified && <CheckCircle className="w-3.5 h-3.5 text-success" />}
+            </span>
             <span className="text-[11px] text-text-muted">{roleLabel || 'Client'}</span>
           </div>
         </button>
@@ -736,6 +744,11 @@ function DashboardPage({
       label: 'Verified',
       icon: CheckCircle,
       className: 'bg-primary-tint text-primary border border-primary/30',
+    },
+    unverified: {
+      label: 'Unverified',
+      icon: AlertCircle,
+      className: 'bg-error-bg text-error border border-error/30',
     },
     pending: {
       label: 'Verification Pending',
@@ -773,6 +786,7 @@ function DashboardPage({
   // Compliance Status - determines overall health from document statuses
   let complianceStatus = 'compliant'
   if (rejectedCount > 0 || verificationState === 'rejected' || verificationState === 'suspended') complianceStatus = 'rejected'
+  else if (verificationState === 'unverified') complianceStatus = 'pending'
   else if (needsClarificationCount > 0 || pendingCount > 0 || verificationState === 'pending') complianceStatus = 'pending'
 
   const getComplianceWidget = () => {

@@ -34,6 +34,10 @@ import { INDUSTRY_OPTIONS } from '../../../data/client/mockData'
 import KiaminaLogo from '../../common/KiaminaLogo'
 function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSkip, onComplete, showToast }) {
   const [errors, setErrors] = useState({})
+  const GOVERNMENT_ID_TYPE_OPTIONS = ['NIN', "Voter's Card", 'International Passport', "Driver's Licence"]
+  const MIN_GOV_ID_FILE_SIZE_BYTES = 80 * 1024
+  const MIN_GOV_ID_IMAGE_WIDTH = 600
+  const MIN_GOV_ID_IMAGE_HEIGHT = 400
 
   const isBusinessEntity = data.businessType === 'Business' || data.businessType === 'Non-Profit'
   const isNigeriaRegistration = (data.country || '').trim().toLowerCase() === 'nigeria'
@@ -48,7 +52,14 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
   ][currentStep - 1]
 
   const updateField = (field, value) => {
-    setData(prev => ({ ...prev, [field]: value }))
+    setData((prev) => {
+      const next = { ...prev, [field]: value }
+      if (field === 'businessType' && value === 'Individual') {
+        next.cacNumber = ''
+        next.businessReg = ''
+      }
+      return next
+    })
     setErrors(prev => ({ ...prev, [field]: '' }))
   }
 
@@ -100,6 +111,67 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
       return
     }
     onComplete(data)
+  }
+
+  const verifyGovernmentIdClarity = (file) => new Promise((resolve) => {
+    if (!file) {
+      resolve({ ok: false, message: 'No file selected.' })
+      return
+    }
+    if (!file.type?.startsWith('image/')) {
+      resolve({ ok: false, message: 'Government ID must be an image file.' })
+      return
+    }
+    if (file.size < MIN_GOV_ID_FILE_SIZE_BYTES) {
+      resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
+      return
+    }
+    const image = new Image()
+    const objectUrl = URL.createObjectURL(file)
+    image.onload = () => {
+      const isClear = image.width >= MIN_GOV_ID_IMAGE_WIDTH && image.height >= MIN_GOV_ID_IMAGE_HEIGHT
+      URL.revokeObjectURL(objectUrl)
+      if (!isClear) {
+        resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
+        return
+      }
+      resolve({ ok: true, message: 'Government ID uploaded successfully.' })
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve({ ok: false, message: 'Unable to read image. Re-upload a clear government ID.' })
+    }
+    image.src = objectUrl
+  })
+
+  const handleOnboardingGovIdUpload = async (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    if (!data.govIdType) {
+      showToast('error', 'Select government ID type before uploading.')
+      event.target.value = ''
+      return
+    }
+    const clarity = await verifyGovernmentIdClarity(file)
+    if (!clarity.ok) {
+      setData((prev) => ({
+        ...prev,
+        govId: '',
+        govIdVerifiedAt: '',
+        govIdClarityStatus: 'not-clear',
+      }))
+      showToast('error', clarity.message)
+      event.target.value = ''
+      return
+    }
+    setData((prev) => ({
+      ...prev,
+      govId: file.name,
+      govIdVerifiedAt: new Date().toISOString(),
+      govIdClarityStatus: 'clear',
+    }))
+    showToast('success', clarity.message)
+    event.target.value = ''
   }
 
   return (
@@ -260,22 +332,54 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
         {currentStep === 4 && (
           <div className="space-y-4">
             <p className="text-sm text-text-muted">Verification helps us maintain compliance and security.</p>
-            {[
-              { id: 'govId', label: 'Government ID' },
-              { id: 'proofOfAddress', label: 'Proof of Address' },
-              { id: 'businessReg', label: 'Business Registration Document (if applicable)' },
-            ].map((field) => (
-              <div key={field.id}>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">{field.label}</label>
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Type</label>
+              <select
+                id="onboarding-govIdType"
+                value={data.govIdType || ''}
+                onChange={(event) => updateField('govIdType', event.target.value)}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="">Select ID type</option>
+                {GOVERNMENT_ID_TYPE_OPTIONS.map((option) => (
+                  <option key={option} value={option}>{option}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID</label>
+              <input
+                id="onboarding-govId"
+                type="file"
+                accept="image/*"
+                onChange={handleOnboardingGovIdUpload}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
+              />
+              {data.govId && <p className="text-xs text-success mt-1">Attached: {data.govId}</p>}
+              {data.govIdClarityStatus === 'not-clear' && <p className="text-xs text-error mt-1">Government ID is not clear, re-upload.</p>}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">ID Card Number</label>
+              <input
+                id="onboarding-govIdNumber"
+                type="text"
+                value={data.govIdNumber || ''}
+                onChange={(event) => updateField('govIdNumber', event.target.value)}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              />
+            </div>
+            {isBusinessEntity && (
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Business Registration Document (if applicable)</label>
                 <input
-                  id={`onboarding-${field.id}`}
+                  id="onboarding-businessReg"
                   type="file"
-                  onChange={(e) => updateField(field.id, e.target.files?.[0]?.name || '')}
+                  onChange={(event) => updateField('businessReg', event.target.files?.[0]?.name || '')}
                   className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
                 />
-                {data[field.id] && <p className="text-xs text-success mt-1">Attached: {data[field.id]}</p>}
+                {data.businessReg && <p className="text-xs text-success mt-1">Attached: {data.businessReg}</p>}
               </div>
-            ))}
+            )}
           </div>
         )}
 

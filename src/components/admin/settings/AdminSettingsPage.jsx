@@ -13,6 +13,7 @@ import {
   KeyRound,
   Info,
   LogOut,
+  Loader2,
 } from 'lucide-react'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
 import {
@@ -35,6 +36,7 @@ import {
   setClientAssignmentsForClient,
 } from '../adminAssignments'
 import { getNetworkAwareDurationMs } from '../../../utils/networkRuntime'
+import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
 
 const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
@@ -148,6 +150,56 @@ const formatDateTime = (value) => {
 const getAdminInviteExpiryIso = () => (
   new Date(Date.now() + (ADMIN_INVITE_EXPIRY_HOURS * 60 * 60 * 1000)).toISOString()
 )
+const ADMIN_GOV_ID_TYPES_NIGERIA = ['International Passport', 'NIN', "Voter's Card", "Driver's Licence"]
+const ADMIN_GOV_ID_TYPE_INTERNATIONAL = 'Government Issued ID'
+const PHONE_COUNTRY_CODE_OPTIONS = [
+  { value: '+234', label: 'NG +234' },
+  { value: '+1', label: 'US/CA +1' },
+  { value: '+44', label: 'UK +44' },
+  { value: '+61', label: 'AU +61' },
+]
+const normalizeAdminVerificationCountry = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized || normalized === 'nigeria') return 'Nigeria'
+  return 'International'
+}
+const getAdminGovernmentIdOptions = (country = 'Nigeria') => (
+  country === 'Nigeria'
+    ? ADMIN_GOV_ID_TYPES_NIGERIA
+    : [ADMIN_GOV_ID_TYPE_INTERNATIONAL]
+)
+const normalizeAdminGovernmentIdType = (value = '', country = 'Nigeria') => {
+  const normalizedValue = String(value || '').trim().toLowerCase()
+  if (!normalizedValue) return ''
+  const options = getAdminGovernmentIdOptions(country)
+  return options.find((option) => option.toLowerCase() === normalizedValue) || ''
+}
+const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
+  const raw = String(value || '').trim()
+  const option = PHONE_COUNTRY_CODE_OPTIONS.find((item) => raw.startsWith(item.value))
+  if (!raw) {
+    return {
+      code: fallbackCode,
+      number: '',
+    }
+  }
+  if (!option) {
+    return {
+      code: fallbackCode,
+      number: raw,
+    }
+  }
+  return {
+    code: option.value,
+    number: raw.slice(option.value.length).trim(),
+  }
+}
+const formatPhoneNumber = (code = '+234', number = '') => {
+  const normalizedCode = String(code || '').trim() || '+234'
+  const normalizedNumber = String(number || '').trim()
+  if (!normalizedNumber) return ''
+  return `${normalizedCode} ${normalizedNumber}`.trim()
+}
 
 const getProfileStorageKey = (email = '') => `kiaminaAdminProfile:${email.trim().toLowerCase()}`
 const getSecurityStorageKey = (email = '') => `kiaminaAdminSecurity:${email.trim().toLowerCase()}`
@@ -262,7 +314,8 @@ function AdminSettingsPage({
     email: currentAdmin.email || '',
     roleInCompany: currentAdmin.roleInCompany || '',
     department: currentAdmin.department || '',
-    phoneNumber: currentAdmin.phoneNumber || '',
+    phoneCountryCode: resolvePhoneParts(currentAdmin.phoneNumber || '').code,
+    phoneNumber: resolvePhoneParts(currentAdmin.phoneNumber || '').number,
   })
 
   const [passwordForm, setPasswordForm] = useState({
@@ -287,10 +340,25 @@ function AdminSettingsPage({
   const [createAdminForm, setCreateAdminForm] = useState({
     fullName: '',
     email: '',
+    roleInCompany: '',
+    department: '',
+    phoneCountryCode: '+234',
+    phoneNumber: '',
     password: '',
+    workCountry: 'Nigeria',
+    governmentIdType: '',
+    governmentIdNumber: '',
+    governmentIdFile: '',
+    residentialAddress: '',
     adminLevel: ADMIN_LEVELS.AREA_ACCOUNTANT,
     permissions: getDefaultPermissionsForAdminLevel(ADMIN_LEVELS.AREA_ACCOUNTANT),
   })
+  const [isCreateAdminIdentityVerifying, setIsCreateAdminIdentityVerifying] = useState(false)
+  const [createAdminIdentityVerification, setCreateAdminIdentityVerification] = useState({
+    status: '',
+    message: '',
+  })
+  const [createAdminIdUploadKey, setCreateAdminIdUploadKey] = useState(0)
 
   const [inviteForm, setInviteForm] = useState({
     email: '',
@@ -317,12 +385,14 @@ function AdminSettingsPage({
 
   useEffect(() => {
     const normalizedEmail = currentAdmin.email?.trim()?.toLowerCase() || ''
+    const phoneParts = resolvePhoneParts(currentAdmin.phoneNumber || '')
     const fallbackProfile = {
       fullName: currentAdmin.fullName || '',
       email: currentAdmin.email || '',
       roleInCompany: currentAdmin.roleInCompany || '',
       department: currentAdmin.department || '',
-      phoneNumber: currentAdmin.phoneNumber || '',
+      phoneCountryCode: phoneParts.code,
+      phoneNumber: phoneParts.number,
     }
 
     try {
@@ -334,7 +404,8 @@ function AdminSettingsPage({
           email: fallbackProfile.email,
           roleInCompany: parsedProfile.roleInCompany || fallbackProfile.roleInCompany,
           department: parsedProfile.department || fallbackProfile.department,
-          phoneNumber: parsedProfile.phoneNumber || fallbackProfile.phoneNumber,
+          phoneCountryCode: parsedProfile.phoneCountryCode || resolvePhoneParts(parsedProfile.phoneNumber || fallbackProfile.phoneNumber, fallbackProfile.phoneCountryCode).code,
+          phoneNumber: resolvePhoneParts(parsedProfile.phoneNumber || fallbackProfile.phoneNumber, parsedProfile.phoneCountryCode || fallbackProfile.phoneCountryCode).number,
         })
       } else {
         setProfileForm(fallbackProfile)
@@ -421,6 +492,8 @@ function AdminSettingsPage({
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
     .slice(0, 4)
   const allowDemoInvite = import.meta.env.DEV === true
+  const normalizedCreateAdminWorkCountry = normalizeAdminVerificationCountry(createAdminForm.workCountry)
+  const createAdminGovIdOptions = getAdminGovernmentIdOptions(normalizedCreateAdminWorkCountry)
 
   const notify = (type, message) => {
     if (typeof showToast === 'function') showToast(type, message)
@@ -477,12 +550,13 @@ function AdminSettingsPage({
     }
 
     const nextAccounts = [...allAccounts]
+    const normalizedProfilePhoneNumber = formatPhoneNumber(profileForm.phoneCountryCode, profileForm.phoneNumber)
     nextAccounts[matchIndex] = normalizeAdminAccount({
       ...nextAccounts[matchIndex],
       fullName: profileForm.fullName.trim(),
       roleInCompany: profileForm.roleInCompany.trim(),
       department: profileForm.department.trim(),
-      phoneNumber: profileForm.phoneNumber.trim(),
+      phoneNumber: normalizedProfilePhoneNumber,
     })
     writeAccounts(nextAccounts)
     const updatedCurrentAdminAccount = nextAccounts[matchIndex]
@@ -492,7 +566,8 @@ function AdminSettingsPage({
         fullName: profileForm.fullName.trim(),
         roleInCompany: profileForm.roleInCompany.trim(),
         department: profileForm.department.trim(),
-        phoneNumber: profileForm.phoneNumber.trim(),
+        phoneCountryCode: profileForm.phoneCountryCode || '+234',
+        phoneNumber: normalizedProfilePhoneNumber,
       }),
     )
 
@@ -507,7 +582,7 @@ function AdminSettingsPage({
         nextFullName: updatedCurrentAdminAccount.fullName || profileForm.fullName.trim(),
         nextRoleInCompany: updatedCurrentAdminAccount.roleInCompany || profileForm.roleInCompany.trim(),
         nextDepartment: updatedCurrentAdminAccount.department || profileForm.department.trim(),
-        nextPhoneNumber: updatedCurrentAdminAccount.phoneNumber || profileForm.phoneNumber.trim(),
+        nextPhoneNumber: updatedCurrentAdminAccount.phoneNumber || normalizedProfilePhoneNumber,
         nextAdminLevel: updatedCurrentAdminAccount.adminLevel,
         nextAdminPermissions: updatedCurrentAdminAccount.adminPermissions,
         nextStatus: updatedCurrentAdminAccount.status,
@@ -596,7 +671,11 @@ function AdminSettingsPage({
 
     const currentEmail = currentAdmin.email?.trim()?.toLowerCase() || ''
     const nextEmail = emailChangeForm.nextEmail.trim().toLowerCase()
-    const smsPhone = (profileForm.phoneNumber || currentAdmin.phoneNumber || '').trim()
+    const fallbackPhoneParts = resolvePhoneParts(currentAdmin.phoneNumber || '', profileForm.phoneCountryCode || '+234')
+    const smsPhone = formatPhoneNumber(
+      profileForm.phoneCountryCode || fallbackPhoneParts.code,
+      profileForm.phoneNumber || fallbackPhoneParts.number,
+    )
 
     if (!currentEmail) {
       setFormError('Unable to locate your current login email.')
@@ -768,14 +847,42 @@ function AdminSettingsPage({
   }
 
   const queueCreateAdmin = () => {
-    if (!createAdminForm.fullName.trim() || !createAdminForm.email.trim() || !createAdminForm.password) {
+    const normalizedWorkCountry = normalizeAdminVerificationCountry(createAdminForm.workCountry)
+    const normalizedGovernmentIdType = normalizeAdminGovernmentIdType(createAdminForm.governmentIdType, normalizedWorkCountry)
+    const normalizedGovernmentIdNumber = String(createAdminForm.governmentIdNumber || '').trim()
+    const normalizedResidentialAddress = String(createAdminForm.residentialAddress || '').trim()
+    const normalizedRoleInCompany = String(createAdminForm.roleInCompany || '').trim()
+    const normalizedDepartment = String(createAdminForm.department || '').trim()
+    const normalizedPhoneNumber = formatPhoneNumber(createAdminForm.phoneCountryCode, createAdminForm.phoneNumber)
+    if (
+      !createAdminForm.fullName.trim()
+      || !createAdminForm.email.trim()
+      || !normalizedRoleInCompany
+      || !normalizedDepartment
+      || !normalizedPhoneNumber
+      || !createAdminForm.password
+      || !normalizedGovernmentIdType
+      || !normalizedGovernmentIdNumber
+    ) {
       const message = 'Complete all create-admin fields.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+    if (normalizedGovernmentIdNumber.length < 4) {
+      const message = 'Enter a valid government ID number.'
       setFormError(message)
       notify('error', message)
       return
     }
     if (!passwordStrengthRegex.test(createAdminForm.password)) {
       const message = 'Admin password must include at least one number and one special character.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+    if (createAdminIdentityVerification.status !== 'verified') {
+      const message = 'Submit identity verification before creating this admin.'
       setFormError(message)
       notify('error', message)
       return
@@ -795,8 +902,68 @@ function AdminSettingsPage({
         permissions: selectedPermissions,
         email: createAdminForm.email.trim().toLowerCase(),
         fullName: createAdminForm.fullName.trim(),
+        roleInCompany: normalizedRoleInCompany,
+        department: normalizedDepartment,
+        phoneNumber: normalizedPhoneNumber,
+        phoneCountryCode: createAdminForm.phoneCountryCode || '+234',
+        workCountry: normalizedWorkCountry,
+        governmentIdType: normalizedGovernmentIdType,
+        governmentIdNumber: normalizedGovernmentIdNumber,
+        governmentIdFile: String(createAdminForm.governmentIdFile || '').trim(),
+        residentialAddress: normalizedResidentialAddress,
       },
     })
+  }
+
+  const resetCreateAdminIdentityVerification = () => {
+    setCreateAdminIdentityVerification({ status: '', message: '' })
+  }
+
+  const verifyCreateAdminIdentity = async () => {
+    const fullName = String(createAdminForm.fullName || '').trim()
+    const idType = String(createAdminForm.governmentIdType || '').trim()
+    const cardNumber = String(createAdminForm.governmentIdNumber || '').trim()
+    if (!fullName || !idType || !cardNumber) {
+      const message = 'Full name, government ID type, and ID card number are required before verification.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+    if (!createAdminForm.governmentIdFile) {
+      const message = 'Upload government ID before verification.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+
+    setFormError('')
+    setIsCreateAdminIdentityVerifying(true)
+    setCreateAdminIdentityVerification({ status: 'verifying', message: 'Identifying...' })
+    const verifyResult = await verifyIdentityWithDojah({
+      fullName,
+      idType,
+      cardNumber,
+    })
+    if (!verifyResult.ok) {
+      setCreateAdminIdentityVerification({
+        status: 'failed',
+        message: 'Verification failed. Please re-upload.',
+      })
+      setCreateAdminForm((prev) => ({
+        ...prev,
+        governmentIdFile: '',
+      }))
+      setCreateAdminIdUploadKey((prev) => prev + 1)
+      setIsCreateAdminIdentityVerifying(false)
+      notify('error', 'Verification failed. Please re-upload.')
+      return
+    }
+    setCreateAdminIdentityVerification({
+      status: 'verified',
+      message: 'Identity verified successfully.',
+    })
+    setIsCreateAdminIdentityVerifying(false)
+    notify('success', 'Identity verified successfully.')
   }
 
   const applyGeneratedCreateAdminPassword = () => {
@@ -1162,6 +1329,16 @@ function AdminSettingsPage({
             fullName: confirmAction.payload.fullName,
             email: confirmAction.payload.email,
             password: confirmAction.payload.password,
+            roleInCompany: confirmAction.payload.roleInCompany || '',
+            department: confirmAction.payload.department || '',
+            phoneNumber: confirmAction.payload.phoneNumber || '',
+            phoneCountryCode: confirmAction.payload.phoneCountryCode || '+234',
+            workCountry: confirmAction.payload.workCountry || 'Nigeria',
+            governmentIdType: confirmAction.payload.governmentIdType || '',
+            governmentIdNumber: confirmAction.payload.governmentIdNumber || '',
+            governmentIdFile: confirmAction.payload.governmentIdFile || '',
+            governmentIdVerifiedAt: new Date().toISOString(),
+            residentialAddress: confirmAction.payload.residentialAddress || '',
             role: 'admin',
             adminLevel: confirmAction.payload.adminLevel,
             adminPermissions: resolvePermissionSelection(
@@ -1189,10 +1366,21 @@ function AdminSettingsPage({
           setCreateAdminForm({
             fullName: '',
             email: '',
+            roleInCompany: '',
+            department: '',
+            phoneCountryCode: '+234',
+            phoneNumber: '',
             password: '',
+            workCountry: 'Nigeria',
+            governmentIdType: '',
+            governmentIdNumber: '',
+            governmentIdFile: '',
+            residentialAddress: '',
             adminLevel: ADMIN_LEVELS.AREA_ACCOUNTANT,
             permissions: getDefaultPermissionsForAdminLevel(ADMIN_LEVELS.AREA_ACCOUNTANT),
           })
+          setCreateAdminIdentityVerification({ status: '', message: '' })
+          setCreateAdminIdUploadKey((prev) => prev + 1)
           refreshAdminData()
           notify('success', 'Admin account created successfully.')
         }
@@ -1641,12 +1829,23 @@ function AdminSettingsPage({
             </div>
             <div>
               <label className="block text-sm font-medium text-text-primary mb-1.5">Phone Number</label>
-              <input
-                type="text"
-                value={profileForm.phoneNumber}
-                onChange={(event) => setProfileForm((prev) => ({ ...prev, phoneNumber: event.target.value }))}
-                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              />
+              <div className="grid grid-cols-[130px_1fr] gap-2">
+                <select
+                  value={profileForm.phoneCountryCode || '+234'}
+                  onChange={(event) => setProfileForm((prev) => ({ ...prev, phoneCountryCode: event.target.value }))}
+                  className="h-10 px-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                >
+                  {PHONE_COUNTRY_CODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={profileForm.phoneNumber}
+                  onChange={(event) => setProfileForm((prev) => ({ ...prev, phoneNumber: event.target.value }))}
+                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                />
+              </div>
             </div>
           </div>
           <div className="mt-4">
@@ -1997,7 +2196,10 @@ function AdminSettingsPage({
                       type="text"
                       placeholder="Full Name"
                       value={createAdminForm.fullName}
-                      onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, fullName: event.target.value }))}
+                      onChange={(event) => {
+                        setCreateAdminForm((prev) => ({ ...prev, fullName: event.target.value }))
+                        resetCreateAdminIdentityVerification()
+                      }}
                       className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
                     />
                     <input
@@ -2005,6 +2207,136 @@ function AdminSettingsPage({
                       placeholder="Work Email"
                       value={createAdminForm.email}
                       onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, email: event.target.value }))}
+                      className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                    />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Role in Company"
+                        value={createAdminForm.roleInCompany}
+                        onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, roleInCompany: event.target.value }))}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Department"
+                        value={createAdminForm.department}
+                        onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, department: event.target.value }))}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      />
+                    </div>
+                    <div className="grid grid-cols-[130px_1fr] gap-2">
+                      <select
+                        value={createAdminForm.phoneCountryCode || '+234'}
+                        onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, phoneCountryCode: event.target.value }))}
+                        className="h-10 px-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      >
+                        {PHONE_COUNTRY_CODE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                      <input
+                        type="tel"
+                        placeholder="Phone Number"
+                        value={createAdminForm.phoneNumber}
+                        onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, phoneNumber: event.target.value }))}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      />
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <select
+                        value={normalizedCreateAdminWorkCountry}
+                        onChange={(event) => {
+                          setCreateAdminForm((prev) => ({
+                            ...prev,
+                            workCountry: normalizeAdminVerificationCountry(event.target.value),
+                            governmentIdType: '',
+                            governmentIdNumber: '',
+                            governmentIdFile: '',
+                          }))
+                          resetCreateAdminIdentityVerification()
+                        }}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      >
+                        <option value="Nigeria">Nigeria</option>
+                        <option value="International">Outside Nigeria</option>
+                      </select>
+                      <select
+                        value={createAdminForm.governmentIdType}
+                        onChange={(event) => {
+                          setCreateAdminForm((prev) => ({ ...prev, governmentIdType: event.target.value }))
+                          resetCreateAdminIdentityVerification()
+                        }}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      >
+                        <option value="">Government ID Type</option>
+                        {createAdminGovIdOptions.map((option) => (
+                          <option key={option} value={option}>{option}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder={normalizedCreateAdminWorkCountry === 'Nigeria' ? 'Government ID Number (NIN / Passport / Voter ID / Driver Licence)' : 'Government ID Number'}
+                      value={createAdminForm.governmentIdNumber}
+                      onChange={(event) => {
+                        setCreateAdminForm((prev) => ({ ...prev, governmentIdNumber: event.target.value }))
+                        resetCreateAdminIdentityVerification()
+                      }}
+                      className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                    />
+                    <p className="text-xs text-text-muted">
+                      Nigeria: International Passport, NIN, Voter&apos;s Card, or Driver&apos;s Licence. Outside Nigeria: government-issued ID.
+                    </p>
+                    <div className="space-y-2 rounded-md border border-border-light bg-background px-3 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Government ID Upload</label>
+                        {createAdminForm.governmentIdFile && (
+                          <span className="text-xs text-success">Uploaded: {createAdminForm.governmentIdFile}</span>
+                        )}
+                      </div>
+                      <input
+                        key={createAdminIdUploadKey}
+                        type="file"
+                        accept="image/*"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0] || null
+                          setCreateAdminForm((prev) => ({
+                            ...prev,
+                            governmentIdFile: file?.name || '',
+                          }))
+                          resetCreateAdminIdentityVerification()
+                        }}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-2 file:border-0 file:bg-white file:px-2 file:py-1"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => void verifyCreateAdminIdentity()}
+                        disabled={isCreateAdminIdentityVerifying}
+                        className="h-9 px-3 border border-primary text-primary rounded-md text-xs font-semibold hover:bg-primary-tint transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                      >
+                        {isCreateAdminIdentityVerifying && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {isCreateAdminIdentityVerifying ? 'Identifying...' : 'Submit for Verification'}
+                      </button>
+                      {createAdminIdentityVerification.message && (
+                        <p
+                          className={`text-xs ${
+                            createAdminIdentityVerification.status === 'verified'
+                              ? 'text-success'
+                              : createAdminIdentityVerification.status === 'failed'
+                                ? 'text-error'
+                                : 'text-text-muted'
+                          }`}
+                        >
+                          {createAdminIdentityVerification.message}
+                        </p>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Residential Address"
+                      value={createAdminForm.residentialAddress}
+                      onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, residentialAddress: event.target.value }))}
                       className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
                     />
                     <div className="space-y-2">

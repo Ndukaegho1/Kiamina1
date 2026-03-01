@@ -32,6 +32,7 @@ The codebase is local-first and persists most state in `localStorage` and `Index
 This frontend implements:
 
 - Client onboarding and authentication with OTP verification
+- Three-step client verification model (Profile -> Identity -> Business)
 - Document upload workflow for Expenses, Sales, and Bank Statements
 - Folder-first document organization with file-level metadata and version history
 - Creatable "Class" tagging model (single-select, mandatory on upload)
@@ -108,6 +109,11 @@ Primary route state constants:
   - Mandatory owner
   - Mandatory class/tag per file
   - Preview + download + edit metadata + versioning
+- Verification/compliance:
+  - Identity verification requires Government ID type + ID Card Number + uploaded ID
+  - Dojah KYC integration for identity checks
+  - Individual business type auto-completes verification step 3 (business verification)
+  - Individual accounts cannot self-migrate to Business/Non-Profit; admin must update
 - Support:
   - Bot intro, lead intake (name -> email -> inquiry)
   - Human handoff
@@ -191,6 +197,14 @@ Implemented behavior:
 - Profile, business, tax, address, notifications, verification docs
 - Some fields become lock-protected after being set
 - Scoped persistence by account email
+- Verification UI is 3-step with progress:
+  - Step 1: user profile
+  - Step 2: identity verification (Government ID + ID Card Number)
+  - Step 3: business verification
+- If business type is `Individual`:
+  - Step 3 is auto-passed
+  - Business registration upload UI is hidden
+  - Client cannot switch to Business/Non-Profit directly; they must contact admin
 
 ### 6.6 Onboarding
 
@@ -199,6 +213,8 @@ Implemented behavior:
 - 5-step onboarding flow
 - Business/tax/profile/verification/preferences
 - Persists onboarding state and settings data
+- Uses "ID Card Number" label in verification step
+- Business registration upload in onboarding is shown only for Business/Non-Profit entity types
 
 ## 7) Admin Workspace
 
@@ -237,6 +253,7 @@ From `AdminViews.jsx`:
 - Client list scoped by admin role/assignment
 - Compliance/status visibility
 - Impersonation entry point (permission-gated)
+- In Admin Client Profile edit mode, Super/Technical admins can change business type (including Individual -> Business/Non-Profit)
 
 ### 7.4 Admin Settings
 
@@ -248,6 +265,7 @@ From `AdminViews.jsx`:
 - Admin account creation
   - Generate strong password helper
   - Copy credential packet for handoff
+  - Government ID verification with Dojah before final create
 - Invite flow
   - 48h expiry
   - Dev-only demo invite generator
@@ -454,6 +472,26 @@ The frontend calls these endpoints when available:
 - `https://ipinfo.io/json`
 - `https://api.ipify.org?format=json`
 
+### Identity Verification (Dojah)
+
+Client and admin identity flows call Dojah from frontend utility `src/utils/dojahIdentity.js`.
+
+Required env variables:
+
+- `VITE_DOJAH_APP_ID`
+- `VITE_DOJAH_PUBLIC_KEY` (or `VITE_DOJAH_AUTHORIZATION`)
+
+Optional:
+
+- `VITE_DOJAH_BASE_URL` (defaults to `https://api.dojah.io`)
+
+Used endpoint patterns:
+
+- `GET /api/v1/kyc/nin?nin={idCardNumber}`
+- `GET /api/v1/kyc/vin?vin={idCardNumber}`
+- `GET /api/v1/kyc/passport?passport_number={idCardNumber}&surname={surname}`
+- `GET /api/v1/kyc/dl?license_number={idCardNumber}`
+
 ## 12) File Handling And Preview Pipeline
 
 - Upload writes metadata to scoped records and blobs to IndexedDB cache
@@ -494,6 +532,7 @@ src/
     storage.js
     fileCache.js
     downloadFilename.js
+    dojahIdentity.js
     networkRuntime.js
     supportCenter.js
     supportAttachments.js
@@ -505,6 +544,7 @@ src/
 - `storage.js`: scoped localStorage key helpers
 - `fileCache.js`: IndexedDB blob cache
 - `downloadFilename.js`: safe file naming
+- `dojahIdentity.js`: Dojah request builder + response normalization + name/ID matching
 - `networkRuntime.js`: connection-aware delays for loaders/UX pacing
 - `supportCenter.js`: support state engine, ticket/lead lifecycle, subscriptions
 - `supportAttachments.js`: attachment creation, blob retrieval, preview builders
@@ -516,7 +556,7 @@ src/
 - OTP for client/admin login/signup uses a local demo fallback if backend email endpoint is unavailable.
 - Admin login-email change requires backend SMS OTP endpoints (no local fallback).
 - Notification dispatch depends on backend email endpoint success.
-- `npm run lint` currently expects ESLint but ESLint is not listed in `devDependencies` in this repo snapshot.
+- `npm run lint` expects an ESLint flat config (`eslint.config.js`); ESLint is installed but config file is currently missing.
 - Build may show existing chunk-size and CSS minification warnings from current codebase.
 
 ## 16) Suggested Next Steps

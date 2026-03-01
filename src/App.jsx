@@ -56,6 +56,8 @@ const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
 const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
 const CLIENT_SESSION_CONTROL_STORAGE_KEY = 'kiaminaClientSessionControl'
 const CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY = 'kiaminaClientBriefNotifications'
+const CLIENT_SETTINGS_REDIRECT_SECTION_KEY = 'kiaminaClientSettingsRedirectSection'
+const CLIENT_ASSIGNMENTS_STORAGE_KEY = 'kiaminaClientAssignments'
 const IMPERSONATION_IDLE_TIMEOUT_MS = 10 * 60 * 1000
 const DEFAULT_DEV_ADMIN_ACCOUNT = {
   fullName: 'Super Admin',
@@ -66,6 +68,8 @@ const DEFAULT_DEV_ADMIN_ACCOUNT = {
   adminPermissions: FULL_ADMIN_PERMISSION_IDS,
   status: 'active',
 }
+const ADMIN_GOV_ID_TYPES_NIGERIA = ['International Passport', 'NIN', "Voter's Card", "Driver's Licence"]
+const ADMIN_GOV_ID_TYPE_INTERNATIONAL = 'Government Issued ID'
 
 const inferRoleFromEmail = (email = '') => {
   const normalized = email.trim().toLowerCase()
@@ -77,6 +81,25 @@ const inferRoleFromEmail = (email = '') => {
 const normalizeRole = (role, email = '') => {
   if (role === 'admin' || role === 'client') return role
   return inferRoleFromEmail(email)
+}
+
+const normalizeAdminVerificationCountry = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (!normalized || normalized === 'nigeria') return 'Nigeria'
+  return 'International'
+}
+
+const getAdminGovIdTypeOptions = (country = 'Nigeria') => (
+  country === 'Nigeria'
+    ? ADMIN_GOV_ID_TYPES_NIGERIA
+    : [ADMIN_GOV_ID_TYPE_INTERNATIONAL]
+)
+
+const normalizeAdminGovernmentIdType = (value = '', country = 'Nigeria') => {
+  const normalizedValue = String(value || '').trim().toLowerCase()
+  if (!normalizedValue) return ''
+  const options = getAdminGovIdTypeOptions(country)
+  return options.find((option) => option.toLowerCase() === normalizedValue) || ''
 }
 
 const normalizeAccount = (account = {}) => {
@@ -311,6 +334,7 @@ const resolveClientVerificationState = ({
   email = '',
   verificationPending = true,
   accountStatus = '',
+  verificationStepsCompleted = 0,
 } = {}) => {
   const normalizedAccountStatus = String(accountStatus || '').trim().toLowerCase()
   if (normalizedAccountStatus === 'suspended') return 'suspended'
@@ -323,6 +347,10 @@ const resolveClientVerificationState = ({
     || normalizedCompliance.includes('suspended')
   ) {
     return 'suspended'
+  }
+
+  if (Number(verificationStepsCompleted) < 1) {
+    return 'unverified'
   }
 
   if (
@@ -797,6 +825,177 @@ const readClientActivityLogEntries = (email) => {
   }
 }
 
+const normalizeVerificationDocs = (payload = {}) => ({
+  govId: String(payload?.govId || '').trim(),
+  govIdType: String(payload?.govIdType || '').trim(),
+  govIdNumber: String(payload?.govIdNumber || payload?.governmentIdNumber || '').trim(),
+  govIdVerifiedAt: String(payload?.govIdVerifiedAt || '').trim(),
+  govIdVerificationStatus: String(payload?.govIdVerificationStatus || '').trim(),
+  govIdClarityStatus: String(payload?.govIdClarityStatus || '').trim(),
+  businessReg: String(payload?.businessReg || '').trim(),
+})
+
+const normalizeSettingsProfile = (payload = {}) => ({
+  fullName: String(payload?.fullName || '').trim(),
+  email: String(payload?.email || '').trim().toLowerCase(),
+  phone: String(payload?.phone || '').trim(),
+  address: String(payload?.address1 || payload?.address || '').trim(),
+  businessType: String(payload?.businessType || '').trim(),
+})
+
+const readScopedSettingsProfile = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const scopedKey = getScopedStorageKey('settingsFormData', normalizedEmail)
+  const keysToCheck = scopedKey === 'settingsFormData'
+    ? ['settingsFormData']
+    : [scopedKey, 'settingsFormData']
+  for (const key of keysToCheck) {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || 'null')
+      if (!parsed || typeof parsed !== 'object') continue
+      return normalizeSettingsProfile(parsed)
+    } catch {
+      // continue fallback keys
+    }
+  }
+  return normalizeSettingsProfile({})
+}
+
+const readScopedVerificationDocs = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const scopedKey = getScopedStorageKey('verificationDocs', normalizedEmail)
+  const keysToCheck = scopedKey === 'verificationDocs'
+    ? ['verificationDocs']
+    : [scopedKey, 'verificationDocs']
+  for (const key of keysToCheck) {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) || 'null')
+      if (!parsed || typeof parsed !== 'object') continue
+      return normalizeVerificationDocs(parsed)
+    } catch {
+      // continue fallback keys
+    }
+  }
+  return normalizeVerificationDocs({})
+}
+
+const persistScopedVerificationDocs = (email = '', docs = {}) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return
+  const key = getScopedStorageKey('verificationDocs', normalizedEmail)
+  const normalizedDocs = normalizeVerificationDocs(docs)
+  localStorage.setItem(key, JSON.stringify(normalizedDocs))
+}
+
+const removeScopedClientArtifacts = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return
+
+  const scopedBaseKeys = [
+    'settingsFormData',
+    'kiaminaOnboardingState',
+    'notificationSettings',
+    'verificationDocs',
+    'profilePhoto',
+    'companyLogo',
+    CLIENT_DOCUMENTS_STORAGE_KEY,
+    CLIENT_ACTIVITY_STORAGE_KEY,
+    CLIENT_STATUS_CONTROL_STORAGE_KEY,
+    CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY,
+    'kiaminaClientTeamMembers',
+    'kiaminaClientTeamInvites',
+  ]
+  scopedBaseKeys.forEach((baseKey) => {
+    localStorage.removeItem(getScopedStorageKey(baseKey, normalizedEmail))
+  })
+
+  try {
+    const keysToRemove = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (!key) continue
+      if (key.toLowerCase().endsWith(`:${normalizedEmail}`)) {
+        keysToRemove.push(key)
+      }
+    }
+    keysToRemove.forEach((key) => localStorage.removeItem(key))
+  } catch {
+    // no-op
+  }
+
+  try {
+    const control = JSON.parse(localStorage.getItem(CLIENT_SESSION_CONTROL_STORAGE_KEY) || 'null')
+    if (control && typeof control === 'object' && control.byEmail && typeof control.byEmail === 'object') {
+      const nextByEmail = { ...control.byEmail }
+      if (nextByEmail[normalizedEmail]) {
+        delete nextByEmail[normalizedEmail]
+        localStorage.setItem(CLIENT_SESSION_CONTROL_STORAGE_KEY, JSON.stringify({
+          ...control,
+          byEmail: nextByEmail,
+        }))
+      }
+    }
+  } catch {
+    // no-op
+  }
+
+  try {
+    const assignments = JSON.parse(localStorage.getItem(CLIENT_ASSIGNMENTS_STORAGE_KEY) || '[]')
+    if (Array.isArray(assignments)) {
+      const filteredAssignments = assignments.filter((entry) => (
+        String(entry?.clientEmail || '').trim().toLowerCase() !== normalizedEmail
+      ))
+      localStorage.setItem(CLIENT_ASSIGNMENTS_STORAGE_KEY, JSON.stringify(filteredAssignments))
+    }
+  } catch {
+    // no-op
+  }
+}
+
+const resolveVerificationProgress = ({
+  onboardingData = {},
+  settingsDocs = {},
+  settingsProfile = {},
+} = {}) => {
+  const normalizedOnboardingDocs = normalizeVerificationDocs(onboardingData || {})
+  const normalizedSettingsDocs = normalizeVerificationDocs(settingsDocs || {})
+  const normalizedSettingsProfile = normalizeSettingsProfile(settingsProfile || {})
+  const mergedDocs = {
+    govId: normalizedSettingsDocs.govId || normalizedOnboardingDocs.govId,
+    govIdType: normalizedSettingsDocs.govIdType || normalizedOnboardingDocs.govIdType,
+    govIdNumber: normalizedSettingsDocs.govIdNumber || normalizedOnboardingDocs.govIdNumber,
+    govIdVerifiedAt: normalizedSettingsDocs.govIdVerifiedAt || normalizedOnboardingDocs.govIdVerifiedAt,
+    govIdVerificationStatus: normalizedSettingsDocs.govIdVerificationStatus || normalizedOnboardingDocs.govIdVerificationStatus,
+    govIdClarityStatus: normalizedSettingsDocs.govIdClarityStatus || normalizedOnboardingDocs.govIdClarityStatus,
+    businessReg: normalizedSettingsDocs.businessReg || normalizedOnboardingDocs.businessReg,
+  }
+  const profileStepCompleted = Boolean(
+    normalizedSettingsProfile.fullName
+    && normalizedSettingsProfile.email
+    && normalizedSettingsProfile.phone
+    && normalizedSettingsProfile.address,
+  )
+  const normalizedBusinessType = String(
+    normalizedSettingsProfile.businessType || onboardingData?.businessType || '',
+  ).trim().toLowerCase()
+  const isIndividualBusinessType = normalizedBusinessType === 'individual'
+  const identityStepCompleted = Boolean(mergedDocs.govId && mergedDocs.govIdType && mergedDocs.govIdNumber && mergedDocs.govIdVerifiedAt)
+  const businessStepCompleted = isIndividualBusinessType || Boolean(mergedDocs.businessReg)
+  return {
+    profile: normalizedSettingsProfile,
+    docs: mergedDocs,
+    hasAnyDocs: Boolean(
+      mergedDocs.govId
+      || mergedDocs.businessReg
+      || profileStepCompleted,
+    ),
+    profileStepCompleted,
+    identityStepCompleted,
+    businessStepCompleted,
+    stepsCompleted: Number(profileStepCompleted) + Number(identityStepCompleted) + Number(businessStepCompleted),
+  }
+}
+
 function App() {
   const defaultOnboardingData = {
     businessType: '',
@@ -813,7 +1012,11 @@ function App() {
     primaryContact: '',
     servicesNeeded: [],
     govId: '',
-    proofOfAddress: '',
+    govIdType: '',
+    govIdNumber: '',
+    govIdVerifiedAt: '',
+    govIdVerificationStatus: '',
+    govIdClarityStatus: '',
     businessReg: '',
     defaultLandingPage: 'dashboard',
     notifyEmail: true,
@@ -1029,6 +1232,22 @@ function App() {
   const [adminImpersonationSession, setAdminImpersonationSession] = useState(initialAdminImpersonationSession)
   const [pendingImpersonationClient, setPendingImpersonationClient] = useState(null)
   const [onboardingState, setOnboardingState] = useState(() => getSavedOnboardingState(initialScopedClientEmail))
+  const [settingsProfileSnapshot, setSettingsProfileSnapshot] = useState(() => {
+    const onboardingProgress = resolveVerificationProgress({
+      onboardingData: getSavedOnboardingState(initialScopedClientEmail).data,
+      settingsDocs: readScopedVerificationDocs(initialScopedClientEmail),
+      settingsProfile: readScopedSettingsProfile(initialScopedClientEmail),
+    })
+    return onboardingProgress.profile
+  })
+  const [verificationDocsSnapshot, setVerificationDocsSnapshot] = useState(() => {
+    const onboardingProgress = resolveVerificationProgress({
+      onboardingData: getSavedOnboardingState(initialScopedClientEmail).data,
+      settingsDocs: readScopedVerificationDocs(initialScopedClientEmail),
+      settingsProfile: readScopedSettingsProfile(initialScopedClientEmail),
+    })
+    return onboardingProgress.docs
+  })
   const [otpStore, setOtpStore] = useState(getOtpStore)
   const [otpChallenge, setOtpChallenge] = useState(null)
   const [passwordResetEmail, setPasswordResetEmail] = useState('')
@@ -1070,6 +1289,7 @@ function App() {
   const dashboardSearchTimeoutRef = useRef(null)
   const dashboardBootstrapTimerRef = useRef(null)
   const deliveredBriefNotificationIdsRef = useRef(new Set())
+  const verificationLockToastAtRef = useRef(0)
   const slowRuntimeRevealTimerRef = useRef(null)
   const slowRuntimeHideTimerRef = useRef(null)
   const slowRuntimeOperationCountRef = useRef(0)
@@ -1260,6 +1480,15 @@ function App() {
     ? impersonationSession.clientEmail
     : authUser?.email
   const normalizedScopedClientEmail = (scopedClientEmail || '').trim().toLowerCase()
+  const verificationProgress = useMemo(() => (
+    resolveVerificationProgress({
+      onboardingData: onboardingState.data,
+      settingsDocs: verificationDocsSnapshot,
+      settingsProfile: settingsProfileSnapshot,
+    })
+  ), [onboardingState.data, settingsProfileSnapshot, verificationDocsSnapshot])
+  const verificationStepsCompleted = verificationProgress.stepsCompleted
+  const onboardingHasBeenDismissed = Boolean(onboardingState.completed || onboardingState.skipped)
   const scopedClientAccountStatus = normalizedScopedClientEmail
     ? (
       getSavedAccounts().find((account) => (
@@ -1273,7 +1502,45 @@ function App() {
     accountStatus: isImpersonatingClient
       ? scopedClientAccountStatus
       : (authUser?.status || scopedClientAccountStatus),
+    verificationStepsCompleted,
   })
+  const scopedClientStatusControl = readScopedClientStatusControl(normalizedScopedClientEmail)
+  const normalizeBooleanFlag = (value) => {
+    if (value === true) return true
+    const normalized = String(value || '').trim().toLowerCase()
+    return normalized === 'true' || normalized === 'yes' || normalized === '1'
+  }
+  const hasIsoTimestamp = (value) => Number.isFinite(Date.parse(value || ''))
+  const identityVerificationApprovedByAdmin = Boolean(
+    normalizeBooleanFlag(scopedClientStatusControl?.identityVerificationApproved)
+    || hasIsoTimestamp(scopedClientStatusControl?.identityVerificationApprovedAt)
+    || (
+      String(dashboardVerificationState || '').toLowerCase() === 'verified'
+      && verificationProgress.identityStepCompleted
+    ),
+  )
+  const businessVerificationApprovedByAdmin = Boolean(
+    normalizeBooleanFlag(scopedClientStatusControl?.businessVerificationApproved)
+    || hasIsoTimestamp(scopedClientStatusControl?.businessVerificationApprovedAt)
+    || String(dashboardVerificationState || '').toLowerCase() === 'verified',
+  )
+  const isIndividualBusinessType = String(
+    verificationProgress.profile.businessType || onboardingState.data?.businessType || '',
+  ).trim().toLowerCase() === 'individual'
+  const isIdentityVerificationComplete = Boolean(
+    verificationProgress.identityStepCompleted && identityVerificationApprovedByAdmin,
+  )
+  const isBusinessVerificationComplete = Boolean(
+    verificationProgress.businessStepCompleted
+    && (isIndividualBusinessType || businessVerificationApprovedByAdmin),
+  )
+  const isClientVerificationLocked = Boolean(
+    isAuthenticated
+    && !isAdminView
+    && !isImpersonatingClient
+    && onboardingHasBeenDismissed
+    && verificationStepsCompleted < 1,
+  )
 
   const getNotificationPageFromRecord = (record = {}) => {
     if (record.categoryId) return record.categoryId
@@ -1445,8 +1712,45 @@ function App() {
     }
   }
 
+  const showVerificationGateToast = (message = 'Verify your account to continue. Redirecting to profile settings.') => {
+    const now = Date.now()
+    if (now - verificationLockToastAtRef.current < 1400) return
+    verificationLockToastAtRef.current = now
+    showToast('error', message)
+  }
+
+  const routeClientToVerificationSettings = ({
+    replace = false,
+    section = 'user-profile',
+    toastMessage = 'Verify your account to continue. Redirecting to profile settings.',
+  } = {}) => {
+    try {
+      sessionStorage.setItem(CLIENT_SETTINGS_REDIRECT_SECTION_KEY, section || 'user-profile')
+    } catch {
+      // no-op
+    }
+    setActivePage('settings')
+    setActiveFolderRoute(null)
+    setIsMobileSidebarOpen(false)
+    try {
+      if (replace) history.replaceState({}, '', '/settings')
+      else history.pushState({}, '', '/settings')
+    } catch {
+      // ignore
+    }
+    showVerificationGateToast(toastMessage)
+  }
+
+  const shouldBlockClientNavigationByVerification = (targetPage = '') => (
+    isClientVerificationLocked && String(targetPage || '').trim() !== 'settings'
+  )
+
   // Navigation helpers: keep `activePage` and URL in sync without adding a router
   const handleSetActivePage = (page, { replace = false } = {}) => {
+    if (shouldBlockClientNavigationByVerification(page)) {
+      routeClientToVerificationSettings({ replace })
+      return
+    }
     touchImpersonationActivity()
     setActivePage(page)
     setActiveFolderRoute(null)
@@ -1462,6 +1766,10 @@ function App() {
 
   const handleOpenFolderRoute = (category, folderId, { replace = false } = {}) => {
     if (!category || !folderId) return
+    if (shouldBlockClientNavigationByVerification(category)) {
+      routeClientToVerificationSettings({ replace })
+      return
+    }
     touchImpersonationActivity()
     setActivePage(category)
     setActiveFolderRoute({ category, folderId })
@@ -1789,6 +2097,12 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!isClientVerificationLocked) return
+    if (activePage === 'settings' || activePage === 'dashboard') return
+    routeClientToVerificationSettings({ replace: true })
+  }, [activePage, isClientVerificationLocked])
+
+  useEffect(() => {
     if (isAuthenticated && isAdminView) return
     if (!impersonationSession) return
     setImpersonationSession(null)
@@ -1798,9 +2112,21 @@ function App() {
   useEffect(() => {
     if (!scopedClientEmail) {
       setClientActivityRecords([])
+      setSettingsProfileSnapshot(normalizeSettingsProfile({}))
+      setVerificationDocsSnapshot(normalizeVerificationDocs({}))
       return
     }
-    setOnboardingState(getSavedOnboardingState(scopedClientEmail))
+    const savedOnboardingState = getSavedOnboardingState(scopedClientEmail)
+    setOnboardingState(savedOnboardingState)
+    const savedSettingsProfile = readScopedSettingsProfile(scopedClientEmail)
+    const savedVerificationProgress = resolveVerificationProgress({
+      onboardingData: savedOnboardingState.data,
+      settingsDocs: readScopedVerificationDocs(scopedClientEmail),
+      settingsProfile: savedSettingsProfile,
+    })
+    setSettingsProfileSnapshot(savedVerificationProgress.profile)
+    setVerificationDocsSnapshot(savedVerificationProgress.docs)
+    persistScopedVerificationDocs(scopedClientEmail, savedVerificationProgress.docs)
     const fallbackCompanyName = impersonationSession?.businessName || 'Acme Corporation'
     const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
       || authUser?.fullName?.trim()?.split(/\s+/)?.[0]
@@ -1917,6 +2243,14 @@ function App() {
     const targetEmail = scopedClientEmail
     const nextData = typeof updater === 'function' ? updater(onboardingState.data) : updater
     persistOnboardingState({ ...onboardingState, data: nextData }, targetEmail)
+    const nextVerificationProgress = resolveVerificationProgress({
+      onboardingData: nextData,
+      settingsDocs: readScopedVerificationDocs(targetEmail),
+      settingsProfile: readScopedSettingsProfile(targetEmail),
+    })
+    setSettingsProfileSnapshot(nextVerificationProgress.profile)
+    setVerificationDocsSnapshot(nextVerificationProgress.docs)
+    persistScopedVerificationDocs(targetEmail, nextVerificationProgress.docs)
     try {
       const settingsKey = getScopedStorageKey('settingsFormData', targetEmail)
       const saved = localStorage.getItem(settingsKey) || (targetEmail ? localStorage.getItem('settingsFormData') : null)
@@ -1941,6 +2275,7 @@ function App() {
         language: nextData.language ?? existing.language ?? '',
       }
       localStorage.setItem(settingsKey, JSON.stringify(merged))
+      setSettingsProfileSnapshot(normalizeSettingsProfile(merged))
       setCompanyName(merged.businessName?.trim() || 'Acme Corporation')
       setClientFirstName(merged.fullName?.trim()?.split(/\s+/)?.[0] || 'Client')
       if (isImpersonatingClient) {
@@ -1971,6 +2306,9 @@ function App() {
         email: email || existing.email || '',
       }
       localStorage.setItem(settingsKey, JSON.stringify(next))
+      if (String(scopedClientEmail || '').trim().toLowerCase() === String(email || '').trim().toLowerCase()) {
+        setSettingsProfileSnapshot(normalizeSettingsProfile(next))
+      }
     } catch {
       // no-op
     }
@@ -2288,6 +2626,69 @@ function App() {
     showToast('success', 'You have successfully logged out.')
   }
 
+  const handleDeleteClientAccount = async ({
+    reason = '',
+    reasonOther = '',
+    retentionIntent = '',
+    acknowledgedPermanentDeletion = false,
+  } = {}) => {
+    const normalizedEmail = String(authUser?.email || '').trim().toLowerCase()
+    if (!normalizedEmail || currentUserRole !== 'client') {
+      return { ok: false, message: 'Unable to delete this account.' }
+    }
+    if (!acknowledgedPermanentDeletion) {
+      return { ok: false, message: 'You must acknowledge permanent deletion to continue.' }
+    }
+
+    const accounts = getSavedAccounts()
+    const targetAccount = accounts.find((account) => (
+      String(account?.email || '').trim().toLowerCase() === normalizedEmail
+    ))
+    if (!targetAccount) {
+      return { ok: false, message: 'Account not found.' }
+    }
+
+    const nextAccounts = accounts.filter((account) => (
+      String(account?.email || '').trim().toLowerCase() !== normalizedEmail
+    ))
+    localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
+    removeScopedClientArtifacts(normalizedEmail)
+
+    const deletionReason = String(reason || '').trim() || 'Not provided'
+    const deletionReasonDetail = String(reasonOther || '').trim()
+    const retentionResponse = String(retentionIntent || '').trim() || 'Not provided'
+    appendAdminActivityLog({
+      adminName: 'Client Self-Service',
+      adminEmail: normalizedEmail,
+      adminLevel: ADMIN_LEVELS.SUPER,
+      action: 'Client account deleted',
+      affectedUser: targetAccount.businessName || targetAccount.fullName || normalizedEmail,
+      details: [
+        `Reason: ${deletionReason}${deletionReasonDetail ? ` (${deletionReasonDetail})` : ''}`,
+        `Retention response: ${retentionResponse}`,
+        'Client confirmed permanent account deletion.',
+      ].join(' '),
+    })
+
+    setIsLogoutConfirmOpen(false)
+    setIsModalOpen(false)
+    setIsAuthenticated(false)
+    setAuthUser(null)
+    setImpersonationSession(null)
+    setAdminImpersonationSession(null)
+    setPendingImpersonationClient(null)
+    persistImpersonationSession(null)
+    persistAdminImpersonationSession(null)
+    setAuthMode('login')
+    setActivePage(getDefaultPageForRole('client'))
+    setActiveFolderRoute(null)
+    sessionStorage.removeItem('kiaminaAuthUser')
+    localStorage.removeItem('kiaminaAuthUser')
+    navigateToAuth('login', { replace: true })
+    showToast('success', 'Your account was deleted permanently.')
+    return { ok: true }
+  }
+
   useEffect(() => {
     if (!isAuthenticated || currentUserRole === 'admin' || !authUser?.email) return undefined
 
@@ -2437,6 +2838,11 @@ function App() {
     roleInCompany,
     department,
     phoneNumber,
+    workCountry,
+    governmentIdType,
+    governmentIdNumber,
+    identityVerificationPassed,
+    residentialAddress,
     password,
     confirmPassword,
   }) => {
@@ -2450,7 +2856,23 @@ function App() {
     const normalizedRoleInCompany = String(roleInCompany || '').trim()
     const normalizedDepartment = String(department || '').trim()
     const normalizedPhoneNumber = String(phoneNumber || '').trim()
-    if (!fullName?.trim() || !normalizedEmail || !normalizedRoleInCompany || !normalizedDepartment || !normalizedPhoneNumber || !password || !confirmPassword) {
+    const normalizedWorkCountry = normalizeAdminVerificationCountry(workCountry)
+    const normalizedGovernmentIdType = normalizeAdminGovernmentIdType(governmentIdType, normalizedWorkCountry)
+    const normalizedGovernmentIdNumber = String(governmentIdNumber || '').trim()
+    const normalizedResidentialAddress = String(residentialAddress || '').trim()
+    if (
+      !fullName?.trim()
+      || !normalizedEmail
+      || !normalizedRoleInCompany
+      || !normalizedDepartment
+      || !normalizedPhoneNumber
+      || !normalizedWorkCountry
+      || !normalizedGovernmentIdType
+      || !normalizedGovernmentIdNumber
+      || !identityVerificationPassed
+      || !password
+      || !confirmPassword
+    ) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
     if (normalizedEmail !== invite.email) {
@@ -2459,7 +2881,9 @@ function App() {
     if (normalizedPhoneNumber.replace(/\D/g, '').length < 7) {
       return { ok: false, message: 'Enter a valid phone number.' }
     }
-
+    if (normalizedGovernmentIdNumber.length < 4) {
+      return { ok: false, message: 'Enter a valid government ID number.' }
+    }
     const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
     if (!signupPasswordRegex.test(password)) {
       return { ok: false, message: 'Password must include at least one number and one special character.' }
@@ -2487,6 +2911,11 @@ function App() {
         roleInCompany: normalizedRoleInCompany,
         department: normalizedDepartment,
         phoneNumber: normalizedPhoneNumber,
+        workCountry: normalizedWorkCountry,
+        governmentIdType: normalizedGovernmentIdType,
+        governmentIdNumber: normalizedGovernmentIdNumber,
+        governmentIdVerifiedAt: new Date().toISOString(),
+        residentialAddress: normalizedResidentialAddress,
         password,
         role: 'admin',
         adminLevel: invite.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT,
@@ -2533,7 +2962,10 @@ function App() {
         const hasProfileFields = Boolean(
           String(pendingSignup?.roleInCompany || '').trim()
           && String(pendingSignup?.department || '').trim()
-          && String(pendingSignup?.phoneNumber || '').trim(),
+          && String(pendingSignup?.phoneNumber || '').trim()
+          && String(pendingSignup?.workCountry || '').trim()
+          && String(pendingSignup?.governmentIdType || '').trim()
+          && String(pendingSignup?.governmentIdNumber || '').trim(),
         )
         if (!hasProfileFields) {
           return { ok: false, message: 'Please complete all required profile fields.' }
@@ -2552,6 +2984,11 @@ function App() {
         roleInCompany: pendingSignup.roleInCompany,
         department: pendingSignup.department,
         phoneNumber: pendingSignup.phoneNumber,
+        workCountry: pendingSignup.workCountry,
+        governmentIdType: pendingSignup.governmentIdType,
+        governmentIdNumber: pendingSignup.governmentIdNumber,
+        governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || new Date().toISOString(),
+        residentialAddress: pendingSignup.residentialAddress,
         password: pendingSignup.password,
         role: pendingSignup.role || 'client',
         adminLevel: pendingSignup.adminLevel,
@@ -2567,6 +3004,11 @@ function App() {
         roleInCompany: pendingSignup.roleInCompany,
         department: pendingSignup.department,
         phoneNumber: pendingSignup.phoneNumber,
+        workCountry: pendingSignup.workCountry,
+        governmentIdType: pendingSignup.governmentIdType,
+        governmentIdNumber: pendingSignup.governmentIdNumber,
+        governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || new Date().toISOString(),
+        residentialAddress: pendingSignup.residentialAddress,
         role: nextAccount.role || pendingSignup.role || 'client',
         adminLevel: nextAccount.adminLevel,
         adminPermissions: nextAccount.adminPermissions,
@@ -2603,6 +3045,11 @@ function App() {
             roleInCompany: pendingSignup.roleInCompany || '',
             department: pendingSignup.department || '',
             phoneNumber: pendingSignup.phoneNumber || '',
+            workCountry: pendingSignup.workCountry || 'Nigeria',
+            governmentIdType: pendingSignup.governmentIdType || '',
+            governmentIdNumber: pendingSignup.governmentIdNumber || '',
+            governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || new Date().toISOString(),
+            residentialAddress: pendingSignup.residentialAddress || '',
           }))
         } catch {
           // no-op
@@ -3157,6 +3604,43 @@ function App() {
     })
   }
 
+  const handleSettingsVerificationDocsChange = (nextDocs = {}) => {
+    const normalizedDocs = normalizeVerificationDocs(nextDocs)
+    setVerificationDocsSnapshot((previous) => {
+      if (
+        previous.govId === normalizedDocs.govId
+        && previous.govIdType === normalizedDocs.govIdType
+        && previous.govIdNumber === normalizedDocs.govIdNumber
+        && previous.govIdVerifiedAt === normalizedDocs.govIdVerifiedAt
+        && previous.govIdVerificationStatus === normalizedDocs.govIdVerificationStatus
+        && previous.govIdClarityStatus === normalizedDocs.govIdClarityStatus
+        && previous.businessReg === normalizedDocs.businessReg
+      ) {
+        return previous
+      }
+      return normalizedDocs
+    })
+    if (scopedClientEmail) {
+      persistScopedVerificationDocs(scopedClientEmail, normalizedDocs)
+    }
+  }
+
+  const handleSettingsProfileChange = (nextProfile = {}) => {
+    const normalizedProfile = normalizeSettingsProfile(nextProfile)
+    setSettingsProfileSnapshot((previous) => {
+      if (
+        previous.fullName === normalizedProfile.fullName
+        && previous.email === normalizedProfile.email
+        && previous.phone === normalizedProfile.phone
+        && previous.address === normalizedProfile.address
+        && previous.businessType === normalizedProfile.businessType
+      ) {
+        return previous
+      }
+      return normalizedProfile
+    })
+  }
+
   const handleSkipOnboarding = () => {
     persistOnboardingState({
       ...onboardingState,
@@ -3177,8 +3661,12 @@ function App() {
   }
 
   const handleCompleteOnboarding = (finalData) => {
-    const entityNeedsBusinessDoc = finalData.businessType === 'Business' || finalData.businessType === 'Non-Profit'
-    const verificationPending = !(finalData.govId && finalData.proofOfAddress && (!entityNeedsBusinessDoc || finalData.businessReg))
+    const finalVerificationProgress = resolveVerificationProgress({
+      onboardingData: finalData,
+      settingsDocs: readScopedVerificationDocs(scopedClientEmail),
+      settingsProfile: readScopedSettingsProfile(scopedClientEmail),
+    })
+    const verificationPending = finalVerificationProgress.stepsCompleted < 3
 
     persistOnboardingState({
       currentStep: 5,
@@ -3187,6 +3675,9 @@ function App() {
       verificationPending,
       data: finalData,
     }, scopedClientEmail)
+    setSettingsProfileSnapshot(finalVerificationProgress.profile)
+    setVerificationDocsSnapshot(finalVerificationProgress.docs)
+    persistScopedVerificationDocs(scopedClientEmail, finalVerificationProgress.docs)
 
     try {
       const settingsKey = getScopedStorageKey('settingsFormData', scopedClientEmail)
@@ -3236,6 +3727,18 @@ function App() {
 
   const handleAddDocument = (categoryOverride = '') => {
     if (isAdminView && !isImpersonatingClient) return
+    if (isClientVerificationLocked) {
+      routeClientToVerificationSettings({ replace: true })
+      return
+    }
+    if (!isIdentityVerificationComplete) {
+      routeClientToVerificationSettings({
+        replace: true,
+        section: 'identity',
+        toastMessage: 'Complete identity verification and wait for admin approval before uploading documents.',
+      })
+      return
+    }
 
     const fallbackCategory = activePage === 'bank-statements'
       ? 'bank-statements'
@@ -3270,6 +3773,9 @@ function App() {
     sharedDetails = {},
     individualDetails = {},
   }) => {
+    if (!isIdentityVerificationComplete) {
+      return { ok: false, message: 'Complete identity verification and wait for admin approval before uploading documents.' }
+    }
     if (!category) return { ok: false, message: 'Please select a document category.' }
     if (!folderName?.trim()) return { ok: false, message: 'Please provide a folder name.' }
     if (!documentOwner?.trim()) return { ok: false, message: 'Please provide the document owner.' }
@@ -3655,6 +4161,17 @@ function App() {
             setCompanyName={setCompanyName}
             setClientFirstName={setClientFirstName}
             settingsStorageKey={getScopedStorageKey('settingsFormData', scopedClientEmail)}
+            clientEmail={normalizedScopedClientEmail}
+            clientName={isImpersonatingClient ? (impersonationSession?.clientName || authUser?.fullName || '') : (authUser?.fullName || '')}
+            verificationState={dashboardVerificationState}
+            identityApprovedByAdmin={identityVerificationApprovedByAdmin}
+            businessApprovedByAdmin={businessVerificationApprovedByAdmin}
+            clientTeamRole={isImpersonatingClient ? 'owner' : (authUser?.clientTeamRole || 'owner')}
+            onSettingsProfileChange={handleSettingsProfileChange}
+            onVerificationDocsChange={handleSettingsVerificationDocsChange}
+            verificationLockEnforced={isClientVerificationLocked}
+            canDeleteAccount={!isImpersonatingClient && !isAdminView}
+            onDeleteAccount={handleDeleteClientAccount}
           />
         )
       default:
@@ -3949,6 +4466,7 @@ function App() {
               setActivePage={handleSetActivePage}
               companyLogo={companyLogo}
               companyName={companyName}
+              isBusinessVerified={isBusinessVerificationComplete}
               onLogout={handleLogout}
               isMobileOpen={isMobileSidebarOpen}
               onCloseMobile={() => setIsMobileSidebarOpen(false)}
@@ -3958,6 +4476,7 @@ function App() {
               <ClientTopBar
                 profilePhoto={isImpersonatingClient ? null : profilePhoto}
                 clientFirstName={clientFirstName}
+                isIdentityVerified={isIdentityVerificationComplete}
                 notifications={userNotifications}
                 onOpenSidebar={() => setIsMobileSidebarOpen(true)}
                 onOpenProfile={() => handleSetActivePage('settings')}
