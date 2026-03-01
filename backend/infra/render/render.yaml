@@ -1,0 +1,70 @@
+services:
+  - type: web
+    name: kiamina-api-gateway
+    env: node
+    rootDir: backend/api-gateway
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: AUTH_SERVICE_URL
+        fromService:
+          type: web
+          name: kiamina-auth-service
+          property: hostport
+      - key: USERS_SERVICE_URL
+        fromService:
+          type: web
+          name: kiamina-users-service
+          property: hostport
+      - key: DOCUMENTS_SERVICE_URL
+        fromService:
+          type: web
+          name: kiamina-documents-service
+          property: hostport
+      - key: NOTIFICATIONS_SERVICE_URL
+        fromService:
+          type: web
+          name: kiamina-notifications-service
+          property: hostport
+
+  - type: web
+    name: kiamina-auth-service
+    env: node
+    rootDir: backend/services/auth-service
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+
+  - type: web
+    name: kiamina-users-service
+    env: node
+    rootDir: backend/services/users-service
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+
+  - type: web
+    name: kiamina-documents-service
+    env: node
+    rootDir: backend/services/documents-service
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+
+  - type: web
+    name: kiamina-notifications-service
+    env: node
+    rootDir: backend/services/notifications-service
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health

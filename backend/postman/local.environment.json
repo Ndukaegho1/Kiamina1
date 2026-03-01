@@ -1,0 +1,19 @@
+{
+  "id": "7cae2cc7-c011-43ab-acf2-7f3a4b3e94f5",
+  "name": "Kiamina Local",
+  "values": [
+    {
+      "key": "gatewayBaseUrl",
+      "value": "http://localhost:4100",
+      "enabled": true
+    },
+    {
+      "key": "apiBaseUrl",
+      "value": "http://localhost:4100/api/v1",
+      "enabled": true
+    }
+  ],
+  "_postman_variable_scope": "environment",
+  "_postman_exported_at": "2026-03-01T00:00:00.000Z",
+  "_postman_exported_using": "Postman/11"
+}

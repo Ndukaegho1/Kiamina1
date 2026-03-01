@@ -1,0 +1,172 @@
+{
+  "info": {
+    "name": "Kiamina Microservices API",
+    "_postman_id": "de21b1c2-f130-4ad2-a37e-f0b6ad0c9d83",
+    "description": "Starter collection for API gateway and backend services.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Gateway Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{gatewayBaseUrl}}/health",
+          "host": [
+            "{{gatewayBaseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Gateway Info",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{apiBaseUrl}}/gateway/info",
+          "host": [
+            "{{apiBaseUrl}}"
+          ],
+          "path": [
+            "gateway",
+            "info"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Auth - Send OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"test@example.com\",\n  \"purpose\": \"login\"\n}"
+        },
+        "url": {
+          "raw": "{{apiBaseUrl}}/auth/send-otp",
+          "host": [
+            "{{apiBaseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "send-otp"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Auth - Verify OTP",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"test@example.com\",\n  \"purpose\": \"login\",\n  \"otp\": \"123456\"\n}"
+        },
+        "url": {
+          "raw": "{{apiBaseUrl}}/auth/verify-otp",
+          "host": [
+            "{{apiBaseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "verify-otp"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Users - Sync From Auth",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"uid\": \"firebase_uid_1\",\n  \"email\": \"test@example.com\",\n  \"displayName\": \"Test User\"\n}"
+        },
+        "url": {
+          "raw": "{{apiBaseUrl}}/users/sync-from-auth",
+          "host": [
+            "{{apiBaseUrl}}"
+          ],
+          "path": [
+            "users",
+            "sync-from-auth"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Documents - Create Metadata",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"ownerUserId\": \"firebase_uid_1\",\n  \"fileName\": \"statement.pdf\",\n  \"category\": \"bank-statements\",\n  \"className\": \"HeadOffice\"\n}"
+        },
+        "url": {
+          "raw": "{{apiBaseUrl}}/documents",
+          "host": [
+            "{{apiBaseUrl}}"
+          ],
+          "path": [
+            "documents"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Notifications - Send Email",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"to\": \"test@example.com\",\n  \"subject\": \"Welcome\",\n  \"message\": \"Hello from Kiamina backend.\"\n}"
+        },
+        "url": {
+          "raw": "{{apiBaseUrl}}/notifications/send-email",
+          "host": [
+            "{{apiBaseUrl}}"
+          ],
+          "path": [
+            "notifications",
+            "send-email"
+          ]
+        }
+      }
+    }
+  ]
+}
