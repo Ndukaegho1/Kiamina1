@@ -37,6 +37,7 @@ import {
 } from '../adminAssignments'
 import { getNetworkAwareDurationMs } from '../../../utils/networkRuntime'
 import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
+import { apiFetch, clearApiAccessToken } from '../../../utils/apiClient'
 
 const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
@@ -706,7 +707,7 @@ function AdminSettingsPage({
     setFormError('')
     setEmailChangeForm((prev) => ({ ...prev, otpCode: '' }))
     try {
-      const response = await fetch('/api/auth/send-sms-otp', {
+      const response = await apiFetch('/api/auth/send-sms-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -760,7 +761,7 @@ function AdminSettingsPage({
     }
 
     try {
-      const response = await fetch('/api/auth/verify-sms-otp', {
+      const response = await apiFetch('/api/auth/verify-sms-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1948,6 +1949,7 @@ function AdminSettingsPage({
                   onClick={() => {
                     sessionStorage.removeItem('kiaminaAuthUser')
                     localStorage.removeItem('kiaminaAuthUser')
+                    clearApiAccessToken()
                     notify('success', 'All active sessions have been cleared locally.')
                   }}
                   className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors"

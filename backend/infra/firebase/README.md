@@ -4,8 +4,17 @@ Auth service supports Firebase ID token verification using `firebase-admin`.
 
 ## Setup options
 
-1. Set `FIREBASE_SERVICE_ACCOUNT_JSON` (preferred in Render env vars).
-2. Or use `GOOGLE_APPLICATION_CREDENTIALS` on self-managed hosts.
+1. Set `GOOGLE_APPLICATION_CREDENTIALS` (recommended for local/self-managed).
+2. Or set `FIREBASE_SERVICE_ACCOUNT_JSON` (single-line JSON string in env var).
+
+## Local recommended setup
+
+1. Place your Firebase key file at:
+   - `backend/secrets/firebase-service-account.json`
+2. Ensure this exists in auth-service env:
+   - `GOOGLE_APPLICATION_CREDENTIALS=../../secrets/firebase-service-account.json`
+3. Start backend and test:
+   - `POST /api/v1/auth/verify-token`
 
 ## Required permissions
 

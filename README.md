@@ -449,20 +449,31 @@ Server-side enforcement is still required for real production APIs; current fron
 
 The frontend calls these endpoints when available:
 
+Frontend API runtime config:
+
+- `VITE_API_BASE_URL` (default fallback: `/api/v1`)
+- `VITE_FIREBASE_WEB_API_KEY` (optional; used to mint Firebase ID token on email/password login)
+
+Auth header behavior:
+
+- `src/utils/apiClient.js` attaches `Authorization: Bearer <token>` when token exists in:
+  - `sessionStorage.kiaminaFirebaseIdToken` or `localStorage.kiaminaFirebaseIdToken`
+  - `kiaminaAuthUser.firebaseIdToken` fallback
+
 ### Auth/OTP
 
-- `POST /api/auth/send-otp`
+- `POST /api/v1/auth/send-otp`
   - body: `{ email, otp, purpose }`
-- `POST /api/auth/send-password-reset-link`
+- `POST /api/v1/auth/send-password-reset-link`
   - body: `{ email, resetLink }`
-- `POST /api/auth/send-sms-otp`
+- `POST /api/v1/auth/send-sms-otp`
   - body: `{ phoneNumber, purpose, email, currentEmail }`
-- `POST /api/auth/verify-sms-otp`
+- `POST /api/v1/auth/verify-sms-otp`
   - body: `{ phoneNumber, otp, purpose, email, currentEmail }`
 
 ### Notifications
 
-- `POST /api/notifications/send-email`
+- `POST /api/v1/notifications/send-email`
   - body: `{ to, subject, message, link, priority, sentAtIso, deliveryOrigin }`
 
 ### Lead Geo Enrichment (public providers)

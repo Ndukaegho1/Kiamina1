@@ -42,6 +42,7 @@ import { getScopedStorageKey } from './utils/storage'
 import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
 import DotLottiePreloader from './components/common/DotLottiePreloader'
 import { getNetworkAwareDurationMs, isPageReloadNavigation } from './utils/networkRuntime'
+import { apiFetch, clearApiAccessToken, setApiAccessToken } from './utils/apiClient'
 
 const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
@@ -70,6 +71,7 @@ const DEFAULT_DEV_ADMIN_ACCOUNT = {
 }
 const ADMIN_GOV_ID_TYPES_NIGERIA = ['International Passport', 'NIN', "Voter's Card", "Driver's Licence"]
 const ADMIN_GOV_ID_TYPE_INTERNATIONAL = 'Government Issued ID'
+const FIREBASE_WEB_API_KEY = String(import.meta.env.VITE_FIREBASE_WEB_API_KEY || '').trim()
 
 const inferRoleFromEmail = (email = '') => {
   const normalized = email.trim().toLowerCase()
@@ -138,6 +140,45 @@ const normalizeUser = (user) => {
     ...user,
     role: 'admin',
   })
+}
+
+const issueFirebaseIdTokenForCredentials = async ({
+  email = '',
+  password = '',
+} = {}) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const normalizedPassword = String(password || '')
+  if (!FIREBASE_WEB_API_KEY || !normalizedEmail || !normalizedPassword) {
+    return ''
+  }
+
+  const abortController = typeof AbortController === 'function' ? new AbortController() : null
+  const timeoutId = abortController
+    ? setTimeout(() => abortController.abort(), 8000)
+    : null
+
+  try {
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password: normalizedPassword,
+          returnSecureToken: true,
+        }),
+        signal: abortController?.signal,
+      },
+    )
+    if (!response.ok) return ''
+    const payload = await response.json().catch(() => ({}))
+    return String(payload?.idToken || '').trim()
+  } catch {
+    return ''
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
 }
 
 const getDefaultPageForRole = (role = 'client') => (role === 'admin' ? ADMIN_DEFAULT_PAGE : 'dashboard')
@@ -2411,7 +2452,7 @@ function App() {
     }
 
     try {
-      const response = await fetch('/api/auth/send-otp', {
+      const response = await apiFetch('/api/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: normalizedEmail, otp, purpose }),
@@ -2440,7 +2481,7 @@ function App() {
     const resetLink = `${window.location.origin}/reset-password?email=${encodeURIComponent(normalizedEmail)}&token=${encodeURIComponent(resetToken)}`
 
     try {
-      const response = await fetch('/api/auth/send-password-reset-link', {
+      const response = await apiFetch('/api/auth/send-password-reset-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2516,6 +2557,7 @@ function App() {
 
     const user = { fullName, email: selected.email, role: socialRole }
     persistAuthUser(user, true)
+    clearApiAccessToken()
     syncProfileToSettings(user.fullName, user.email)
     setOtpChallenge(null)
     showToast('success', `${selected.name} authentication successful.`)
@@ -2544,6 +2586,11 @@ function App() {
       return { ok: false, message: loginFailureMessage }
     }
 
+    const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
+      email: normalizedEmail,
+      password,
+    })
+
     await issueEmailOtp(normalizedEmail, 'client-login')
     setOtpChallenge({
       requestId: Date.now(),
@@ -2551,6 +2598,7 @@ function App() {
       email: match.email,
       remember: Boolean(remember),
       role: match.role,
+      firebaseIdToken,
     })
     return { ok: true, requiresOtp: true }
   }
@@ -2578,6 +2626,11 @@ function App() {
       return { ok: false, message: loginFailureMessage }
     }
 
+    const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
+      email: normalizedEmail,
+      password,
+    })
+
     await issueEmailOtp(normalizedEmail, 'admin-login')
     setOtpChallenge({
       requestId: Date.now(),
@@ -2585,6 +2638,7 @@ function App() {
       email: match.email,
       remember: Boolean(remember),
       role: 'admin',
+      firebaseIdToken,
     })
     return { ok: true, requiresOtp: true }
   }
@@ -2617,6 +2671,7 @@ function App() {
     setActiveFolderRoute(null)
     sessionStorage.removeItem('kiaminaAuthUser')
     localStorage.removeItem('kiaminaAuthUser')
+    clearApiAccessToken()
     setIsLoggingOut(false)
     if (wasAdmin) {
       navigateToAdminLogin({ replace: true })
@@ -2684,6 +2739,7 @@ function App() {
     setActiveFolderRoute(null)
     sessionStorage.removeItem('kiaminaAuthUser')
     localStorage.removeItem('kiaminaAuthUser')
+    clearApiAccessToken()
     navigateToAuth('login', { replace: true })
     showToast('success', 'Your account was deleted permanently.')
     return { ok: true }
@@ -2718,6 +2774,7 @@ function App() {
       setActiveFolderRoute(null)
       sessionStorage.removeItem('kiaminaAuthUser')
       localStorage.removeItem('kiaminaAuthUser')
+      clearApiAccessToken()
       navigateToAuth('login', { replace: true })
       showToast('error', 'Your session was ended by an administrator. Please log in again.')
     }
@@ -2998,6 +3055,10 @@ function App() {
       const nextAccounts = [...accounts, nextAccount]
       localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
 
+      const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
+        email: pendingSignup.email,
+        password: pendingSignup.password,
+      })
       const user = normalizeUser({
         fullName: pendingSignup.fullName,
         email: pendingSignup.email,
@@ -3013,8 +3074,11 @@ function App() {
         adminLevel: nextAccount.adminLevel,
         adminPermissions: nextAccount.adminPermissions,
         status: nextAccount.status,
+        firebaseIdToken,
       })
       persistAuthUser(user, true)
+      if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: true })
+      else clearApiAccessToken()
       syncProfileToSettings(user.fullName, user.email)
 
       if (user.role === 'client') {
@@ -3074,6 +3138,7 @@ function App() {
         return { ok: false, message: 'This admin account is suspended.' }
       }
 
+      const firebaseIdToken = String(otpChallenge?.firebaseIdToken || '').trim()
       const user = normalizeUser({
         fullName: match.fullName,
         email: match.email,
@@ -3081,8 +3146,12 @@ function App() {
         adminLevel: match.adminLevel,
         adminPermissions: match.adminPermissions,
         status: match.status,
+        firebaseIdToken,
       })
-      persistAuthUser(user, Boolean(otpChallenge.remember))
+      const shouldRememberSession = Boolean(otpChallenge.remember)
+      persistAuthUser(user, shouldRememberSession)
+      if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: shouldRememberSession })
+      else clearApiAccessToken()
       syncProfileToSettings(user.fullName, user.email)
       if (normalizeRole(match.role, match.email) === 'admin' && match.mustChangePassword) {
         window.setTimeout(() => {

@@ -60,6 +60,12 @@ Every service has:
 
 Copy and edit as needed before deployment.
 
+Firebase local setup (recommended):
+
+1. Save service account key file to `backend/secrets/firebase-service-account.json`.
+2. In `services/auth-service/.env.development`, keep:
+   - `GOOGLE_APPLICATION_CREDENTIALS=../../secrets/firebase-service-account.json`
+
 ## Gateway routing
 
 Gateway exposes:
@@ -68,6 +74,30 @@ Gateway exposes:
 - `/api/v1/users/*` -> users-service
 - `/api/v1/documents/*` -> documents-service
 - `/api/v1/notifications/*` -> notifications-service
+
+Gateway auth policy:
+
+- Public:
+  - `GET /api/v1/gateway/info`
+  - `POST /api/v1/auth/send-otp`
+  - `POST /api/v1/auth/verify-otp`
+  - `POST /api/v1/auth/verify-token`
+- Protected:
+  - All `/api/v1/users/*`
+  - All `/api/v1/documents/*`
+  - All `/api/v1/notifications/*`
+
+For protected routes send:
+
+```http
+Authorization: Bearer <firebase_id_token>
+```
+
+Gateway forwards verified identity to downstream services with:
+
+- `x-user-id`
+- `x-user-email`
+- `x-user-email-verified`
 
 Health checks:
 

@@ -1,8 +1,20 @@
+import fs from "node:fs";
+import path from "node:path";
 import admin from "firebase-admin";
 import { env } from "../config/env.js";
 
 let initialized = false;
 let initializationFailed = false;
+
+const resolveCredentialsPath = () => {
+  if (!env.googleApplicationCredentials) {
+    return "";
+  }
+
+  return path.isAbsolute(env.googleApplicationCredentials)
+    ? env.googleApplicationCredentials
+    : path.resolve(process.cwd(), env.googleApplicationCredentials);
+};
 
 const initializeFirebaseAdmin = () => {
   if (initialized || initializationFailed) {
@@ -10,17 +22,26 @@ const initializeFirebaseAdmin = () => {
   }
 
   try {
+    const credentialsPath = resolveCredentialsPath();
+
+    if (credentialsPath) {
+      if (!fs.existsSync(credentialsPath)) {
+        throw new Error(
+          `GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialsPath}`
+        );
+      }
+
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
+      admin.initializeApp();
+      initialized = true;
+      return true;
+    }
+
     if (env.firebaseServiceAccountJson) {
       const serviceAccount = JSON.parse(env.firebaseServiceAccountJson);
       admin.initializeApp({
         credential: admin.credential.cert(serviceAccount)
       });
-      initialized = true;
-      return true;
-    }
-
-    if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      admin.initializeApp();
       initialized = true;
       return true;
     }

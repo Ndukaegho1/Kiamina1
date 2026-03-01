@@ -60,6 +60,7 @@ import {
   filterClientsForAdminScope,
   readClientAssignmentsFromStorage,
 } from './adminAssignments'
+import { apiFetch } from '../../utils/apiClient'
 import KiaminaLogo from '../common/KiaminaLogo'
 import DotLottiePreloader from '../common/DotLottiePreloader'
 import * as XLSX from 'xlsx'
@@ -917,7 +918,7 @@ const deliverNotificationEmail = async ({
 }) => {
   if (!recipient?.email) return false
   try {
-    const response = await fetch('/api/notifications/send-email', {
+    const response = await apiFetch('/api/notifications/send-email', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

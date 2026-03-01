@@ -25,7 +25,6 @@ app.use(
     }
   })
 );
-app.use(express.json({ limit: "1mb" }));
 app.use(rateLimitMiddleware);
 app.use(morgan(":date[iso] :id :method :url :status :response-time ms"));
 

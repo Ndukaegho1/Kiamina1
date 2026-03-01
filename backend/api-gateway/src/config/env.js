@@ -37,5 +37,6 @@ export const env = {
     process.env.NOTIFICATIONS_SERVICE_URL || "http://localhost:4104",
   upstashRestUrl: process.env.UPSTASH_REDIS_REST_URL || "",
   upstashRestToken: process.env.UPSTASH_REDIS_REST_TOKEN || "",
-  requestsPerMinute: toNumber(process.env.RATE_LIMIT_REQUESTS_PER_MINUTE, 120)
+  requestsPerMinute: toNumber(process.env.RATE_LIMIT_REQUESTS_PER_MINUTE, 120),
+  authVerifyTimeoutMs: toNumber(process.env.AUTH_VERIFY_TIMEOUT_MS, 5000)
 };
