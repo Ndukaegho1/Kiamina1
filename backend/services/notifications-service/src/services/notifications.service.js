@@ -6,6 +6,7 @@ import {
 } from "../repositories/notifications.repository.js";
 import { publishToQstash } from "./qstash.service.js";
 import { sendEmailViaSmtp } from "./smtp.service.js";
+import { createServiceUnavailableError } from "../utils/errors.js";
 
 export const queueEmailNotification = async ({ to, subject, message }) => {
   const log = await createNotificationLog({
@@ -41,6 +42,14 @@ export const queueEmailNotification = async ({ to, subject, message }) => {
       });
       return updated;
     }
+
+    await updateNotificationLog(log.id, {
+      status: "failed",
+      errorMessage: publishResult.reason || "No notification provider configured"
+    });
+    throw createServiceUnavailableError(
+      publishResult.reason || "No notification provider configured"
+    );
   } catch (error) {
     await updateNotificationLog(log.id, {
       status: "failed",
@@ -48,8 +57,6 @@ export const queueEmailNotification = async ({ to, subject, message }) => {
     });
     throw error;
   }
-
-  return log;
 };
 
 export const getRecentNotificationLogs = async (limit) => listNotificationLogs(limit);

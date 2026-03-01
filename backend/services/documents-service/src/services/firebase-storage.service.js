@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import admin from "firebase-admin";
 import { env } from "../config/env.js";
+import { createServiceUnavailableError } from "../utils/errors.js";
 
 const APP_NAME = "documents-service";
 let initialized = false;
@@ -75,11 +76,15 @@ const getFirebaseApp = () => admin.app(APP_NAME);
 
 const assertStorageReady = () => {
   if (!initializeFirebaseApp()) {
-    throw new Error(initError || "Firebase not initialized");
+    throw createServiceUnavailableError(
+      initError || "Firebase storage is not initialized"
+    );
   }
 
   if (!env.firebaseStorageBucket) {
-    throw new Error("FIREBASE_STORAGE_BUCKET is required for document uploads");
+    throw createServiceUnavailableError(
+      "FIREBASE_STORAGE_BUCKET is required for document uploads"
+    );
   }
 
   return getFirebaseApp().storage().bucket(env.firebaseStorageBucket);
