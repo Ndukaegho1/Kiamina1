@@ -24,13 +24,7 @@ const initializeFirebaseAdmin = () => {
   try {
     const credentialsPath = resolveCredentialsPath();
 
-    if (credentialsPath) {
-      if (!fs.existsSync(credentialsPath)) {
-        throw new Error(
-          `GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialsPath}`
-        );
-      }
-
+    if (credentialsPath && fs.existsSync(credentialsPath)) {
       process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
       admin.initializeApp();
       initialized = true;
@@ -44,6 +38,12 @@ const initializeFirebaseAdmin = () => {
       });
       initialized = true;
       return true;
+    }
+
+    if (credentialsPath && !fs.existsSync(credentialsPath)) {
+      throw new Error(
+        `GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialsPath}`
+      );
     }
 
     initializationFailed = true;

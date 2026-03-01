@@ -40,12 +40,7 @@ const initializeFirebaseApp = () => {
       options.storageBucket = env.firebaseStorageBucket;
     }
 
-    if (credentialsPath) {
-      if (!fs.existsSync(credentialsPath)) {
-        throw new Error(
-          `GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialsPath}`
-        );
-      }
+    if (credentialsPath && fs.existsSync(credentialsPath)) {
       const serviceAccount = JSON.parse(fs.readFileSync(credentialsPath, "utf8"));
       options.credential = admin.credential.cert(serviceAccount);
       admin.initializeApp(options, APP_NAME);
@@ -59,6 +54,12 @@ const initializeFirebaseApp = () => {
       admin.initializeApp(options, APP_NAME);
       initialized = true;
       return true;
+    }
+
+    if (credentialsPath && !fs.existsSync(credentialsPath)) {
+      throw new Error(
+        `GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialsPath}`
+      );
     }
 
     initError = "Firebase service account credentials are not configured.";
