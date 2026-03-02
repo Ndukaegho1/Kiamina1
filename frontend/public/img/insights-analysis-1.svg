@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#f3f7ff" />
+  <rect x="110" y="95" width="980" height="530" rx="26" fill="#fff" stroke="#153585" stroke-opacity=".22" stroke-width="3" />
+  <rect x="180" y="160" width="820" height="110" rx="18" fill="#153585" />
+  <rect x="220" y="202" width="260" height="12" rx="6" fill="#dbe7ff" />
+  <rect x="220" y="226" width="480" height="10" rx="5" fill="#bfd2ff" />
+  <polyline points="200,500 360,420 500,460 670,340 840,360 990,250" fill="none" stroke="#153585" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" />
+  <circle cx="360" cy="420" r="16" fill="#153585" />
+  <circle cx="670" cy="340" r="16" fill="#153585" />
+  <circle cx="990" cy="250" r="16" fill="#153585" />
+</svg>

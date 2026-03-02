@@ -4,7 +4,6 @@ import {
   Sidebar as ClientSidebar,
   TopBar as ClientTopBar,
   DashboardPage as ClientDashboardPage,
-  HomePage,
   UploadHistoryPage as ClientUploadHistoryPage,
   RecentActivitiesPage as ClientRecentActivitiesPage,
   SupportPage as ClientSupportPage,
@@ -37,7 +36,7 @@ import { getScopedStorageKey } from './utils/storage'
 import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
 import DotLottiePreloader from './components/common/DotLottiePreloader'
 import { getNetworkAwareDurationMs, getNetworkConnectionSnapshot, isPageReloadNavigation } from './utils/networkRuntime'
-import { apiFetch, clearApiAccessToken, setApiAccessToken } from './utils/apiClient'
+import { apiFetch, clearApiAccessToken, clearApiSessionId, setApiAccessToken } from './utils/apiClient'
 import {
   fetchClientDashboardOverviewFromBackend,
   persistClientOnboardingToBackend,
@@ -54,10 +53,21 @@ import {
   isClientNotificationSoundEnabled,
   readClientNotificationSettings,
 } from './utils/clientNotificationPreferences'
+import PreliminaryCorporateSite from './components/preliminary/PreliminaryCorporateSite'
 
 const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
 const CLIENT_DOCUMENT_PAGE_IDS = ['expenses', 'sales', 'bank-statements']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
+const PUBLIC_SITE_PAGE_IDS = ['home', 'about', 'services', 'insights', 'careers', 'contact']
+const PUBLIC_SITE_PAGE_BY_PATH = {
+  '/': 'home',
+  '/home': 'home',
+  '/about': 'about',
+  '/services': 'services',
+  '/insights': 'insights',
+  '/careers': 'careers',
+  '/contact': 'contact',
+}
 const CLIENT_ONBOARDING_TOTAL_STEPS = 2
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
@@ -1458,6 +1468,7 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(Boolean(initialAuthUser))
   const [showAuth, setShowAuth] = useState(false)
   const [showAdminLogin, setShowAdminLogin] = useState(false)
+  const [publicSitePage, setPublicSitePage] = useState('home')
   const [adminSetupToken, setAdminSetupToken] = useState('')
   const [impersonationSession, setImpersonationSession] = useState(initialImpersonationSession)
   const [adminImpersonationSession, setAdminImpersonationSession] = useState(initialAdminImpersonationSession)
@@ -2189,6 +2200,20 @@ function App() {
     handleSetActivePage(targetPage)
   }
 
+  const navigateToPublicSitePage = (page = 'home', { replace = false } = {}) => {
+    const resolvedPage = PUBLIC_SITE_PAGE_IDS.includes(page) ? page : 'home'
+    const nextPath = resolvedPage === 'home' ? '/' : `/${resolvedPage}`
+    setShowAuth(false)
+    setShowAdminLogin(false)
+    setAdminSetupToken('')
+    setActiveFolderRoute(null)
+    setPublicSitePage(resolvedPage)
+    try {
+      if (replace) history.replaceState({}, '', nextPath)
+      else history.pushState({}, '', nextPath)
+    } catch {}
+  }
+
   const navigateToAuth = (mode = 'login', { replace = false } = {}) => {
     setAuthMode(mode)
     setShowAuth(true)
@@ -2198,6 +2223,15 @@ function App() {
       if (replace) history.replaceState({}, '', mode === 'signup' ? '/signup' : '/login')
       else history.pushState({}, '', mode === 'signup' ? '/signup' : '/login')
     } catch {}
+  }
+
+  const handlePublicGetStarted = ({ replace = false } = {}) => {
+    if (isAuthenticated) {
+      const destination = getDefaultPageForRole(authUser?.role || currentUserRole || 'client')
+      handleSetActivePage(destination, { replace })
+      return
+    }
+    navigateToAuth('signup', { replace })
   }
 
   const navigateToAdminLogin = ({ replace = false } = {}) => {
@@ -2285,13 +2319,15 @@ function App() {
   useEffect(() => {
     // Initialize route from URL on first load
     const syncFromLocation = () => {
-      const path = window.location.pathname || '/'
-      if (path === '/' || path === '/home') {
+      const rawPath = window.location.pathname || '/'
+      const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') : rawPath
+      const publicSitePageCandidate = PUBLIC_SITE_PAGE_BY_PATH[path] || null
+      if (publicSitePageCandidate) {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken('')
         setActiveFolderRoute(null)
-        setActivePage(getDefaultPageForRole(initialAuthUser?.role))
+        setPublicSitePage(publicSitePageCandidate)
         return
       }
       if (path === '/login' || path === '/signup' || path === '/auth') {
@@ -2299,6 +2335,7 @@ function App() {
         setShowAdminLogin(false)
         setAdminSetupToken('')
         setActiveFolderRoute(null)
+        setPublicSitePage('home')
         setAuthMode(path === '/signup' ? 'signup' : 'login')
         return
       }
@@ -2307,6 +2344,7 @@ function App() {
         setShowAdminLogin(true)
         setAdminSetupToken('')
         setActiveFolderRoute(null)
+        setPublicSitePage('home')
         setAuthMode('login')
         return
       }
@@ -2316,6 +2354,7 @@ function App() {
         setShowAdminLogin(false)
         setAdminSetupToken(inviteToken)
         setActiveFolderRoute(null)
+        setPublicSitePage('home')
         setAuthMode('login')
         return
       }
@@ -2326,6 +2365,7 @@ function App() {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken('')
+        setPublicSitePage('home')
         setActivePage(folderCategory)
         setActiveFolderRoute({ category: folderCategory, folderId })
         return
@@ -2335,6 +2375,7 @@ function App() {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken('')
+        setPublicSitePage('home')
         setActiveFolderRoute(null)
         setActivePage('support')
         return
@@ -2343,6 +2384,7 @@ function App() {
         setShowAuth(false)
         setShowAdminLogin(false)
         setAdminSetupToken('')
+        setPublicSitePage('home')
         setActiveFolderRoute(null)
         setActivePage(candidate)
         return
@@ -2351,7 +2393,12 @@ function App() {
       setShowAdminLogin(false)
       setAdminSetupToken('')
       setActiveFolderRoute(null)
-      setActivePage(getDefaultPageForRole(initialAuthUser?.role))
+      if (isAuthenticated) {
+        setPublicSitePage('home')
+        setActivePage(getDefaultPageForRole(initialAuthUser?.role))
+        return
+      }
+      setPublicSitePage('home')
     }
 
     syncFromLocation()
@@ -2359,7 +2406,7 @@ function App() {
     const onPop = () => syncFromLocation()
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
-  }, [])
+  }, [initialAuthUser?.role, isAuthenticated])
 
   useEffect(() => {
     if (!isClientVerificationLocked) return
@@ -2818,6 +2865,7 @@ function App() {
     const user = { fullName, email: selected.email, role: socialRole }
     persistAuthUser(user, true)
     clearApiAccessToken()
+    clearApiSessionId()
     await registerAuthAccountRecord({
       email: selected.email,
       fullName,
@@ -2943,6 +2991,15 @@ function App() {
     const wasAdmin = currentUserRole === 'admin'
     setIsLoggingOut(true)
     await new Promise((resolve) => setTimeout(resolve, getNetworkAwareDurationMs('search')))
+    try {
+      await apiFetch('/api/auth/logout-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'logout' }),
+      })
+    } catch {
+      // Best-effort remote logout; local cleanup continues.
+    }
     setIsLogoutConfirmOpen(false)
     setIsModalOpen(false)
     setIsAuthenticated(false)
@@ -2958,6 +3015,7 @@ function App() {
     sessionStorage.removeItem('kiaminaAuthUser')
     localStorage.removeItem('kiaminaAuthUser')
     clearApiAccessToken()
+    clearApiSessionId()
     setIsLoggingOut(false)
     if (wasAdmin) {
       navigateToAdminLogin({ replace: true })
@@ -3026,6 +3084,7 @@ function App() {
     sessionStorage.removeItem('kiaminaAuthUser')
     localStorage.removeItem('kiaminaAuthUser')
     clearApiAccessToken()
+    clearApiSessionId()
     navigateToAuth('login', { replace: true })
     showToast('success', 'Your account was deleted permanently.')
     return { ok: true }
@@ -3061,6 +3120,7 @@ function App() {
       sessionStorage.removeItem('kiaminaAuthUser')
       localStorage.removeItem('kiaminaAuthUser')
       clearApiAccessToken()
+      clearApiSessionId()
       navigateToAuth('login', { replace: true })
       showToast('error', 'Your session was ended by an administrator. Please log in again.')
     }
@@ -3491,7 +3551,10 @@ function App() {
       })
       persistAuthUser(user, true)
       if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: true })
-      else clearApiAccessToken()
+      else {
+        clearApiAccessToken()
+        clearApiSessionId()
+      }
       await registerAuthAccountRecord({
         uid: pendingSignup.uid || user?.uid || '',
         email: pendingSignup.email,
@@ -3585,7 +3648,10 @@ function App() {
       const shouldRememberSession = Boolean(otpChallenge.remember)
       persistAuthUser(user, shouldRememberSession)
       if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: shouldRememberSession })
-      else clearApiAccessToken()
+      else {
+        clearApiAccessToken()
+        clearApiSessionId()
+      }
       await recordAuthLoginSession({
         uid: match.uid || user?.uid || '',
         email: match.email,
@@ -4943,24 +5009,13 @@ function App() {
             onCancelOtp={handleCancelOtp}
           />
         ) : (
-          <>
-            <HomePage
-              onGetStarted={() => navigateToAuth('signup')}
-              onLogin={() => navigateToAuth('login')}
-            />
-            <ClientSupportWidget
-              clientEmail=""
-              clientName="Lead"
-              businessName=""
-            />
-            <button
-              type="button"
-              onClick={() => navigateToAdminLogin()}
-              className="fixed top-5 right-5 z-[205] h-10 px-4 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors"
-            >
-              Admin Portal
-            </button>
-          </>
+          <PreliminaryCorporateSite
+            activePage={publicSitePage}
+            onNavigatePage={(pageId) => navigateToPublicSitePage(pageId)}
+            onGetStarted={() => handlePublicGetStarted()}
+            onLogin={() => navigateToAuth('login')}
+            onOpenAdminPortal={() => navigateToAdminLogin()}
+          />
         )
       ) : needsOnboarding ? (
         <ClientOnboardingExperience
