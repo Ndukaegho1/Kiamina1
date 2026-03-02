@@ -13,6 +13,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev -w api-gateway\" \"npm run dev -w auth-service\" \"npm run dev -w users-service\" \"npm run dev -w documents-service\" \"npm run dev -w notifications-service\"",
     "lint": "npm run lint --workspaces --if-present",
+    "test": "node --test ./test/*.test.js",
     "start": "concurrently \"npm run start -w api-gateway\" \"npm run start -w auth-service\" \"npm run start -w users-service\" \"npm run start -w documents-service\" \"npm run start -w notifications-service\""
   },
   "devDependencies": {
