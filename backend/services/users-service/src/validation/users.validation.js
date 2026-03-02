@@ -20,6 +20,17 @@ const DASHBOARD_PAGE_IDS = [
   "support",
   "settings"
 ];
+const ADMIN_DASHBOARD_PAGE_IDS = [
+  "admin-dashboard",
+  "users",
+  "documents",
+  "support-leads",
+  "newsletters",
+  "analytics",
+  "settings"
+];
+const SUPPORT_LEAD_STATUSES = ["new", "contacted", "qualified", "converted", "closed"];
+const NEWSLETTER_STATUSES = ["subscribed", "unsubscribed", "bounced"];
 const LANGUAGE_VALUES = ["english", "french"];
 
 const CAC_PREFIX_REGEX = /^(RC|BN|IT|LP|LLP)/i;
@@ -60,6 +71,7 @@ const USER_STATUS_SCHEMA = Joi.string().valid(...USER_STATUS_VALUES);
 const USER_ROLE_SCHEMA = Joi.string().valid(...USER_ROLE_VALUES);
 const BUSINESS_TYPE_SCHEMA = Joi.string().valid(...BUSINESS_TYPE_VALUES);
 const DASHBOARD_PAGE_SCHEMA = Joi.string().valid(...DASHBOARD_PAGE_IDS);
+const ADMIN_DASHBOARD_PAGE_SCHEMA = Joi.string().valid(...ADMIN_DASHBOARD_PAGE_IDS);
 const LANGUAGE_SCHEMA = Joi.string().valid(...LANGUAGE_VALUES);
 const LETTERS_ONLY_NAME_SCHEMA = Joi.string().pattern(/^[A-Za-z\s]+$/);
 const PHONE_COUNTRY_CODE_SCHEMA = Joi.string().pattern(/^\+\d{1,4}$/);
@@ -141,6 +153,91 @@ const normalizeFinancialMonth = (value) => {
   }
 
   return null;
+};
+
+const VALIDATION_OPTIONS = {
+  abortEarly: false,
+  convert: true,
+  stripUnknown: true
+};
+
+const ADMIN_PROFILE_INPUT_SCHEMA = Joi.object({
+  firstName: Joi.string().trim().allow("").max(120).default(""),
+  lastName: Joi.string().trim().allow("").max(120).default(""),
+  displayName: Joi.string().trim().allow("").max(140).default(""),
+  jobTitle: Joi.string().trim().allow("").max(140).default(""),
+  department: Joi.string().trim().allow("").max(140).default(""),
+  phone: Joi.string().trim().allow("").max(40).default(""),
+  timezone: Joi.string().trim().allow("").max(90).default("Africa/Lagos")
+});
+
+const SUPPORT_LEAD_INPUT_SCHEMA = Joi.object({
+  leadId: Joi.string().trim().allow("").max(120).default(""),
+  fullName: Joi.string().trim().allow("").max(140).default(""),
+  email: Joi.string()
+    .trim()
+    .lowercase()
+    .allow("")
+    .email({ tlds: { allow: false } })
+    .default(""),
+  companyName: Joi.string().trim().allow("").max(180).default(""),
+  phone: Joi.string().trim().allow("").max(40).default(""),
+  source: Joi.string().trim().allow("").max(90).default("support-form"),
+  status: Joi.string().trim().lowercase().valid(...SUPPORT_LEAD_STATUSES).default("new"),
+  interest: Joi.string().trim().allow("").max(180).default(""),
+  assignedToUid: Joi.string().trim().allow("").max(180).default(""),
+  notes: Joi.string().trim().allow("").max(1500).default(""),
+  createdAt: Joi.date().iso().optional(),
+  updatedAt: Joi.date().iso().optional()
+});
+
+const NEWSLETTER_INPUT_SCHEMA = Joi.object({
+  email: Joi.string()
+    .trim()
+    .lowercase()
+    .allow("")
+    .email({ tlds: { allow: false } })
+    .default(""),
+  fullName: Joi.string().trim().allow("").max(140).default(""),
+  status: Joi.string().trim().lowercase().valid(...NEWSLETTER_STATUSES).default("subscribed"),
+  source: Joi.string().trim().allow("").max(90).default("website"),
+  tags: Joi.array().items(Joi.string().trim().max(60)).default([]),
+  subscribedAt: Joi.date().iso().optional(),
+  lastEngagedAt: Joi.date().iso().allow(null).optional()
+});
+
+const parseDashboardCollection = ({
+  source,
+  key,
+  itemSchema,
+  normalizeItem,
+  invalidTypeMessage,
+  invalidItemMessage,
+  errors
+}) => {
+  if (source[key] === undefined) {
+    return null;
+  }
+
+  if (!Array.isArray(source[key])) {
+    errors.push(invalidTypeMessage);
+    return null;
+  }
+
+  const values = [];
+  let hasItemErrors = false;
+  source[key].forEach((item, index) => {
+    const { value, error } = itemSchema.validate(item ?? {}, VALIDATION_OPTIONS);
+    if (error) {
+      errors.push(`${invalidItemMessage} at index ${index}`);
+      hasItemErrors = true;
+      return;
+    }
+
+    values.push(normalizeItem(value));
+  });
+
+  return hasItemErrors ? null : values;
 };
 
 export const validateSyncFromAuthPayload = (body) => {
@@ -492,6 +589,143 @@ export const buildClientDashboardUpdatePayload = (body) => {
         }
       }
     }
+  }
+
+  return { payload, errors };
+};
+
+export const buildAdminDashboardUpdatePayload = (body) => {
+  const source = normalizeSource(body);
+  const payload = {};
+  const errors = [];
+
+  if (source.defaultLandingPage !== undefined) {
+    const pageId = normalizeString(source.defaultLandingPage).toLowerCase();
+    if (ADMIN_DASHBOARD_PAGE_SCHEMA.validate(pageId).error) {
+      errors.push(
+        "defaultLandingPage must be one of: admin-dashboard, users, documents, support-leads, newsletters, analytics, settings"
+      );
+    } else {
+      payload["adminDashboard.defaultLandingPage"] = pageId;
+      payload["adminDashboard.lastVisitedPage"] = pageId;
+    }
+  }
+
+  if (source.lastVisitedPage !== undefined) {
+    const pageId = normalizeString(source.lastVisitedPage).toLowerCase();
+    if (ADMIN_DASHBOARD_PAGE_SCHEMA.validate(pageId).error) {
+      errors.push(
+        "lastVisitedPage must be one of: admin-dashboard, users, documents, support-leads, newsletters, analytics, settings"
+      );
+    } else {
+      payload["adminDashboard.lastVisitedPage"] = pageId;
+    }
+  }
+
+  if (source.compactMode !== undefined) {
+    payload["adminDashboard.compactMode"] = Boolean(source.compactMode);
+  }
+
+  if (source.widgets !== undefined) {
+    if (!Array.isArray(source.widgets)) {
+      errors.push("widgets must be an array of strings");
+    } else {
+      payload["adminDashboard.widgets"] = [
+        ...new Set(
+          source.widgets
+            .map((widget) => normalizeString(widget).toLowerCase())
+            .filter(Boolean)
+        )
+      ];
+    }
+  }
+
+  if (source.favoritePages !== undefined) {
+    if (!Array.isArray(source.favoritePages)) {
+      errors.push("favoritePages must be an array of strings");
+    } else {
+      const favoritePages = [
+        ...new Set(
+          source.favoritePages
+            .map((page) => normalizeString(page).toLowerCase())
+            .filter(Boolean)
+        )
+      ];
+
+      const invalidPages = favoritePages.filter(
+        (page) => ADMIN_DASHBOARD_PAGE_SCHEMA.validate(page).error
+      );
+      if (invalidPages.length > 0) {
+        errors.push("favoritePages contains unsupported page values");
+      } else {
+        payload["adminDashboard.favoritePages"] = favoritePages;
+      }
+    }
+  }
+
+  if (source.adminProfile !== undefined) {
+    if (!source.adminProfile || typeof source.adminProfile !== "object" || Array.isArray(source.adminProfile)) {
+      errors.push("adminProfile must be an object");
+    } else {
+      const { value, error } = ADMIN_PROFILE_INPUT_SCHEMA.validate(source.adminProfile, VALIDATION_OPTIONS);
+      if (error) {
+        errors.push("adminProfile contains invalid values");
+      } else {
+        payload["adminProfile.firstName"] = value.firstName;
+        payload["adminProfile.lastName"] = value.lastName;
+        payload["adminProfile.displayName"] = value.displayName;
+        payload["adminProfile.jobTitle"] = value.jobTitle;
+        payload["adminProfile.department"] = value.department;
+        payload["adminProfile.phone"] = value.phone;
+        payload["adminProfile.timezone"] = value.timezone;
+      }
+    }
+  }
+
+  const supportLeads = parseDashboardCollection({
+    source,
+    key: "supportLeads",
+    itemSchema: SUPPORT_LEAD_INPUT_SCHEMA,
+    normalizeItem: (item) => ({
+      ...item,
+      createdAt: item.createdAt ? new Date(item.createdAt) : new Date(),
+      updatedAt: item.updatedAt ? new Date(item.updatedAt) : new Date()
+    }),
+    invalidTypeMessage: "supportLeads must be an array of objects",
+    invalidItemMessage: "supportLeads contains invalid value",
+    errors
+  });
+
+  if (supportLeads) {
+    payload["adminDashboard.supportLeads"] = supportLeads;
+    payload["adminDashboard.stats.openSupportLeads"] = supportLeads.filter(
+      (lead) => lead.status !== "closed" && lead.status !== "converted"
+    ).length;
+  }
+
+  const newsletters = parseDashboardCollection({
+    source,
+    key: "newsletters",
+    itemSchema: NEWSLETTER_INPUT_SCHEMA,
+    normalizeItem: (item) => ({
+      ...item,
+      tags: [...new Set((item.tags || []).map((tag) => normalizeString(tag).toLowerCase()).filter(Boolean))],
+      subscribedAt: item.subscribedAt ? new Date(item.subscribedAt) : new Date(),
+      lastEngagedAt: item.lastEngagedAt ? new Date(item.lastEngagedAt) : null
+    }),
+    invalidTypeMessage: "newsletters must be an array of objects",
+    invalidItemMessage: "newsletters contains invalid value",
+    errors
+  });
+
+  if (newsletters) {
+    payload["adminDashboard.newsletters"] = newsletters;
+    payload["adminDashboard.stats.newsletterSubscribers"] = newsletters.filter(
+      (entry) => entry.status === "subscribed"
+    ).length;
+    payload["adminDashboard.stats.newsletterUnsubscribed"] = newsletters.filter(
+      (entry) => entry.status === "unsubscribed"
+    ).length;
   }
 
   return { payload, errors };

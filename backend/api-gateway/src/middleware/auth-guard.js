@@ -39,6 +39,14 @@ const extractBearerToken = (authorizationHeader) => {
   return token.trim();
 };
 
+const extractSessionId = (sessionHeader) => {
+  if (!sessionHeader || typeof sessionHeader !== "string") {
+    return "";
+  }
+
+  return sessionHeader.trim();
+};
+
 const normalizeRoles = (rolesValue) => {
   if (Array.isArray(rolesValue)) {
     return rolesValue
@@ -56,7 +64,7 @@ const normalizeRoles = (rolesValue) => {
   return [];
 };
 
-const verifyTokenWithAuthService = async ({ idToken, requestId }) => {
+const verifyTokenWithAuthService = async ({ idToken, sessionId, requestId }) => {
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {
     abortController.abort();
@@ -69,7 +77,7 @@ const verifyTokenWithAuthService = async ({ idToken, requestId }) => {
         "Content-Type": "application/json",
         ...(requestId ? { "x-request-id": requestId } : {})
       },
-      body: JSON.stringify({ idToken }),
+      body: JSON.stringify({ idToken, sessionId }),
       signal: abortController.signal
     });
 
@@ -91,15 +99,23 @@ export const authGuardMiddleware = async (req, res, next) => {
     });
   }
 
+  const sessionId = extractSessionId(req.headers["x-session-id"]);
+  if (!sessionId) {
+    return res.status(401).json({
+      message: "Missing x-session-id header for authenticated request."
+    });
+  }
+
   try {
     const response = await verifyTokenWithAuthService({
       idToken,
+      sessionId,
       requestId: req.id
     });
 
-    if (response.status === 401 || response.status === 400) {
+    if (response.status === 401 || response.status === 400 || response.status === 403) {
       return res.status(401).json({
-        message: "Invalid or expired token."
+        message: "Invalid, expired, or revoked token/session."
       });
     }
 
@@ -120,6 +136,7 @@ export const authGuardMiddleware = async (req, res, next) => {
       uid: identity.uid,
       email: identity.email || "",
       emailVerified: Boolean(identity.emailVerified),
+      sessionId,
       roles: normalizeRoles(identity.roles)
     };
 

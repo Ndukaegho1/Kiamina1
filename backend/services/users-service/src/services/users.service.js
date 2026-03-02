@@ -170,6 +170,43 @@ const buildDashboardOverviewPayload = ({ user, documentSummary = null }) => ({
       }
 });
 
+const buildAdminDashboardPayload = ({ user }) => {
+  const supportLeads = Array.isArray(user.adminDashboard?.supportLeads)
+    ? user.adminDashboard.supportLeads
+    : [];
+  const newsletters = Array.isArray(user.adminDashboard?.newsletters)
+    ? user.adminDashboard.newsletters
+    : [];
+
+  const openSupportLeads = supportLeads.filter(
+    (lead) => lead?.status !== "closed" && lead?.status !== "converted"
+  ).length;
+  const newsletterSubscribers = newsletters.filter(
+    (entry) => entry?.status === "subscribed"
+  ).length;
+  const newsletterUnsubscribed = newsletters.filter(
+    (entry) => entry?.status === "unsubscribed"
+  ).length;
+
+  return {
+    uid: user.uid,
+    email: user.email,
+    displayName: user.displayName || "",
+    roles: Array.isArray(user.roles) ? user.roles : [],
+    adminProfile: user.adminProfile || {},
+    dashboard: {
+      ...(user.adminDashboard || {}),
+      supportLeads,
+      newsletters,
+      stats: {
+        openSupportLeads,
+        newsletterSubscribers,
+        newsletterUnsubscribed
+      }
+    }
+  };
+};
+
 export const ensureUserFromActor = async ({ uid, email, roles = [], displayName = "" }) => {
   if (!uid) return null;
 
@@ -340,3 +377,54 @@ export const getClientDashboardOverviewByUid = async ({
   actorEmail,
   actorRoles = []
 }) => getClientDashboardByUid({ uid, actorEmail, actorRoles });
+
+export const getAdminDashboardByUid = async ({ uid, actorEmail, actorRoles = [] }) => {
+  const user = await ensureUserFromActor({
+    uid,
+    email: actorEmail,
+    roles: actorRoles,
+    displayName: ""
+  });
+  if (!user) return null;
+
+  return buildAdminDashboardPayload({ user });
+};
+
+export const updateAdminDashboardByUid = async ({ uid, actorEmail, actorRoles = [], payload }) => {
+  const existingUser = await ensureUserFromActor({
+    uid,
+    email: actorEmail,
+    roles: actorRoles,
+    displayName: ""
+  });
+  if (!existingUser) return null;
+
+  const nextPayload = {
+    ...payload,
+    "adminDashboard.lastVisitedAt": new Date()
+  };
+
+  const firstName =
+    payload["adminProfile.firstName"] !== undefined
+      ? payload["adminProfile.firstName"]
+      : existingUser.adminProfile?.firstName || "";
+  const lastName =
+    payload["adminProfile.lastName"] !== undefined
+      ? payload["adminProfile.lastName"]
+      : existingUser.adminProfile?.lastName || "";
+  const explicitDisplayName =
+    payload["adminProfile.displayName"] !== undefined
+      ? payload["adminProfile.displayName"]
+      : existingUser.adminProfile?.displayName || "";
+  const derivedDisplayName = explicitDisplayName || [firstName, lastName].filter(Boolean).join(" ").trim();
+
+  if (derivedDisplayName) {
+    nextPayload["adminProfile.displayName"] = derivedDisplayName;
+    nextPayload.displayName = derivedDisplayName;
+  }
+
+  const updatedUser = await updateUserByUid(uid, { $set: nextPayload });
+  if (!updatedUser) return null;
+
+  return buildAdminDashboardPayload({ user: updatedUser });
+};

@@ -97,6 +97,29 @@ const verifyTokenSchema = Joi.object({
     "any.required": "idToken is required",
     "string.empty": "idToken is required",
     "string.min": "idToken format appears invalid"
+  }),
+  sessionId: Joi.string()
+    .trim()
+    .allow("")
+    .pattern(/^[A-Za-z0-9-]{16,120}$/)
+    .default("")
+    .messages({
+      "string.pattern.base": "sessionId format appears invalid"
+    })
+});
+
+const logoutSessionSchema = Joi.object({
+  sessionId: Joi.string()
+    .trim()
+    .required()
+    .pattern(/^[A-Za-z0-9-]{16,120}$/)
+    .messages({
+      "any.required": "sessionId is required",
+      "string.empty": "sessionId is required",
+      "string.pattern.base": "sessionId format appears invalid"
+    }),
+  reason: Joi.string().trim().lowercase().allow("").max(120).default("logout").messages({
+    "string.max": "reason must be at most 120 characters"
   })
 });
 
@@ -207,7 +230,21 @@ export const validateVerifyTokenPayload = (body) => {
   }
 
   return {
-    idToken: value.idToken
+    idToken: value.idToken,
+    sessionId: value.sessionId || ""
+  };
+};
+
+export const validateLogoutSessionPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = logoutSessionSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      sessionId: value?.sessionId || "",
+      reason: value?.reason || "logout"
+    }
   };
 };
 

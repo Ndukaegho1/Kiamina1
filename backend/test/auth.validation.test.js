@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  validateLogoutSessionPayload,
   validateLoginSessionPayload,
   validateRegisterAccountPayload,
   validateSendOtpPayload
@@ -37,4 +38,9 @@ test("auth: register validator supports displayName alias and role/provider norm
 test("auth: login session validator requires uid or email", () => {
   const { errors } = validateLoginSessionPayload({});
   assert.ok(errors.includes("At least one of uid or email is required"));
+});
+
+test("auth: logout validator requires session id", () => {
+  const { errors } = validateLogoutSessionPayload({});
+  assert.ok(errors.includes("sessionId is required"));
 });

@@ -149,6 +149,92 @@ const clientDashboardSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const adminProfileSchema = new mongoose.Schema(
+  {
+    firstName: { type: String, default: "" },
+    lastName: { type: String, default: "" },
+    displayName: { type: String, default: "" },
+    jobTitle: { type: String, default: "" },
+    department: { type: String, default: "" },
+    phone: { type: String, default: "" },
+    timezone: { type: String, default: "Africa/Lagos" }
+  },
+  { _id: false }
+);
+
+const supportLeadSchema = new mongoose.Schema(
+  {
+    leadId: { type: String, default: "" },
+    fullName: { type: String, default: "" },
+    email: { type: String, default: "" },
+    companyName: { type: String, default: "" },
+    phone: { type: String, default: "" },
+    source: { type: String, default: "support-form" },
+    status: {
+      type: String,
+      enum: ["new", "contacted", "qualified", "converted", "closed"],
+      default: "new"
+    },
+    interest: { type: String, default: "" },
+    assignedToUid: { type: String, default: "" },
+    notes: { type: String, default: "" },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+  },
+  { _id: false }
+);
+
+const newsletterRecipientSchema = new mongoose.Schema(
+  {
+    email: { type: String, default: "" },
+    fullName: { type: String, default: "" },
+    status: {
+      type: String,
+      enum: ["subscribed", "unsubscribed", "bounced"],
+      default: "subscribed"
+    },
+    source: { type: String, default: "website" },
+    tags: {
+      type: [String],
+      default: []
+    },
+    subscribedAt: { type: Date, default: Date.now },
+    lastEngagedAt: { type: Date, default: null }
+  },
+  { _id: false }
+);
+
+const adminDashboardSchema = new mongoose.Schema(
+  {
+    defaultLandingPage: { type: String, default: "admin-dashboard" },
+    compactMode: { type: Boolean, default: false },
+    widgets: {
+      type: [String],
+      default: ["overview", "support-leads", "newsletters", "team-activity"]
+    },
+    favoritePages: {
+      type: [String],
+      default: []
+    },
+    lastVisitedPage: { type: String, default: "admin-dashboard" },
+    lastVisitedAt: { type: Date, default: null },
+    supportLeads: {
+      type: [supportLeadSchema],
+      default: []
+    },
+    newsletters: {
+      type: [newsletterRecipientSchema],
+      default: []
+    },
+    stats: {
+      openSupportLeads: { type: Number, min: 0, default: 0 },
+      newsletterSubscribers: { type: Number, min: 0, default: 0 },
+      newsletterUnsubscribed: { type: Number, min: 0, default: 0 }
+    }
+  },
+  { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
   {
     uid: {
@@ -196,6 +282,14 @@ const userSchema = new mongoose.Schema(
     },
     notificationPreferences: {
       type: notificationPreferencesSchema,
+      default: () => ({})
+    },
+    adminProfile: {
+      type: adminProfileSchema,
+      default: () => ({})
+    },
+    adminDashboard: {
+      type: adminDashboardSchema,
       default: () => ({})
     },
     clientDashboard: {

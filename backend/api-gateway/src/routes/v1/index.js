@@ -28,6 +28,9 @@ const createDomainProxy = (targetUrl, servicePrefix) =>
             String(req.user.emailVerified)
           );
         }
+        if (req.user?.sessionId) {
+          proxyReq.setHeader("x-session-id", req.user.sessionId);
+        }
         if (Array.isArray(req.user?.roles) && req.user.roles.length > 0) {
           proxyReq.setHeader("x-user-roles", req.user.roles.join(","));
         }

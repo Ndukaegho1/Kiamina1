@@ -1,10 +1,12 @@
 import {
   deleteUser,
   ensureUserFromActor,
+  getAdminDashboardByUid,
   getClientDashboardByUid,
   getClientDashboardOverviewByUid,
   getMeByUid,
   getUserById,
+  updateAdminDashboardByUid,
   updateClientDashboardByUid,
   updateClientProfileByUid,
   syncUserFromAuth,
@@ -12,6 +14,7 @@ import {
 } from "../services/users.service.js";
 import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
 import {
+  buildAdminDashboardUpdatePayload,
   buildClientDashboardUpdatePayload,
   buildClientProfileUpdatePayload,
   buildUserUpdatePayload,
@@ -202,6 +205,77 @@ export const getMeClientDashboardOverview = async (req, res, next) => {
     }
 
     return res.status(200).json(overview);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getMeAdminDashboard = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can access admin dashboard." });
+    }
+
+    const dashboard = await getAdminDashboardByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles
+    });
+
+    if (!dashboard) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(dashboard);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const patchMeAdminDashboard = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can update admin dashboard." });
+    }
+
+    const { payload, errors } = buildAdminDashboardUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message:
+          "Provide at least one admin dashboard field: defaultLandingPage, lastVisitedPage, compactMode, widgets, favoritePages, adminProfile, supportLeads, newsletters"
+      });
+    }
+
+    const dashboard = await updateAdminDashboardByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      payload
+    });
+
+    if (!dashboard) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(dashboard);
   } catch (error) {
     return next(error);
   }

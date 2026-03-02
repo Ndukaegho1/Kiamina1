@@ -5,7 +5,12 @@ import {
   updateAuthAccountLoginMeta,
   upsertAuthAccountByUid
 } from "../repositories/auth-accounts.repository.js";
-import { createAuthSession } from "../repositories/auth-sessions.repository.js";
+import {
+  createAuthSession,
+  findActiveAuthSessionBySessionId,
+  findAuthSessionBySessionId,
+  revokeAuthSession
+} from "../repositories/auth-sessions.repository.js";
 
 const createNotFoundError = (message) => {
   const error = new Error(message);
@@ -22,6 +27,12 @@ const createConflictError = (message) => {
 const createForbiddenError = (message) => {
   const error = new Error(message);
   error.status = 403;
+  return error;
+};
+
+const createUnauthorizedError = (message) => {
+  const error = new Error(message);
+  error.status = 401;
   return error;
 };
 
@@ -149,5 +160,50 @@ export const createLoginSessionRecord = async ({
   return {
     account,
     session
+  };
+};
+
+export const assertActiveSessionForUid = async ({ sessionId, uid }) => {
+  if (!sessionId) {
+    return null;
+  }
+
+  const session = await findActiveAuthSessionBySessionId(sessionId);
+  if (!session) {
+    throw createUnauthorizedError("Session is invalid, revoked, or expired.");
+  }
+
+  if (uid && session.uid !== uid) {
+    throw createForbiddenError("Session does not belong to authenticated user.");
+  }
+
+  return session;
+};
+
+export const revokeSessionForUid = async ({ sessionId, uid, reason = "logout" }) => {
+  const session = await findAuthSessionBySessionId(sessionId);
+  if (!session) {
+    throw createNotFoundError("Session not found.");
+  }
+
+  if (uid && session.uid !== uid) {
+    throw createForbiddenError("Cannot revoke another user's session.");
+  }
+
+  if (session.revokedAt || (session.expiresAt && session.expiresAt <= new Date())) {
+    return {
+      session,
+      revoked: false
+    };
+  }
+
+  const revokedSession = await revokeAuthSession({
+    sessionId,
+    reason: reason || "logout"
+  });
+
+  return {
+    session: revokedSession || session,
+    revoked: Boolean(revokedSession)
   };
 };

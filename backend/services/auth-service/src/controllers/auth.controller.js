@@ -2,10 +2,13 @@ import { env } from "../config/env.js";
 import { issueOtpChallenge, verifyOtpChallenge } from "../services/otp.service.js";
 import { verifyFirebaseIdToken } from "../services/firebase-admin.service.js";
 import {
+  assertActiveSessionForUid,
   createLoginSessionRecord,
-  registerOrUpdateAuthAccount
+  registerOrUpdateAuthAccount,
+  revokeSessionForUid
 } from "../services/auth-accounts.service.js";
 import {
+  validateLogoutSessionPayload,
   validateLoginSessionPayload,
   validateRegisterAccountPayload,
   validateSendOtpPayload,
@@ -32,6 +35,11 @@ const normalizeRoles = (decodedToken) => {
   }
 
   return [];
+};
+
+const getActorUid = (req) => {
+  const actorUid = req.headers["x-user-id"];
+  return actorUid ? String(actorUid) : "";
 };
 
 export const sendOtp = async (req, res, next) => {
@@ -76,7 +84,7 @@ export const verifyOtp = async (req, res, next) => {
 
 export const verifyToken = async (req, res, next) => {
   try {
-    const { idToken, error } = validateVerifyTokenPayload(req.body);
+    const { idToken, sessionId, error } = validateVerifyTokenPayload(req.body);
     if (error) {
       return res.status(400).json({ message: error });
     }
@@ -90,13 +98,20 @@ export const verifyToken = async (req, res, next) => {
     }
 
     const roles = normalizeRoles(decoded);
+    if (sessionId) {
+      await assertActiveSessionForUid({
+        sessionId,
+        uid: decoded.uid
+      });
+    }
 
     return res.status(200).json({
       uid: decoded.uid,
       email: decoded.email || null,
       emailVerified: Boolean(decoded.email_verified),
       authTime: decoded.auth_time || null,
-      roles
+      roles,
+      sessionId: sessionId || null
     });
   } catch (error) {
     return next(error);
@@ -153,6 +168,40 @@ export const recordLoginSession = async (req, res, next) => {
         issuedAt: result.session.issuedAt,
         expiresAt: result.session.expiresAt,
         loginMethod: result.session.loginMethod
+      }
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const logoutSession = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+
+    const { errors, payload } = validateLogoutSessionPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const result = await revokeSessionForUid({
+      sessionId: payload.sessionId,
+      uid: actorUid,
+      reason: payload.reason || "logout"
+    });
+
+    return res.status(200).json({
+      message: result.revoked ? "Session revoked successfully." : "Session already revoked or expired.",
+      session: {
+        sessionId: result.session.sessionId,
+        uid: result.session.uid,
+        revokedAt: result.session.revokedAt || null,
+        revokedReason: result.session.revokedReason || payload.reason || "logout"
       }
     });
   } catch (error) {
