@@ -361,9 +361,9 @@ function AdminSupportInboxPanel({
   const adminQuickReplies = useMemo(() => buildAdminQuickReplies(adminActorName), [adminActorName])
   const adminActorEmail = toTrimmedValue(currentAdminAccount?.email)
 
-  const handleAssign = () => {
+  const handleAssign = async () => {
     if (!selectedTicket?.id) return
-    const result = assignSupportTicket({
+    const result = await assignSupportTicket({
       ticketId: selectedTicket.id,
       adminName: adminActorName,
       adminEmail: adminActorEmail,
@@ -380,9 +380,9 @@ function AdminSupportInboxPanel({
     })
   }
 
-  const handleResolve = () => {
+  const handleResolve = async () => {
     if (!selectedTicket?.id) return
-    const result = resolveSupportTicket({
+    const result = await resolveSupportTicket({
       ticketId: selectedTicket.id,
       adminName: adminActorName,
     })
@@ -398,9 +398,9 @@ function AdminSupportInboxPanel({
     })
   }
 
-  const handleReopen = () => {
+  const handleReopen = async () => {
     if (!selectedTicket?.id) return
-    const result = reopenSupportTicket({
+    const result = await reopenSupportTicket({
       ticketId: selectedTicket.id,
       adminName: adminActorName,
     })
@@ -416,9 +416,9 @@ function AdminSupportInboxPanel({
     })
   }
 
-  const handleRetry = (messageId) => {
+  const handleRetry = async (messageId) => {
     if (!selectedTicket?.id || !messageId) return
-    const result = retrySupportMessage({
+    const result = await retrySupportMessage({
       ticketId: selectedTicket.id,
       messageId,
     })
@@ -434,7 +434,7 @@ function AdminSupportInboxPanel({
     const textValue = toTrimmedValue(replyDraft)
     if (!textValue && replyAttachments.length === 0) return
     setIsReplying(true)
-    const result = sendAdminSupportMessage({
+    const result = await sendAdminSupportMessage({
       ticketId: selectedTicket.id,
       adminName: adminActorName,
       adminEmail: adminActorEmail,
@@ -763,7 +763,7 @@ function AdminSupportInboxPanel({
                   {canAssign && (
                     <button
                       type="button"
-                      onClick={handleAssign}
+                      onClick={() => void handleAssign()}
                       className="h-8 px-3 rounded-md border border-border text-text-primary text-xs font-medium hover:bg-background inline-flex items-center gap-1.5"
                     >
                       <UserCheck className="w-3.5 h-3.5" />
@@ -773,7 +773,7 @@ function AdminSupportInboxPanel({
                   {canResolve && (
                     <button
                       type="button"
-                      onClick={handleResolve}
+                      onClick={() => void handleResolve()}
                       className="h-8 px-3 rounded-md bg-success text-white text-xs font-semibold hover:bg-[#0a6a41] inline-flex items-center gap-1.5"
                     >
                       <CheckCircle className="w-3.5 h-3.5" />
@@ -783,7 +783,7 @@ function AdminSupportInboxPanel({
                   {isResolved && (
                     <button
                       type="button"
-                      onClick={handleReopen}
+                      onClick={() => void handleReopen()}
                       className="h-8 px-3 rounded-md border border-border text-text-primary text-xs font-medium hover:bg-background inline-flex items-center gap-1.5"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
@@ -849,7 +849,7 @@ function AdminSupportInboxPanel({
                               </span>
                               <button
                                 type="button"
-                                onClick={() => handleRetry(message.id)}
+                                onClick={() => void handleRetry(message.id)}
                                 className="text-primary hover:underline"
                               >
                                 Retry

@@ -2,9 +2,14 @@ import { env } from "../config/env.js";
 
 const PUBLIC_ROUTE_KEYS = new Set([
   "GET /gateway/info",
+  "POST /notifications/insights/analytics/events",
+  "GET /notifications/insights/articles",
+  "GET /notifications/insights/articles/search",
   "POST /auth/register-account",
   "POST /auth/login-session",
+  "POST /auth/refresh-token",
   "POST /auth/send-otp",
+  "POST /auth/send-password-reset-link",
   "POST /auth/verify-otp",
   "POST /auth/verify-token"
 ]);
@@ -22,7 +27,16 @@ const isPublicRoute = (method, pathValue) => {
     return true;
   }
 
-  const key = `${method.toUpperCase()} ${normalizePath(pathValue)}`;
+  const normalizedPath = normalizePath(pathValue);
+  const normalizedMethod = method.toUpperCase();
+  if (
+    normalizedMethod === "GET"
+    && normalizedPath.startsWith("/notifications/insights/articles/")
+  ) {
+    return true;
+  }
+
+  const key = `${normalizedMethod} ${normalizedPath}`;
   return PUBLIC_ROUTE_KEYS.has(key);
 };
 
@@ -37,6 +51,30 @@ const extractBearerToken = (authorizationHeader) => {
   }
 
   return token.trim();
+};
+
+const parseCookieHeader = (cookieHeader = "") =>
+  String(cookieHeader || "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reduce((accumulator, part) => {
+      const separatorIndex = part.indexOf("=");
+      if (separatorIndex <= 0) {
+        return accumulator;
+      }
+
+      const key = part.slice(0, separatorIndex).trim();
+      const value = decodeURIComponent(part.slice(separatorIndex + 1).trim());
+      if (key) {
+        accumulator[key] = value;
+      }
+      return accumulator;
+    }, {});
+
+const extractCookieToken = (cookieHeader, cookieName) => {
+  const cookies = parseCookieHeader(cookieHeader);
+  return String(cookies[cookieName] || "").trim();
 };
 
 const extractSessionId = (sessionHeader) => {
@@ -64,7 +102,12 @@ const normalizeRoles = (rolesValue) => {
   return [];
 };
 
-const verifyTokenWithAuthService = async ({ idToken, sessionId, requestId }) => {
+const verifyTokenWithAuthService = async ({
+  idToken,
+  accessToken,
+  sessionId,
+  requestId
+}) => {
   const abortController = new AbortController();
   const timeoutId = setTimeout(() => {
     abortController.abort();
@@ -77,7 +120,7 @@ const verifyTokenWithAuthService = async ({ idToken, sessionId, requestId }) => 
         "Content-Type": "application/json",
         ...(requestId ? { "x-request-id": requestId } : {})
       },
-      body: JSON.stringify({ idToken, sessionId }),
+      body: JSON.stringify({ idToken, accessToken, sessionId }),
       signal: abortController.signal
     });
 
@@ -92,23 +135,31 @@ export const authGuardMiddleware = async (req, res, next) => {
     return next();
   }
 
-  const idToken = extractBearerToken(req.headers.authorization);
-  if (!idToken) {
+  const idTokenFromHeader = extractBearerToken(req.headers.authorization);
+  const accessTokenFromCookie = extractCookieToken(req.headers.cookie, "kiamina_access_token");
+  const idToken = idTokenFromHeader;
+  const accessToken = accessTokenFromCookie;
+
+  if (!idToken && !accessToken) {
     return res.status(401).json({
-      message: "Missing or invalid Authorization header. Use: Bearer <Firebase ID token>."
+      message:
+        "Missing authentication token. Provide Authorization Bearer token or kiamina_access_token cookie."
     });
   }
 
-  const sessionId = extractSessionId(req.headers["x-session-id"]);
-  if (!sessionId) {
+  const sessionIdHeader = extractSessionId(req.headers["x-session-id"]);
+  const sessionIdCookie = extractCookieToken(req.headers.cookie, "kiamina_session_id");
+  const sessionId = sessionIdHeader || sessionIdCookie || "";
+  if (!sessionId && idToken && !accessToken) {
     return res.status(401).json({
-      message: "Missing x-session-id header for authenticated request."
+      message: "Missing x-session-id header or kiamina_session_id cookie for authenticated request."
     });
   }
 
   try {
     const response = await verifyTokenWithAuthService({
       idToken,
+      accessToken,
       sessionId,
       requestId: req.id
     });
@@ -136,7 +187,7 @@ export const authGuardMiddleware = async (req, res, next) => {
       uid: identity.uid,
       email: identity.email || "",
       emailVerified: Boolean(identity.emailVerified),
-      sessionId,
+      sessionId: identity.sessionId || sessionId || "",
       roles: normalizeRoles(identity.roles)
     };
 

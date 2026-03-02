@@ -17,6 +17,7 @@ import {
   AdminActivityLogPage,
 } from './AdminViews'
 import AdminSettingsPage from './settings/AdminSettingsPage'
+import AdminInsightsPage from './insights/AdminInsightsPage'
 import { ADMIN_DEFAULT_PAGE } from './adminConfig'
 import { isOwnerAdminLevel } from './adminIdentity'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
@@ -217,6 +218,7 @@ function AdminWorkspace({
     { id: 'search-admin-documents', label: 'Document Review Center', description: 'Approve, reject, and request information', pageId: 'admin-documents', keywords: ['documents', 'review', 'approve', 'reject', 'pending'] },
     { id: 'search-admin-leads', label: 'Leads', description: 'Lead registry from support chat', pageId: 'admin-leads', keywords: ['leads', 'prospects', 'support', 'inquiries'] },
     { id: 'search-admin-trash', label: 'Trash', description: 'Restore deleted items or empty trash', pageId: 'admin-trash', keywords: ['trash', 'restore', 'deleted', 'recycle bin'] },
+    { id: 'search-admin-insights', label: 'Insights Publishing', description: 'Upload and manage website insight articles', pageId: 'admin-insights', keywords: ['insights', 'article', 'publish', 'thought leadership'] },
     { id: 'search-admin-communications', label: 'Communications Center', description: 'Conversation and communication tools', pageId: 'admin-communications', keywords: ['communications', 'messages', 'broadcast'] },
     { id: 'search-admin-notifications', label: 'Send Notification', description: 'Send bulk or targeted notifications', pageId: 'admin-notifications', keywords: ['notification', 'bulk', 'targeted', 'send'] },
     { id: 'search-admin-work-hours', label: 'Work Hours', description: 'Admin time clock and daily hour tracking', pageId: 'admin-work-hours', keywords: ['work hours', 'clock in', 'clock out', 'timesheet'] },
@@ -613,6 +615,14 @@ function AdminWorkspace({
         return <AdminSendNotificationPage showToast={showToast} runWithSlowRuntimeWatch={runWithSlowRuntimeWatch} />
       case 'admin-work-hours':
         return <AdminWorkHoursPage currentAdminAccount={currentAdminAccount} />
+      case 'admin-insights':
+        return (
+          <AdminInsightsPage
+            showToast={showToast}
+            currentAdminAccount={currentAdminAccount}
+            onAdminActionLog={onAdminActionLog}
+          />
+        )
       case 'admin-activity':
         return <AdminActivityLogPage currentAdminAccount={currentAdminAccount} />
       case 'admin-trash':

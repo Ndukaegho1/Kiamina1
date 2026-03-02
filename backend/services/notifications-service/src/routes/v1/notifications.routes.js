@@ -9,6 +9,7 @@ import {
 import supportRoutes from "./support.routes.js";
 import chatbotRoutes from "./chatbot.routes.js";
 import knowledgeBaseRoutes from "./knowledge-base.routes.js";
+import insightsRoutes from "./insights.routes.js";
 
 const router = express.Router();
 
@@ -20,5 +21,6 @@ router.delete("/logs/:id", deleteLog);
 router.use("/support", supportRoutes);
 router.use("/chatbot", chatbotRoutes);
 router.use("/knowledge-base", knowledgeBaseRoutes);
+router.use("/insights", insightsRoutes);
 
 export default router;

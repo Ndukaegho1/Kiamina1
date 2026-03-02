@@ -109,7 +109,7 @@ function useClientSupportSession({
 
   useEffect(() => {
     if (!autoInitialize || !normalizedEmail) return
-    ensureClientSupportThread({
+    void ensureClientSupportThread({
       clientEmail: normalizedEmail,
       clientName: normalizedName,
       businessName: normalizedBusinessName,
@@ -433,15 +433,15 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
   useEffect(() => {
     if (!canCompose) return
     if (embedded && !isOpen) return
-    support.ensureThread()
+    void support.ensureThread()
   }, [canCompose, embedded, isOpen, nowMs])
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!canCompose) {
       setComposerError('Support session is still initializing. Please wait a moment and try again.')
       return
     }
-    const result = support.sendMessage({
+    const result = await support.sendMessage({
       text: draftMessage.trim(),
       attachments: composerAttachments,
     })
@@ -474,12 +474,12 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
     })
   }
 
-  const handleStartNewChat = () => {
+  const handleStartNewChat = async () => {
     if (!canCompose) {
       setComposerError('Support session is still initializing. Please wait a moment and try again.')
       return
     }
-    const result = support.startNewChat()
+    const result = await support.startNewChat()
     if (!result.ok) {
       setComposerError(result.message || 'Unable to start a new chat right now.')
       return
@@ -487,6 +487,25 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
     setComposerError('')
     setDraftMessage('')
     setComposerAttachments([])
+  }
+
+  const handleRequestAgent = async () => {
+    if (!canCompose) return
+    const result = await support.requestAgent()
+    if (!result?.ok) {
+      setComposerError(result?.message || 'Unable to request a human agent right now.')
+      return
+    }
+    setComposerError('')
+  }
+
+  const handleRetryMessage = async (messageId = '') => {
+    const result = await support.retryMessage(messageId)
+    if (!result?.ok) {
+      setComposerError(result?.message || 'Unable to retry this message.')
+      return
+    }
+    setComposerError('')
   }
 
   useEffect(() => () => {
@@ -532,7 +551,7 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
       </div>
       <SupportMessagesList
         messages={messages}
-        onRetry={(messageId) => support.retryMessage(messageId)}
+        onRetry={(messageId) => void handleRetryMessage(messageId)}
         onPreviewAttachment={openAttachmentPreview}
         className={embedded ? 'h-[52vh] sm:h-[22rem]' : 'h-[56vh] sm:h-[420px]'}
       />
@@ -552,7 +571,7 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
                   </button>
                 ))}
                 {isSupportTicketActive(activeTicket) && (
-                  <button type="button" onClick={() => support.requestAgent()} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">
+                  <button type="button" onClick={() => void handleRequestAgent()} className="text-xs h-7 px-2.5 rounded border border-border bg-background text-text-secondary hover:text-text-primary">
                     Request Human Agent
                   </button>
                 )}
@@ -563,7 +582,7 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
               setDraftMessage={setDraftMessage}
               attachments={composerAttachments}
               setAttachments={setComposerAttachments}
-              onSend={handleSend}
+              onSend={() => void handleSend()}
               isSending={isSending || !canCompose}
               placeholder={activeTicket?.channel === 'human' ? 'Message support agent...' : 'Ask the support bot or type "agent"...'}
               attachmentOwnerEmail={effectiveClientEmail || defaultIdentityEmail}

@@ -82,7 +82,9 @@ Gateway auth policy:
   - `GET /api/v1/gateway/info`
   - `POST /api/v1/auth/register-account`
   - `POST /api/v1/auth/login-session`
+  - `POST /api/v1/auth/refresh-token`
   - `POST /api/v1/auth/send-otp`
+  - `POST /api/v1/auth/send-password-reset-link`
   - `POST /api/v1/auth/verify-otp`
   - `POST /api/v1/auth/verify-token`
 - Protected:
@@ -91,11 +93,23 @@ Gateway auth policy:
   - All `/api/v1/documents/*`
   - All `/api/v1/notifications/*`
 
-For protected routes send:
+For protected routes, bearer-token flow must send both:
 
 ```http
 Authorization: Bearer <firebase_id_token>
 ```
+
+and:
+
+```http
+x-session-id: <session_id>
+```
+
+Cookie-based auth is also supported if your frontend sends `credentials: "include"` and reuses cookies set by `POST /auth/login-session`:
+
+- `kiamina_access_token` (httpOnly)
+- `kiamina_refresh_token` (httpOnly)
+- `kiamina_session_id` (httpOnly)
 
 Gateway forwards verified identity to downstream services with:
 
@@ -121,8 +135,13 @@ Then call:
 
 - `POST /auth/register-account`
 - `POST /auth/login-session`
+- `POST /auth/logout-session`
+- `POST /auth/refresh-token`
 - `POST /auth/send-otp`
+- `POST /auth/send-password-reset-link`
 - `POST /auth/verify-otp`
+- `POST /auth/send-sms-otp`
+- `POST /auth/verify-sms-otp`
 - `POST /auth/verify-token`
 - `GET /users/me`
 - `PATCH /users/me/profile`
@@ -142,6 +161,30 @@ Then call:
 - `GET /documents/records/reports/cashflow`
 - `POST /notifications/send-email`
 - `GET /notifications/logs`
+- `POST /notifications/support/tickets`
+- `GET /notifications/support/tickets`
+- `GET /notifications/support/tickets/:ticketId`
+- `PATCH /notifications/support/tickets/:ticketId`
+- `GET /notifications/support/tickets/:ticketId/messages`
+- `POST /notifications/support/tickets/:ticketId/messages`
+- `POST /notifications/chatbot/sessions`
+- `GET /notifications/chatbot/sessions`
+- `GET /notifications/chatbot/sessions/:sessionId`
+- `GET /notifications/chatbot/sessions/:sessionId/messages`
+- `POST /notifications/chatbot/sessions/:sessionId/messages`
+- `POST /notifications/chatbot/sessions/:sessionId/escalate`
+- `GET /notifications/knowledge-base/articles`
+- `GET /notifications/knowledge-base/articles/:articleId`
+- `GET /notifications/knowledge-base/articles/search`
+- `POST /notifications/knowledge-base/articles` (admin only)
+- `PATCH /notifications/knowledge-base/articles/:articleId` (admin only)
+- `DELETE /notifications/knowledge-base/articles/:articleId` (admin only)
+
+Postman contract notes:
+
+- Import `backend/postman/kiamina-microservices.collection.json`
+- Import `backend/postman/local.environment.json`
+- Set `idToken` and `sessionId` environment variables for protected requests
 
 ## New environment variables
 
@@ -163,3 +206,19 @@ Notifications service:
 - `SMTP_PASS`
 - `SMTP_FROM_EMAIL`
 - `SMTP_FROM_NAME`
+
+Auth service:
+
+- `SMS_OTP_EXPIRY_MINUTES`
+- `SMS_OTP_MAX_ATTEMPTS`
+- `AUTH_TOKEN_SECRET`
+- `ACCESS_TOKEN_TTL_MINUTES`
+- `REFRESH_TOKEN_TTL_DAYS`
+- `AUTH_COOKIE_DOMAIN`
+- `NOTIFICATIONS_SERVICE_URL`
+- `NOTIFICATIONS_SERVICE_TIMEOUT_MS`
+
+API gateway:
+
+- `RESPONSE_CACHE_TTL_SECONDS`
+- `RESPONSE_CACHE_MAX_BODY_BYTES`

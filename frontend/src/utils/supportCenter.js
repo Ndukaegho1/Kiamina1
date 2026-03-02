@@ -1,7 +1,12 @@
+import { apiFetch } from './apiClient'
+
 const SUPPORT_TICKETS_STORAGE_KEY = 'kiaminaSupportTickets'
 const SUPPORT_LEADS_STORAGE_KEY = 'kiaminaSupportLeads'
 const SUPPORT_LEAD_SEQUENCE_STORAGE_KEY = 'kiaminaSupportLeadSequence'
 const SUPPORT_ANON_LEAD_SESSION_STORAGE_KEY = 'kiaminaSupportAnonLeadSession'
+const SUPPORT_CLIENT_READ_STORAGE_KEY = 'kiaminaSupportReadByClient'
+const SUPPORT_ADMIN_READ_STORAGE_KEY = 'kiaminaSupportReadByAdmin'
+const SUPPORT_ASSIGNED_ADMIN_META_STORAGE_KEY = 'kiaminaSupportAssignedAdminMeta'
 const AGENT_REQUEST_PATTERN = /(agent|human|person|representative|support team)/i
 const MESSAGE_FAIL_PROBABILITY = 0.12
 const SUPPORT_COMPANY_NAME = 'Kiamina Accounting Services'
@@ -1323,18 +1328,426 @@ export const subscribeSupportCenter = (listener) => {
   if (typeof listener !== 'function') return () => {}
   listenerSet.add(listener)
   listener(toSnapshot())
+  void refreshSupportStateFromBackend()
   return () => {
     listenerSet.delete(listener)
   }
 }
 
-export const ensureClientSupportThread = ({
+let backendRefreshPromise = null
+let cachedKnowledgeBaseHint = ''
+
+const readIsoMapFromStorage = (storageKey) => {
+  if (typeof localStorage === 'undefined') return {}
+  const parsed = safeParseJson(localStorage.getItem(storageKey), {})
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  return Object.entries(parsed).reduce((accumulator, [key, value]) => {
+    const normalizedKey = toTrimmedValue(key)
+    const normalizedValue = toTrimmedValue(value)
+    if (!normalizedKey || !normalizedValue) return accumulator
+    accumulator[normalizedKey] = normalizedValue
+    return accumulator
+  }, {})
+}
+
+const persistIsoMapToStorage = (storageKey, payload = {}) => {
+  if (typeof localStorage === 'undefined') return
+  localStorage.setItem(storageKey, JSON.stringify(payload && typeof payload === 'object' ? payload : {}))
+}
+
+const readAssignedAdminMetaMap = () => {
+  if (typeof localStorage === 'undefined') return {}
+  const parsed = safeParseJson(localStorage.getItem(SUPPORT_ASSIGNED_ADMIN_META_STORAGE_KEY), {})
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+  return parsed
+}
+
+const persistAssignedAdminMetaMap = (payload = {}) => {
+  if (typeof localStorage === 'undefined') return
+  localStorage.setItem(SUPPORT_ASSIGNED_ADMIN_META_STORAGE_KEY, JSON.stringify(payload && typeof payload === 'object' ? payload : {}))
+}
+
+const getStoredAuthUserForSupport = () => {
+  if (typeof window === 'undefined') return null
+  const sessionUser = safeParseJson(window.sessionStorage.getItem('kiaminaAuthUser'), null)
+  if (sessionUser && typeof sessionUser === 'object') return sessionUser
+  const localUser = safeParseJson(window.localStorage.getItem('kiaminaAuthUser'), null)
+  if (localUser && typeof localUser === 'object') return localUser
+  return null
+}
+
+const isBackendSupportAvailable = () => {
+  const authUser = getStoredAuthUserForSupport()
+  return Boolean(toTrimmedValue(authUser?.email))
+}
+
+const isBackendAdminActor = () => {
+  const authUser = getStoredAuthUserForSupport()
+  const normalizedRole = toTrimmedValue(authUser?.role).toLowerCase()
+  return normalizedRole === 'admin' || normalizedRole === 'owner' || normalizedRole === 'superadmin' || normalizedRole === 'manager'
+}
+
+const getActorIdentity = () => {
+  const authUser = getStoredAuthUserForSupport() || {}
+  return {
+    uid: toTrimmedValue(authUser.uid),
+    email: toEmail(authUser.email),
+    fullName: toTrimmedValue(authUser.fullName) || 'Client User',
+  }
+}
+
+const hasApiCapabilities = () => typeof fetch === 'function'
+
+const requestJson = async (path, options = {}) => {
+  if (!hasApiCapabilities()) {
+    return { ok: false, status: 0, data: null, message: 'Network API unavailable.' }
+  }
+  try {
+    const response = await apiFetch(path, options)
+    const data = await response.json().catch(() => null)
+    return { ok: response.ok, status: response.status, data, message: toTrimmedValue(data?.message) }
+  } catch (error) {
+    return { ok: false, status: 0, data: null, message: String(error?.message || 'Network request failed.') }
+  }
+}
+
+const mapBackendSupportStatusToLocal = (status = '') => {
+  const normalized = toTrimmedValue(status).toLowerCase()
+  if (normalized === 'resolved' || normalized === 'closed') return SUPPORT_TICKET_STATUS.RESOLVED
+  if (normalized === 'in-progress' || normalized === 'waiting-user') return SUPPORT_TICKET_STATUS.ASSIGNED
+  return SUPPORT_TICKET_STATUS.OPEN
+}
+
+const mapBackendSupportChannelToLocal = ({ status = '', channel = '' } = {}) => {
+  const localStatus = mapBackendSupportStatusToLocal(status)
+  if (localStatus === SUPPORT_TICKET_STATUS.RESOLVED) return SUPPORT_CHANNEL.HUMAN
+  const normalizedChannel = toTrimmedValue(channel).toLowerCase()
+  if (normalizedChannel === 'chatbot') return SUPPORT_CHANNEL.BOT
+  if (localStatus === SUPPORT_TICKET_STATUS.ASSIGNED) return SUPPORT_CHANNEL.HUMAN
+  return SUPPORT_CHANNEL.BOT
+}
+
+const mapBackendSupportSender = (senderType = '') => {
+  const normalized = toTrimmedValue(senderType).toLowerCase()
+  if (normalized === 'agent') return SUPPORT_SENDER.AGENT
+  if (normalized === 'user') return SUPPORT_SENDER.CLIENT
+  return SUPPORT_SENDER.SYSTEM
+}
+
+const mapBackendChatSender = (role = '') => {
+  const normalized = toTrimmedValue(role).toLowerCase()
+  if (normalized === 'assistant') return SUPPORT_SENDER.BOT
+  if (normalized === 'user') return SUPPORT_SENDER.CLIENT
+  return SUPPORT_SENDER.SYSTEM
+}
+
+const toOutgoingSupportAttachments = (attachments = []) => (
+  (Array.isArray(attachments) ? attachments : []).map((attachment) => ({
+    name: toTrimmedValue(attachment?.name) || 'attachment',
+    url: '',
+    contentType: toTrimmedValue(attachment?.type),
+    size: Number.isFinite(Number(attachment?.size)) ? Number(attachment.size) : 0,
+  }))
+)
+
+const mapSupportMessagesFromBackend = (messages = []) => (
+  (Array.isArray(messages) ? messages : []).map((entry, index) => normalizeMessage({
+    id: toTrimmedValue(entry?.id || entry?._id) || createId(`MSGSUP${index}`),
+    sender: mapBackendSupportSender(entry?.senderType),
+    senderName: toTrimmedValue(entry?.senderDisplayName) || (entry?.senderType === 'agent' ? 'Support Agent' : ''),
+    text: String(entry?.content || ''),
+    createdAtIso: toTrimmedValue(entry?.createdAt) || toTrimmedValue(entry?.updatedAt) || nowIso(),
+    deliveryStatus: SUPPORT_MESSAGE_STATUS.SENT,
+    deliveryError: '',
+    retryCount: 0,
+    attachments: (Array.isArray(entry?.attachments) ? entry.attachments : []).map((attachment, attachmentIndex) => normalizeAttachment({
+      id: toTrimmedValue(attachment?.id) || createId(`ATTSUP${attachmentIndex}`),
+      name: toTrimmedValue(attachment?.name),
+      type: toTrimmedValue(attachment?.contentType),
+      size: Number.isFinite(Number(attachment?.size)) ? Number(attachment.size) : 0,
+      cacheKey: '',
+      previewDataUrl: '',
+    }, attachmentIndex)),
+  }, index))
+)
+
+const mapChatMessagesFromBackend = (messages = [], { sessionId = '' } = {}) => {
+  const normalizedMessages = (Array.isArray(messages) ? messages : []).map((entry, index) => normalizeMessage({
+    id: toTrimmedValue(entry?.id || entry?._id) || createId(`MSGCHAT${index}`),
+    sender: mapBackendChatSender(entry?.role),
+    senderName: mapBackendChatSender(entry?.role) === SUPPORT_SENDER.BOT ? 'Kiamina Support Bot' : '',
+    text: String(entry?.content || ''),
+    createdAtIso: toTrimmedValue(entry?.createdAt) || toTrimmedValue(entry?.updatedAt) || nowIso(),
+    deliveryStatus: SUPPORT_MESSAGE_STATUS.SENT,
+    deliveryError: '',
+    retryCount: 0,
+    attachments: [],
+  }, index))
+  if (normalizedMessages.length > 0) return normalizedMessages
+  return [normalizeMessage({
+    id: `${sessionId || createId('CHAT')}-WELCOME`,
+    sender: SUPPORT_SENDER.BOT,
+    senderName: 'Kiamina Support Bot',
+    text: cachedKnowledgeBaseHint || BOT_WELCOME_TEXT,
+    createdAtIso: nowIso(),
+    deliveryStatus: SUPPORT_MESSAGE_STATUS.SENT,
+    attachments: [],
+  })]
+}
+
+const applyLeadMetadataToTicket = (ticket = {}) => {
+  const lead = getLeadByClientEmail(supportState.leads, ticket.clientEmail)
+  if (!lead) return ticket
+  return normalizeTicket({
+    ...ticket,
+    isLead: true,
+    leadId: lead.id,
+    leadLabel: lead.leadLabel,
+    leadFullName: lead.fullName,
+    leadContactEmail: lead.contactEmail,
+    leadOrganizationType: lead.organizationType,
+    leadCategory: lead.leadCategory,
+    leadCategories: lead.leadCategories,
+    leadInquiryText: lead.inquiryText,
+    leadIntakeStage: lead.intakeStage,
+    leadIpAddress: lead.ipAddress,
+    leadLocation: lead.location,
+    clientName: lead.leadLabel || ticket.clientName,
+  })
+}
+
+const computeUnreadCount = ({
+  messages = [],
+  senderAllowList = [],
+  sinceIso = '',
+} = {}) => {
+  const sinceMs = Date.parse(sinceIso || '')
+  return (Array.isArray(messages) ? messages : []).reduce((count, message) => {
+    if (!senderAllowList.includes(message.sender)) return count
+    const messageMs = Date.parse(message.createdAtIso || '')
+    if (Number.isFinite(sinceMs) && Number.isFinite(messageMs) && messageMs <= sinceMs) return count
+    return count + 1
+  }, 0)
+}
+
+const withComputedUnreadCounts = (ticket = {}) => {
+  const clientReadMap = readIsoMapFromStorage(SUPPORT_CLIENT_READ_STORAGE_KEY)
+  const adminReadMap = readIsoMapFromStorage(SUPPORT_ADMIN_READ_STORAGE_KEY)
+  const clientReadAtIso = toTrimmedValue(clientReadMap[ticket.id] || '')
+  const adminReadAtIso = toTrimmedValue(adminReadMap[ticket.id] || '')
+  const messages = Array.isArray(ticket.messages) ? ticket.messages : []
+  return {
+    ...ticket,
+    unreadByClient: computeUnreadCount({
+      messages,
+      senderAllowList: [SUPPORT_SENDER.AGENT, SUPPORT_SENDER.BOT, SUPPORT_SENDER.SYSTEM],
+      sinceIso: clientReadAtIso,
+    }),
+    unreadByAdmin: computeUnreadCount({
+      messages,
+      senderAllowList: [SUPPORT_SENDER.CLIENT],
+      sinceIso: adminReadAtIso,
+    }),
+  }
+}
+
+const refreshKnowledgeBaseHint = async () => {
+  const response = await requestJson('/api/notifications/knowledge-base/articles/search?q=support&limit=1')
+  if (!response.ok || !Array.isArray(response.data) || response.data.length === 0) return
+  const first = response.data[0] || {}
+  const title = toTrimmedValue(first.title)
+  const summary = toTrimmedValue(first.summary)
+  if (!title && !summary) return
+  cachedKnowledgeBaseHint = title && summary
+    ? `Tip from Knowledge Base: ${title}. ${summary}`
+    : `Tip from Knowledge Base: ${title || summary}`
+}
+
+const refreshSupportStateFromBackend = async () => {
+  if (!isBackendSupportAvailable()) return { ok: false, message: 'Backend support unavailable for anonymous session.' }
+  if (backendRefreshPromise) return backendRefreshPromise
+
+  backendRefreshPromise = (async () => {
+    const adminActor = isBackendAdminActor()
+    const actor = getActorIdentity()
+    const assignedAdminMeta = readAssignedAdminMetaMap()
+
+    const ticketListResponse = await requestJson(`/api/notifications/support/tickets?scope=${adminActor ? 'all' : 'own'}&limit=100`)
+    if (!ticketListResponse.ok || !Array.isArray(ticketListResponse.data)) {
+      return { ok: false, message: ticketListResponse.message || 'Unable to load support tickets.' }
+    }
+
+    const supportTicketRecords = ticketListResponse.data
+    const supportMessageResponses = await Promise.all(supportTicketRecords.map((ticket) => (
+      requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticket.ticketId)}/messages?limit=200`)
+    )))
+
+    const mappedSupportTickets = supportTicketRecords.map((ticket, index) => {
+      const messages = mapSupportMessagesFromBackend(supportMessageResponses[index]?.data)
+      const assignmentMeta = assignedAdminMeta[ticket.ticketId] || {}
+      const assignedAdminName = (
+        toTrimmedValue(ticket.assignedAdminName)
+        || toTrimmedValue(assignmentMeta.name)
+        || (toTrimmedValue(ticket.assignedToUid) === actor.uid ? actor.fullName : '')
+      )
+      const assignedAdminEmail = (
+        toEmail(ticket.assignedAdminEmail)
+        || toEmail(assignmentMeta.email)
+        || (toTrimmedValue(ticket.assignedToUid) === actor.uid ? actor.email : '')
+      )
+      return normalizeTicket({
+        id: ticket.ticketId,
+        clientEmail: toEmail(ticket.ownerEmail),
+        clientName: toTrimmedValue(ticket.ownerEmail) || 'Client User',
+        businessName: '',
+        status: mapBackendSupportStatusToLocal(ticket.status),
+        channel: mapBackendSupportChannelToLocal({ status: ticket.status, channel: ticket.channel }),
+        createdAtIso: toTrimmedValue(ticket.openedAt) || toTrimmedValue(ticket.createdAt) || nowIso(),
+        updatedAtIso: toTrimmedValue(ticket.updatedAt) || toTrimmedValue(ticket.lastMessageAt) || nowIso(),
+        assignedAdminName,
+        assignedAdminEmail,
+        unreadByClient: 0,
+        unreadByAdmin: 0,
+        slaDueAtIso: '',
+        resolvedAtIso: toTrimmedValue(ticket.resolvedAt),
+        isLead: false,
+        leadId: '',
+        leadLabel: '',
+        leadFullName: '',
+        leadContactEmail: '',
+        leadOrganizationType: '',
+        leadCategory: LEAD_CATEGORY.GENERAL,
+        leadCategories: [],
+        leadInquiryText: '',
+        leadIntakeStage: LEAD_INTAKE_STAGE.COMPLETE,
+        leadIpAddress: '',
+        leadLocation: '',
+        messages,
+      })
+    })
+
+    let mappedChatTickets = []
+    if (!adminActor) {
+      await refreshKnowledgeBaseHint()
+      const chatSessionsResponse = await requestJson('/api/notifications/chatbot/sessions?scope=own&limit=30')
+      const chatSessions = Array.isArray(chatSessionsResponse.data) ? chatSessionsResponse.data : []
+      const chatMessageResponses = await Promise.all(chatSessions.map((session) => (
+        requestJson(`/api/notifications/chatbot/sessions/${encodeURIComponent(session.sessionId)}/messages?limit=200`)
+      )))
+      mappedChatTickets = chatSessions
+        .filter((session) => !toTrimmedValue(session.escalatedToTicketId))
+        .map((session, index) => normalizeTicket({
+          id: session.sessionId,
+          clientEmail: toEmail(session.ownerEmail) || actor.email,
+          clientName: actor.fullName,
+          businessName: '',
+          status: session.status === 'active' ? SUPPORT_TICKET_STATUS.OPEN : SUPPORT_TICKET_STATUS.RESOLVED,
+          channel: SUPPORT_CHANNEL.BOT,
+          createdAtIso: toTrimmedValue(session.startedAt) || toTrimmedValue(session.createdAt) || nowIso(),
+          updatedAtIso: toTrimmedValue(session.lastMessageAt) || toTrimmedValue(session.updatedAt) || nowIso(),
+          assignedAdminName: '',
+          assignedAdminEmail: '',
+          unreadByClient: 0,
+          unreadByAdmin: 0,
+          slaDueAtIso: '',
+          resolvedAtIso: toTrimmedValue(session.endedAt),
+          isLead: false,
+          leadId: '',
+          leadLabel: '',
+          leadFullName: '',
+          leadContactEmail: '',
+          leadOrganizationType: '',
+          leadCategory: LEAD_CATEGORY.GENERAL,
+          leadCategories: [],
+          leadInquiryText: '',
+          leadIntakeStage: LEAD_INTAKE_STAGE.COMPLETE,
+          leadIpAddress: '',
+          leadLocation: '',
+          messages: mapChatMessagesFromBackend(chatMessageResponses[index]?.data, { sessionId: session.sessionId }),
+        }))
+    }
+
+    const localLeadTickets = supportState.tickets.filter((ticket) => {
+      const email = toEmail(ticket.clientEmail)
+      return email && LEAD_EMAIL_PATTERN.test(email)
+    })
+    const combinedTickets = sortTickets([
+      ...mappedSupportTickets,
+      ...mappedChatTickets,
+      ...localLeadTickets.filter((ticket) => (
+        !mappedSupportTickets.some((backendTicket) => backendTicket.id === ticket.id)
+        && !mappedChatTickets.some((backendTicket) => backendTicket.id === ticket.id)
+      )),
+    ])
+      .map((ticket) => applyLeadMetadataToTicket(ticket))
+      .map((ticket) => withComputedUnreadCounts(ticket))
+
+    supportState = {
+      ...supportState,
+      tickets: combinedTickets,
+    }
+    persistSupportTickets(combinedTickets)
+    emitSupportState()
+    return { ok: true, ticketCount: combinedTickets.length }
+  })()
+    .finally(() => {
+      backendRefreshPromise = null
+    })
+
+  return backendRefreshPromise
+}
+
+const ensureBackendChatSession = async ({
+  clientEmail = '',
+  clientName = 'Client User',
+  businessName = '',
+  reuseActive = true,
+} = {}) => {
+  const normalizedEmail = toEmail(clientEmail)
+  const response = await requestJson('/api/notifications/chatbot/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      channel: 'web',
+      reuseActive,
+      context: {
+        clientEmail: normalizedEmail,
+        clientName: toTrimmedValue(clientName),
+        businessName: toTrimmedValue(businessName),
+      },
+    }),
+  })
+  if (!response.ok) {
+    return { ok: false, message: response.message || 'Unable to initialize chatbot session.' }
+  }
+  const sessionId = toTrimmedValue(response?.data?.session?.sessionId)
+  if (!sessionId) {
+    return { ok: false, message: 'Chatbot session response is invalid.' }
+  }
+  return { ok: true, sessionId, session: response.data.session }
+}
+
+export const ensureClientSupportThread = async ({
   clientEmail = '',
   clientName = 'Client User',
   businessName = '',
 } = {}) => {
   const normalizedEmail = toEmail(clientEmail)
   if (!normalizedEmail) return { ok: false, message: 'Client email is required.' }
+
+  if (isBackendSupportAvailable()) {
+    const sessionResult = await ensureBackendChatSession({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      reuseActive: true,
+    })
+    if (sessionResult.ok) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId: sessionResult.sessionId }
+    }
+  }
+
   let ticketId = ''
   updateSupportTickets((tickets) => {
     const result = ensureClientTicket({
@@ -1355,13 +1768,27 @@ export const ensureClientSupportThread = ({
   return { ok: Boolean(ticketId), ticketId }
 }
 
-export const startNewClientSupportThread = ({
+export const startNewClientSupportThread = async ({
   clientEmail = '',
   clientName = 'Client User',
   businessName = '',
 } = {}) => {
   const normalizedEmail = toEmail(clientEmail)
   if (!normalizedEmail) return { ok: false, message: 'Client email is required.' }
+
+  if (isBackendSupportAvailable()) {
+    const sessionResult = await ensureBackendChatSession({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      reuseActive: false,
+    })
+    if (sessionResult.ok) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId: sessionResult.sessionId }
+    }
+  }
+
   let ticketId = ''
   updateSupportTickets((tickets) => {
     const autoClosedTickets = tickets.map((ticket) => {
@@ -1401,13 +1828,53 @@ export const startNewClientSupportThread = ({
   return { ok: Boolean(ticketId), ticketId }
 }
 
-export const requestHumanSupport = ({
+export const requestHumanSupport = async ({
   clientEmail = '',
   clientName = 'Client User',
   businessName = '',
   ticketId = '',
 } = {}) => {
   const normalizedEmail = toEmail(clientEmail)
+
+  if (isBackendSupportAvailable()) {
+    const normalizedTicketId = toTrimmedValue(ticketId)
+    const selectedTicket = normalizedTicketId ? getTicketById(supportState.tickets, normalizedTicketId) : null
+    const fallbackSessionResult = await ensureBackendChatSession({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      reuseActive: true,
+    })
+    const sessionId = (
+      (selectedTicket?.channel === SUPPORT_CHANNEL.BOT ? selectedTicket.id : '')
+      || (normalizedTicketId.startsWith('chat_') ? normalizedTicketId : '')
+      || (fallbackSessionResult.ok ? fallbackSessionResult.sessionId : '')
+    )
+
+    if (sessionId) {
+      const latestClientMessage = (Array.isArray(selectedTicket?.messages) ? selectedTicket.messages : [])
+        .filter((message) => message.sender === SUPPORT_SENDER.CLIENT)
+        .slice(-1)[0]
+      const escalateResponse = await requestJson(`/api/notifications/chatbot/sessions/${encodeURIComponent(sessionId)}/escalate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject: `Support request from ${toTrimmedValue(clientName) || 'Client User'}`,
+          summary: toTrimmedValue(latestClientMessage?.text) || `Escalation request for ${normalizedEmail || 'client account'}.`,
+          priority: 'medium',
+        }),
+      })
+
+      if (escalateResponse.ok) {
+        await refreshSupportStateFromBackend()
+        return {
+          ok: true,
+          ticketId: toTrimmedValue(escalateResponse?.data?.ticketId) || ticketId,
+        }
+      }
+    }
+  }
+
   let nextTicketId = ticketId
   updateSupportTickets((tickets) => {
     let workingTickets = tickets
@@ -1668,7 +2135,7 @@ const handleLeadIntakeOnDeliveredMessage = ({
   return { handled: false }
 }
 
-export const sendClientSupportMessage = ({
+export const sendClientSupportMessage = async ({
   clientEmail = '',
   clientName = 'Client User',
   businessName = '',
@@ -1680,6 +2147,89 @@ export const sendClientSupportMessage = ({
   const normalizedAttachments = (Array.isArray(attachments) ? attachments : []).map((attachment, index) => normalizeAttachment(attachment, index))
   if (!normalizedEmail) return { ok: false, message: 'Client email is required.' }
   if (!toTrimmedValue(messageText) && normalizedAttachments.length === 0) return { ok: false, message: 'Message cannot be empty.' }
+
+  if (isBackendSupportAvailable()) {
+    if (normalizedAttachments.length > 0) {
+      const activeSupportTicket = supportState.tickets.find((ticket) => (
+        ticket.clientEmail === normalizedEmail
+        && ticket.status !== SUPPORT_TICKET_STATUS.RESOLVED
+        && !toTrimmedValue(ticket.id).startsWith('chat_')
+      ))
+      let supportTicketId = toTrimmedValue(activeSupportTicket?.id)
+
+      if (!supportTicketId) {
+        const createTicketResponse = await requestJson('/api/notifications/support/tickets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            subject: toTrimmedValue(messageText).slice(0, 180) || 'Support request with attachment',
+            description: '',
+            priority: 'medium',
+            channel: 'web',
+            tags: ['attachment'],
+          }),
+        })
+        if (createTicketResponse.ok) {
+          supportTicketId = toTrimmedValue(createTicketResponse?.data?.ticket?.ticketId)
+        }
+      }
+
+      if (supportTicketId) {
+        const attachmentMessageResponse = await requestJson(`/api/notifications/support/tickets/${encodeURIComponent(supportTicketId)}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: toTrimmedValue(messageText) || 'Attachment uploaded by client.',
+            senderDisplayName: toTrimmedValue(clientName) || 'Client User',
+            visibility: 'public',
+            attachments: toOutgoingSupportAttachments(normalizedAttachments),
+          }),
+        })
+        if (attachmentMessageResponse.ok) {
+          await refreshSupportStateFromBackend()
+          return {
+            ok: true,
+            ticketId: supportTicketId,
+            messageId: toTrimmedValue(attachmentMessageResponse?.data?.data?.id || attachmentMessageResponse?.data?.data?._id),
+          }
+        }
+      }
+    } else {
+      const sessionResult = await ensureBackendChatSession({
+        clientEmail: normalizedEmail,
+        clientName,
+        businessName,
+        reuseActive: true,
+      })
+      if (sessionResult.ok) {
+        const chatMessageResponse = await requestJson(`/api/notifications/chatbot/sessions/${encodeURIComponent(sessionResult.sessionId)}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: toTrimmedValue(messageText),
+            includeCitations: true,
+          }),
+        })
+        if (chatMessageResponse.ok) {
+          if (shouldRequestAgent(messageText)) {
+            await requestHumanSupport({
+              clientEmail: normalizedEmail,
+              clientName,
+              businessName,
+              ticketId: sessionResult.sessionId,
+            })
+          } else {
+            await refreshSupportStateFromBackend()
+          }
+          return {
+            ok: true,
+            ticketId: sessionResult.sessionId,
+            messageId: toTrimmedValue(chatMessageResponse?.data?.userMessage?.id || chatMessageResponse?.data?.userMessage?._id),
+          }
+        }
+      }
+    }
+  }
 
   let ticketId = ''
   let messageId = ''
@@ -1764,7 +2314,7 @@ export const sendClientSupportMessage = ({
   return { ok: true, ticketId, messageId }
 }
 
-export const sendAdminSupportMessage = ({
+export const sendAdminSupportMessage = async ({
   ticketId = '',
   adminName = '',
   adminEmail = '',
@@ -1775,6 +2325,42 @@ export const sendAdminSupportMessage = ({
   const normalizedAttachments = (Array.isArray(attachments) ? attachments : []).map((attachment, index) => normalizeAttachment(attachment, index))
   if (!toTrimmedValue(ticketId)) return { ok: false, message: 'Ticket is required.' }
   if (!toTrimmedValue(messageText) && normalizedAttachments.length === 0) return { ok: false, message: 'Reply cannot be empty.' }
+
+  if (isBackendSupportAvailable()) {
+    const actor = getActorIdentity()
+    await requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticketId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'in-progress',
+        assignedToUid: actor.uid,
+      }),
+    })
+    const response = await requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticketId)}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        content: messageText,
+        senderDisplayName: getAgentDisplayName(adminName, adminEmail),
+        visibility: 'public',
+        attachments: toOutgoingSupportAttachments(normalizedAttachments),
+      }),
+    })
+    if (response.ok) {
+      const assignedAdminMeta = readAssignedAdminMetaMap()
+      assignedAdminMeta[ticketId] = {
+        name: getAgentDisplayName(adminName, adminEmail),
+        email: toEmail(adminEmail) || actor.email,
+      }
+      persistAssignedAdminMetaMap(assignedAdminMeta)
+      await refreshSupportStateFromBackend()
+      return {
+        ok: true,
+        ticketId,
+        messageId: toTrimmedValue(response?.data?.data?.id || response?.data?.data?._id),
+      }
+    }
+  }
 
   let messageId = ''
   updateSupportTickets((tickets) => {
@@ -1826,12 +2412,17 @@ export const sendAdminSupportMessage = ({
   return { ok: true, ticketId, messageId }
 }
 
-export const retrySupportMessage = ({
+export const retrySupportMessage = async ({
   ticketId = '',
   messageId = '',
 } = {}) => {
   if (!toTrimmedValue(ticketId) || !toTrimmedValue(messageId)) {
     return { ok: false, message: 'Ticket and message are required.' }
+  }
+
+  if (isBackendSupportAvailable()) {
+    await refreshSupportStateFromBackend()
+    return { ok: false, message: 'Message retry is not required for delivered backend messages.' }
   }
 
   let queuedSender = SUPPORT_SENDER.CLIENT
@@ -1907,6 +2498,19 @@ export const retrySupportMessage = ({
 
 export const markSupportTicketReadByClient = (ticketId = '') => {
   if (!toTrimmedValue(ticketId)) return
+  const readMap = readIsoMapFromStorage(SUPPORT_CLIENT_READ_STORAGE_KEY)
+  readMap[ticketId] = nowIso()
+  persistIsoMapToStorage(SUPPORT_CLIENT_READ_STORAGE_KEY, readMap)
+
+  if (isBackendSupportAvailable()) {
+    updateSupportTickets((tickets) => (
+      tickets.map((ticket) => (
+        ticket.id === ticketId ? withComputedUnreadCounts(ticket) : ticket
+      ))
+    ))
+    return
+  }
+
   updateSupportTickets((tickets) => {
     const ticket = getTicketById(tickets, ticketId)
     if (!ticket) return tickets
@@ -1924,6 +2528,19 @@ export const markSupportTicketReadByClient = (ticketId = '') => {
 
 export const markSupportTicketReadByAdmin = (ticketId = '') => {
   if (!toTrimmedValue(ticketId)) return
+  const readMap = readIsoMapFromStorage(SUPPORT_ADMIN_READ_STORAGE_KEY)
+  readMap[ticketId] = nowIso()
+  persistIsoMapToStorage(SUPPORT_ADMIN_READ_STORAGE_KEY, readMap)
+
+  if (isBackendSupportAvailable()) {
+    updateSupportTickets((tickets) => (
+      tickets.map((ticket) => (
+        ticket.id === ticketId ? withComputedUnreadCounts(ticket) : ticket
+      ))
+    ))
+    return
+  }
+
   updateSupportTickets((tickets) => {
     const ticket = getTicketById(tickets, ticketId)
     if (!ticket) return tickets
@@ -1939,12 +2556,35 @@ export const markSupportTicketReadByAdmin = (ticketId = '') => {
   })
 }
 
-export const assignSupportTicket = ({
+export const assignSupportTicket = async ({
   ticketId = '',
   adminName = '',
   adminEmail = '',
 } = {}) => {
   if (!toTrimmedValue(ticketId)) return { ok: false, message: 'Ticket is required.' }
+
+  if (isBackendSupportAvailable()) {
+    const actor = getActorIdentity()
+    const response = await requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticketId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'in-progress',
+        assignedToUid: actor.uid,
+      }),
+    })
+    if (response.ok) {
+      const assignedAdminMeta = readAssignedAdminMetaMap()
+      assignedAdminMeta[ticketId] = {
+        name: getAgentDisplayName(adminName, adminEmail),
+        email: toEmail(adminEmail) || actor.email,
+      }
+      persistAssignedAdminMetaMap(assignedAdminMeta)
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId }
+    }
+  }
+
   let updated = false
   updateSupportTickets((tickets) => {
     const ticket = getTicketById(tickets, ticketId)
@@ -1985,11 +2625,26 @@ export const assignSupportTicket = ({
   return updated ? { ok: true, ticketId } : { ok: false, message: 'Unable to assign ticket.' }
 }
 
-export const resolveSupportTicket = ({
+export const resolveSupportTicket = async ({
   ticketId = '',
   adminName = '',
 } = {}) => {
   if (!toTrimmedValue(ticketId)) return { ok: false, message: 'Ticket is required.' }
+
+  if (isBackendSupportAvailable()) {
+    const response = await requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticketId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'resolved',
+      }),
+    })
+    if (response.ok) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId }
+    }
+  }
+
   let updated = false
   updateSupportTickets((tickets) => {
     const ticket = getTicketById(tickets, ticketId)
@@ -2017,11 +2672,26 @@ export const resolveSupportTicket = ({
   return updated ? { ok: true, ticketId } : { ok: false, message: 'Unable to resolve ticket.' }
 }
 
-export const reopenSupportTicket = ({
+export const reopenSupportTicket = async ({
   ticketId = '',
   adminName = '',
 } = {}) => {
   if (!toTrimmedValue(ticketId)) return { ok: false, message: 'Ticket is required.' }
+
+  if (isBackendSupportAvailable()) {
+    const response = await requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticketId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status: 'open',
+      }),
+    })
+    if (response.ok) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId }
+    }
+  }
+
   let updated = false
   updateSupportTickets((tickets) => {
     const ticket = getTicketById(tickets, ticketId)
@@ -2056,6 +2726,12 @@ supportState = {
 }
 updateLeadSequenceFromLeads(supportState.leads)
 bindStorageListener()
+if (typeof window !== 'undefined') {
+  window.addEventListener('focus', () => {
+    void refreshSupportStateFromBackend()
+  })
+}
+void refreshSupportStateFromBackend()
 
 export {
   SUPPORT_TICKETS_STORAGE_KEY,

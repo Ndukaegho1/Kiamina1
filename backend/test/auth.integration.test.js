@@ -26,6 +26,7 @@ test.before(async () => {
   process.env.MONGO_DB_NAME = "kiamina_auth_integration";
   process.env.FIREBASE_SERVICE_ACCOUNT_JSON = "";
   process.env.GOOGLE_APPLICATION_CREDENTIALS = "";
+  process.env.AUTH_TOKEN_SECRET = "test-auth-token-secret";
   process.env.MONGOMS_RUNTIME_DOWNLOAD = process.env.MONGOMS_RUNTIME_DOWNLOAD || "0";
 
   try {
@@ -78,6 +79,17 @@ test("auth integration: login-session and logout-session revoke lifecycle", asyn
   assert.equal(loginResponse.status, 201);
   assert.ok(loginResponse.body?.account?.uid);
   assert.ok(loginResponse.body?.session?.sessionId);
+  assert.ok(Array.isArray(loginResponse.headers["set-cookie"]));
+  assert.ok(
+    loginResponse.headers["set-cookie"].some((cookieValue) =>
+      cookieValue.startsWith("kiamina_access_token=")
+    )
+  );
+  assert.ok(
+    loginResponse.headers["set-cookie"].some((cookieValue) =>
+      cookieValue.startsWith("kiamina_refresh_token=")
+    )
+  );
 
   const uid = loginResponse.body.account.uid;
   const sessionId = loginResponse.body.session.sessionId;
@@ -107,6 +119,31 @@ test("auth integration: login-session and logout-session revoke lifecycle", asyn
 
   assert.equal(secondLogoutResponse.status, 200);
   assert.match(secondLogoutResponse.body?.message || "", /already revoked or expired/i);
+});
+
+test("auth integration: refresh-token rotates access and refresh cookies", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const agent = request.agent(app);
+
+  const loginResponse = await agent.post("/api/v1/auth/login-session").send({
+    email: "refresh@example.com",
+    role: "admin",
+    loginMethod: "password",
+    sessionTtlMinutes: 60
+  });
+
+  assert.equal(loginResponse.status, 201);
+
+  const refreshResponse = await agent.post("/api/v1/auth/refresh-token").send({});
+  assert.equal(refreshResponse.status, 200);
+  assert.match(refreshResponse.body?.message || "", /refreshed/i);
+  assert.ok(Array.isArray(refreshResponse.headers["set-cookie"]));
+  assert.ok(
+    refreshResponse.headers["set-cookie"].some((cookieValue) =>
+      cookieValue.startsWith("kiamina_access_token=")
+    )
+  );
 });
 
 test("auth integration: logout-session blocks revoking another user's session", async (t) => {

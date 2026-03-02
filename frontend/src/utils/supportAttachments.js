@@ -4,7 +4,7 @@ import {
   putCachedFileBlob,
 } from './fileCache'
 import JSZip from 'jszip'
-import * as XLSX from 'xlsx'
+import { parseFirstWorksheet } from './excelWorkbook'
 
 const MAX_INLINE_DATA_URL_BYTES = 2 * 1024 * 1024
 
@@ -158,21 +158,18 @@ export const getSupportAttachmentBlob = async (attachment = {}) => {
 
 const parseSpreadsheetPreview = async (blob) => {
   const arrayBuffer = await blob.arrayBuffer()
-  const workbook = XLSX.read(arrayBuffer, { type: 'array' })
-  const firstSheetName = workbook.SheetNames?.[0] || ''
-  if (!firstSheetName || !workbook.Sheets?.[firstSheetName]) {
+  const worksheetData = await parseFirstWorksheet(arrayBuffer, {
+    maxCollectedRows: 220,
+    maxCollectedColumns: 24,
+  })
+  if (!worksheetData.sheetName) {
     return {
       sheetName: '',
       rows: [],
       truncated: false,
     }
   }
-  const rawRows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], {
-    header: 1,
-    defval: '',
-    blankrows: false,
-  })
-  const normalizedRows = (Array.isArray(rawRows) ? rawRows : [])
+  const normalizedRows = (Array.isArray(worksheetData.rows) ? worksheetData.rows : [])
     .slice(0, 60)
     .map((row) => (
       Array.isArray(row)
@@ -180,9 +177,9 @@ const parseSpreadsheetPreview = async (blob) => {
         : [String(row ?? '')]
     ))
   return {
-    sheetName: firstSheetName,
+    sheetName: worksheetData.sheetName,
     rows: normalizedRows,
-    truncated: (Array.isArray(rawRows) ? rawRows.length : 0) > 60,
+    truncated: Boolean(worksheetData.sourceTruncated || worksheetData.totalRows > 60),
   }
 }
 

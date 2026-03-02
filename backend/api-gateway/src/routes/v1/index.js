@@ -2,6 +2,7 @@ import express from "express";
 import { createProxyMiddleware } from "http-proxy-middleware";
 import { env } from "../../config/env.js";
 import { authGuardMiddleware } from "../../middleware/auth-guard.js";
+import { responseCacheMiddleware } from "../../middleware/response-cache.js";
 
 const router = express.Router();
 
@@ -52,6 +53,7 @@ router.get("/gateway/info", (req, res) => {
 });
 
 router.use(authGuardMiddleware);
+router.use(responseCacheMiddleware);
 
 router.use("/auth", createDomainProxy(env.authServiceUrl, "/api/v1/auth"));
 router.use("/users", createDomainProxy(env.usersServiceUrl, "/api/v1/users"));

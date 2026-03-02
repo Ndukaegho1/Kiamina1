@@ -53,12 +53,12 @@ import {
 } from 'chart.js'
 import { Line, Bar } from 'react-chartjs-2'
 import JSZip from 'jszip'
-import * as XLSX from 'xlsx'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import KiaminaLogo from '../../common/KiaminaLogo'
 import { getCachedFileBlob } from '../../../utils/fileCache'
 import { buildClientDownloadFilename } from '../../../utils/downloadFilename'
+import { parseFirstWorksheet } from '../../../utils/excelWorkbook'
 import { ClientSupportPageExperience, ClientSupportWidgetExperience } from '../support/ClientSupportExperience'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
 import { registerNewsletterSubscriberLead } from '../../../utils/supportCenter'
@@ -3247,22 +3247,24 @@ function FileViewerModal({
 
         if (SPREADSHEET_PREVIEW_EXTENSIONS.has(ext)) {
           const buffer = await readPreviewArrayBuffer()
-          const workbook = XLSX.read(buffer, { type: 'array' })
-          const firstSheetName = workbook?.SheetNames?.[0]
-          const firstSheet = firstSheetName ? workbook.Sheets[firstSheetName] : null
-          if (!firstSheet) {
+          const worksheetData = await parseFirstWorksheet(buffer, {
+            maxCollectedRows: 1500,
+            maxCollectedColumns: 40,
+          })
+          if (!worksheetData.sheetName) {
             setIfActive(() => setPreviewMessage('No preview data found in this spreadsheet.'))
             return
           }
 
-          const rawRows = XLSX.utils.sheet_to_json(firstSheet, { header: 1, raw: false, blankrows: false })
-          const rows = Array.isArray(rawRows) ? rawRows.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '')) : [])) : []
+          const rows = Array.isArray(worksheetData.rows)
+            ? worksheetData.rows.map((row) => (Array.isArray(row) ? row.map((cell) => String(cell ?? '')) : []))
+            : []
           if (rows.length === 0) {
             setIfActive(() => setPreviewMessage('Spreadsheet is empty.'))
             return
           }
 
-          const maxColumns = Math.max(1, ...rows.map((row) => row.length))
+          const maxColumns = Math.max(1, Number(worksheetData.totalColumns || 0), ...rows.map((row) => row.length))
           const visibleRowCount = 60
           const visibleColumnCount = Math.min(16, maxColumns)
           const visibleRows = rows
@@ -3270,12 +3272,12 @@ function FileViewerModal({
             .map((row) => Array.from({ length: visibleColumnCount }, (_, columnIndex) => row[columnIndex] || ''))
 
           setIfActive(() => setTablePreview({
-            sheetName: firstSheetName || 'Sheet1',
+            sheetName: worksheetData.sheetName || 'Sheet1',
             rows: visibleRows,
-            totalRows: rows.length,
+            totalRows: Number(worksheetData.totalRows || rows.length),
             totalColumns: maxColumns,
-            truncatedRows: rows.length > visibleRowCount,
-            truncatedColumns: maxColumns > visibleColumnCount,
+            truncatedRows: Number(worksheetData.totalRows || rows.length) > visibleRowCount || Boolean(worksheetData.sourceTruncated),
+            truncatedColumns: maxColumns > visibleColumnCount || Boolean(worksheetData.sourceTruncated),
           }))
           return
         }

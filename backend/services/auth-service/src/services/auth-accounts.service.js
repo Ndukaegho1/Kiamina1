@@ -9,8 +9,10 @@ import {
   createAuthSession,
   findActiveAuthSessionBySessionId,
   findAuthSessionBySessionId,
-  revokeAuthSession
+  revokeAuthSession,
+  updateAuthSessionBySessionId
 } from "../repositories/auth-sessions.repository.js";
+import { compareRefreshTokenHash } from "./auth-tokens.service.js";
 
 const createNotFoundError = (message) => {
   const error = new Error(message);
@@ -205,5 +207,44 @@ export const revokeSessionForUid = async ({ sessionId, uid, reason = "logout" })
   return {
     session: revokedSession || session,
     revoked: Boolean(revokedSession)
+  };
+};
+
+export const refreshSessionTokenHash = async ({
+  sessionId,
+  refreshTokenHash,
+  nextRefreshTokenHash
+}) => {
+  const session = await findActiveAuthSessionBySessionId(sessionId);
+  if (!session) {
+    throw createUnauthorizedError("Session is invalid, revoked, or expired.");
+  }
+
+  if (!session.tokenHash) {
+    throw createUnauthorizedError("Refresh token is not configured for this session.");
+  }
+
+  const isMatchingRefreshToken = compareRefreshTokenHash({
+    storedHash: session.tokenHash,
+    incomingHash: refreshTokenHash
+  });
+
+  if (!isMatchingRefreshToken) {
+    throw createUnauthorizedError("Refresh token is invalid.");
+  }
+
+  const updatedSession = await updateAuthSessionBySessionId(sessionId, {
+    tokenHash: nextRefreshTokenHash,
+    issuedAt: new Date()
+  });
+
+  const account = await findAuthAccountByUid(session.uid);
+  if (!account) {
+    throw createNotFoundError("Account not found for active session.");
+  }
+
+  return {
+    account,
+    session: updatedSession || session
   };
 };

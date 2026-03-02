@@ -38,7 +38,7 @@ import {
 } from '../adminAssignments'
 import { getNetworkAwareDurationMs } from '../../../utils/networkRuntime'
 import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
-import { apiFetch, clearApiAccessToken } from '../../../utils/apiClient'
+import { apiFetch, clearApiAccessToken, clearApiSessionId } from '../../../utils/apiClient'
 import {
   DEFAULT_ADMIN_SECURITY_PREFERENCES,
   getAdminSecurityStorageKey,
@@ -2063,6 +2063,7 @@ function AdminSettingsPage({
                     sessionStorage.removeItem('kiaminaAuthUser')
                     localStorage.removeItem('kiaminaAuthUser')
                     clearApiAccessToken()
+                    clearApiSessionId()
                     notify('success', 'All active sessions have been cleared locally.')
                   }}
                   className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors"

@@ -16,6 +16,18 @@ export const findActiveAuthSessionBySessionId = async (sessionId) =>
     }
   });
 
+export const updateAuthSessionBySessionId = async (sessionId, payload) =>
+  AuthSession.findOneAndUpdate(
+    { sessionId },
+    {
+      $set: payload
+    },
+    {
+      new: true,
+      runValidators: true
+    }
+  );
+
 export const revokeAuthSession = async ({ sessionId, reason = "revoked" }) =>
   AuthSession.findOneAndUpdate(
     { sessionId, revokedAt: null },

@@ -2,171 +2,756 @@
   "info": {
     "name": "Kiamina Microservices API",
     "_postman_id": "de21b1c2-f130-4ad2-a37e-f0b6ad0c9d83",
-    "description": "Starter collection for API gateway and backend services.",
+    "description": "Gateway-first collection aligned to the current backend contract (session header + auth cookies + support/chatbot/knowledge-base routes).",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
     {
-      "name": "Gateway Health",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{gatewayBaseUrl}}/health",
-          "host": [
-            "{{gatewayBaseUrl}}"
-          ],
-          "path": [
-            "health"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Gateway Info",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{apiBaseUrl}}/gateway/info",
-          "host": [
-            "{{apiBaseUrl}}"
-          ],
-          "path": [
-            "gateway",
-            "info"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Auth - Send OTP",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
+      "name": "Gateway",
+      "item": [
+        {
+          "name": "Gateway Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{gatewayBaseUrl}}/health",
+              "host": [
+                "{{gatewayBaseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            }
           }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"email\": \"test@example.com\",\n  \"purpose\": \"login\"\n}"
         },
-        "url": {
-          "raw": "{{apiBaseUrl}}/auth/send-otp",
-          "host": [
-            "{{apiBaseUrl}}"
-          ],
-          "path": [
-            "auth",
-            "send-otp"
-          ]
+        {
+          "name": "Gateway Info",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{apiBaseUrl}}/gateway/info",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "gateway",
+                "info"
+              ]
+            }
+          }
         }
-      }
+      ]
     },
     {
-      "name": "Auth - Verify OTP",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Auth - Register Account",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"uid\": \"user_123\",\n  \"email\": \"test@example.com\",\n  \"fullName\": \"Test User\",\n  \"role\": \"client\",\n  \"provider\": \"email-password\",\n  \"status\": \"active\",\n  \"emailVerified\": true,\n  \"phoneVerified\": false\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/register-account",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register-account"
+              ]
+            }
           }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"email\": \"test@example.com\",\n  \"purpose\": \"login\",\n  \"otp\": \"123456\"\n}"
         },
-        "url": {
-          "raw": "{{apiBaseUrl}}/auth/verify-otp",
-          "host": [
-            "{{apiBaseUrl}}"
+        {
+          "name": "Auth - Login Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let body = {};",
+                  "try { body = pm.response.json() || {}; } catch (error) {}",
+                  "if (body?.session?.sessionId) {",
+                  "  pm.environment.set('sessionId', body.session.sessionId);",
+                  "}"
+                ]
+              }
+            }
           ],
-          "path": [
-            "auth",
-            "verify-otp"
-          ]
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"uid\": \"user_123\",\n  \"email\": \"test@example.com\",\n  \"role\": \"client\",\n  \"loginMethod\": \"otp\",\n  \"sessionTtlMinutes\": 720,\n  \"mfaCompleted\": true\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/login-session",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login-session"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionId\": \"{{sessionId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/refresh-token",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "refresh-token"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Verify Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idToken\": \"{{idToken}}\",\n  \"sessionId\": \"{{sessionId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/verify-token",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "verify-token"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Logout Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"logout\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/logout-session",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "logout-session"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Send OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"purpose\": \"login\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/send-otp",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "send-otp"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Verify OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"purpose\": \"login\",\n  \"otp\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/verify-otp",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "verify-otp"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Send Password Reset Link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"test@example.com\",\n  \"resetLink\": \"http://localhost:5173/reset-password?token=sample\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/send-password-reset-link",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "send-password-reset-link"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Send SMS OTP (Protected)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"+2348000000000\",\n  \"purpose\": \"admin-email-change\",\n  \"email\": \"new-admin@example.com\",\n  \"currentEmail\": \"admin@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/send-sms-otp",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "send-sms-otp"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Auth - Verify SMS OTP (Protected)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phoneNumber\": \"+2348000000000\",\n  \"purpose\": \"admin-email-change\",\n  \"otp\": \"123456\",\n  \"email\": \"new-admin@example.com\",\n  \"currentEmail\": \"admin@example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/auth/verify-sms-otp",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "verify-sms-otp"
+              ]
+            }
+          }
         }
-      }
+      ]
     },
     {
-      "name": "Users - Sync From Auth",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
+      "name": "Users",
+      "item": [
+        {
+          "name": "Users - Get Me",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{apiBaseUrl}}/users/me",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "users",
+                "me"
+              ]
+            }
           }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"uid\": \"firebase_uid_1\",\n  \"email\": \"test@example.com\",\n  \"displayName\": \"Test User\"\n}"
-        },
-        "url": {
-          "raw": "{{apiBaseUrl}}/users/sync-from-auth",
-          "host": [
-            "{{apiBaseUrl}}"
-          ],
-          "path": [
-            "users",
-            "sync-from-auth"
-          ]
         }
-      }
+      ]
     },
     {
-      "name": "Documents - Create Metadata",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"ownerUserId\": \"firebase_uid_1\",\n  \"fileName\": \"statement.pdf\",\n  \"category\": \"bank-statements\",\n  \"className\": \"HeadOffice\"\n}"
-        },
-        "url": {
-          "raw": "{{apiBaseUrl}}/documents",
-          "host": [
-            "{{apiBaseUrl}}"
+      "name": "Notifications",
+      "item": [
+        {
+          "name": "Support - Create Ticket",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let body = {};",
+                  "try { body = pm.response.json() || {}; } catch (error) {}",
+                  "if (body?.ticket?.ticketId) {",
+                  "  pm.environment.set('supportTicketId', body.ticket.ticketId);",
+                  "}"
+                ]
+              }
+            }
           ],
-          "path": [
-            "documents"
-          ]
-        }
-      }
-    },
-    {
-      "name": "Notifications - Send Email",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"Support request\",\n  \"description\": \"Please help with dashboard access.\",\n  \"priority\": \"medium\",\n  \"channel\": \"web\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/support/tickets",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "support",
+                "tickets"
+              ]
+            }
           }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"to\": \"test@example.com\",\n  \"subject\": \"Welcome\",\n  \"message\": \"Hello from Kiamina backend.\"\n}"
         },
-        "url": {
-          "raw": "{{apiBaseUrl}}/notifications/send-email",
-          "host": [
-            "{{apiBaseUrl}}"
+        {
+          "name": "Support - List Tickets",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/support/tickets?scope=own&limit=50",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "support",
+                "tickets"
+              ],
+              "query": [
+                {
+                  "key": "scope",
+                  "value": "own"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Support - Ticket Messages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/support/tickets/{{supportTicketId}}/messages?limit=100",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "support",
+                "tickets",
+                "{{supportTicketId}}",
+                "messages"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Support - Post Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Following up on this ticket.\",\n  \"senderDisplayName\": \"API Tester\",\n  \"visibility\": \"public\",\n  \"attachments\": []\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/support/tickets/{{supportTicketId}}/messages",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "support",
+                "tickets",
+                "{{supportTicketId}}",
+                "messages"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Chatbot - Create Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let body = {};",
+                  "try { body = pm.response.json() || {}; } catch (error) {}",
+                  "if (body?.session?.sessionId) {",
+                  "  pm.environment.set('chatSessionId', body.session.sessionId);",
+                  "}"
+                ]
+              }
+            }
           ],
-          "path": [
-            "notifications",
-            "send-email"
-          ]
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"web\",\n  \"reuseActive\": true,\n  \"context\": {\n    \"source\": \"postman\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/chatbot/sessions",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "chatbot",
+                "sessions"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Chatbot - Post Message",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"How do I upload documents?\",\n  \"includeCitations\": true\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/chatbot/sessions/{{chatSessionId}}/messages",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "chatbot",
+                "sessions",
+                "{{chatSessionId}}",
+                "messages"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Chatbot - Escalate Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "let body = {};",
+                  "try { body = pm.response.json() || {}; } catch (error) {}",
+                  "if (body?.ticketId) {",
+                  "  pm.environment.set('supportTicketId', body.ticketId);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"Need human support\",\n  \"summary\": \"Escalated from chatbot.\",\n  \"priority\": \"medium\"\n}"
+            },
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/chatbot/sessions/{{chatSessionId}}/escalate",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "chatbot",
+                "sessions",
+                "{{chatSessionId}}",
+                "escalate"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Knowledge Base - List Articles",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/knowledge-base/articles?limit=20",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "knowledge-base",
+                "articles"
+              ],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Knowledge Base - Search",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{idToken}}"
+              },
+              {
+                "key": "x-session-id",
+                "value": "{{sessionId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{apiBaseUrl}}/notifications/knowledge-base/articles/search?q=invoice&limit=10",
+              "host": [
+                "{{apiBaseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "knowledge-base",
+                "articles",
+                "search"
+              ],
+              "query": [
+                {
+                  "key": "q",
+                  "value": "invoice"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          }
         }
-      }
+      ]
     }
   ]
 }

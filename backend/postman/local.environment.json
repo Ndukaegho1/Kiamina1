@@ -11,6 +11,26 @@
       "key": "apiBaseUrl",
       "value": "http://localhost:4100/api/v1",
       "enabled": true
+    },
+    {
+      "key": "idToken",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "sessionId",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "chatSessionId",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "supportTicketId",
+      "value": "",
+      "enabled": true
     }
   ],
   "_postman_variable_scope": "environment",

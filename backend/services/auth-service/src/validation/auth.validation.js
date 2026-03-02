@@ -14,12 +14,14 @@ const ACCOUNT_ROLES = ["client", "admin", "accountant", "manager", "owner", "sup
 const ACCOUNT_STATUSES = ["active", "disabled", "suspended", "pending"];
 const AUTH_PROVIDERS = ["email-password", "google", "otp", "invite", "sso"];
 const LOGIN_METHODS = ["password", "otp", "google", "token", "invite"];
+const SMS_PURPOSES = ["admin-email-change", "login", "password-reset", "mfa"];
 
 const PURPOSES_TEXT = PURPOSES.join(", ");
 const ACCOUNT_ROLES_TEXT = ACCOUNT_ROLES.join(", ");
 const ACCOUNT_STATUSES_TEXT = ACCOUNT_STATUSES.join(", ");
 const AUTH_PROVIDERS_TEXT = AUTH_PROVIDERS.join(", ");
 const LOGIN_METHODS_TEXT = LOGIN_METHODS.join(", ");
+const SMS_PURPOSES_TEXT = SMS_PURPOSES.join(", ");
 
 const VALIDATION_OPTIONS = {
   abortEarly: false,
@@ -69,6 +71,26 @@ const optionalEmailSchema = Joi.string()
     "string.email": "email must be a valid email address"
   });
 
+const optionalEmailAllowEmptySchema = Joi.string()
+  .trim()
+  .lowercase()
+  .allow("")
+  .email({ tlds: { allow: false } })
+  .optional()
+  .messages({
+    "string.email": "email must be a valid email address"
+  });
+
+const requiredPhoneSchema = Joi.string()
+  .trim()
+  .required()
+  .pattern(/^\+?[1-9]\d{7,14}$/)
+  .messages({
+    "any.required": "phoneNumber is required",
+    "string.empty": "phoneNumber is required",
+    "string.pattern.base": "phoneNumber must be in international format"
+  });
+
 const sendOtpSchema = Joi.object({
   email: requiredEmailSchema,
   purpose: Joi.string().trim().lowercase().valid(...PURPOSES).default("login").messages({
@@ -93,11 +115,17 @@ const verifyOtpSchema = Joi.object({
 });
 
 const verifyTokenSchema = Joi.object({
-  idToken: Joi.string().trim().required().min(20).messages({
-    "any.required": "idToken is required",
-    "string.empty": "idToken is required",
+  idToken: Joi.string().trim().allow("").min(20).default("").messages({
     "string.min": "idToken format appears invalid"
   }),
+  accessToken: Joi.string()
+    .trim()
+    .allow("")
+    .pattern(/^[A-Za-z0-9._-]{20,5000}$/)
+    .default("")
+    .messages({
+      "string.pattern.base": "accessToken format appears invalid"
+    }),
   sessionId: Joi.string()
     .trim()
     .allow("")
@@ -106,6 +134,70 @@ const verifyTokenSchema = Joi.object({
     .messages({
       "string.pattern.base": "sessionId format appears invalid"
     })
+})
+  .custom((value, helpers) => {
+    if (!value.idToken && !value.accessToken) {
+      return helpers.error("any.custom", {
+        message: "Either idToken or accessToken is required"
+      });
+    }
+    return value;
+  })
+  .messages({
+    "any.custom": "{{#message}}"
+  });
+
+const refreshTokenSchema = Joi.object({
+  refreshToken: Joi.string()
+    .trim()
+    .allow("")
+    .pattern(/^[A-Za-z0-9._-]{20,5000}$/)
+    .default("")
+    .messages({
+      "string.pattern.base": "refreshToken format appears invalid"
+    }),
+  sessionId: Joi.string()
+    .trim()
+    .allow("")
+    .pattern(/^[A-Za-z0-9-]{16,120}$/)
+    .default("")
+    .messages({
+      "string.pattern.base": "sessionId format appears invalid"
+    })
+});
+
+const sendPasswordResetLinkSchema = Joi.object({
+  email: requiredEmailSchema,
+  resetLink: Joi.string().trim().uri({ scheme: [/https?/] }).required().messages({
+    "any.required": "resetLink is required",
+    "string.empty": "resetLink is required",
+    "string.uri": "resetLink must be a valid URL"
+  })
+});
+
+const sendSmsOtpSchema = Joi.object({
+  phoneNumber: requiredPhoneSchema,
+  purpose: Joi.string().trim().lowercase().valid(...SMS_PURPOSES).default("admin-email-change").messages({
+    "any.only": `purpose must be one of: ${SMS_PURPOSES_TEXT}`,
+    "string.empty": `purpose must be one of: ${SMS_PURPOSES_TEXT}`
+  }),
+  email: optionalEmailAllowEmptySchema,
+  currentEmail: optionalEmailAllowEmptySchema
+});
+
+const verifySmsOtpSchema = Joi.object({
+  phoneNumber: requiredPhoneSchema,
+  otp: Joi.string().trim().required().pattern(/^\d{4,8}$/).messages({
+    "any.required": "otp is required",
+    "string.empty": "otp is required",
+    "string.pattern.base": "otp must be 4 to 8 digits"
+  }),
+  purpose: Joi.string().trim().lowercase().valid(...SMS_PURPOSES).default("admin-email-change").messages({
+    "any.only": `purpose must be one of: ${SMS_PURPOSES_TEXT}`,
+    "string.empty": `purpose must be one of: ${SMS_PURPOSES_TEXT}`
+  }),
+  email: optionalEmailAllowEmptySchema,
+  currentEmail: optionalEmailAllowEmptySchema
 });
 
 const logoutSessionSchema = Joi.object({
@@ -176,6 +268,9 @@ const loginSessionSchema = Joi.object({
     "string.max": "deviceFingerprint must be at most 200 characters"
   }),
   mfaCompleted: Joi.boolean().default(false),
+  idToken: Joi.string().trim().allow("").min(20).default("").messages({
+    "string.min": "idToken format appears invalid"
+  }),
   tokenHash: Joi.string().trim().allow("").max(300).default("").messages({
     "string.max": "tokenHash must be at most 300 characters"
   })
@@ -225,13 +320,27 @@ export const validateVerifyTokenPayload = (body) => {
 
   if (error) {
     return {
-      error: toErrors(error)[0] || "idToken is required"
+      error: toErrors(error)[0] || "Either idToken or accessToken is required"
     };
   }
 
   return {
-    idToken: value.idToken,
+    idToken: value.idToken || "",
+    accessToken: value.accessToken || "",
     sessionId: value.sessionId || ""
+  };
+};
+
+export const validateRefreshTokenPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = refreshTokenSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      refreshToken: value?.refreshToken || "",
+      sessionId: value?.sessionId || ""
+    }
   };
 };
 
@@ -275,6 +384,50 @@ export const validateRegisterAccountPayload = (body) => {
   };
 };
 
+export const validateSendPasswordResetLinkPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = sendPasswordResetLinkSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      email: value?.email || "",
+      resetLink: value?.resetLink || ""
+    }
+  };
+};
+
+export const validateSendSmsOtpPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = sendSmsOtpSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      phoneNumber: value?.phoneNumber || "",
+      purpose: value?.purpose || "admin-email-change",
+      email: value?.email || "",
+      currentEmail: value?.currentEmail || ""
+    }
+  };
+};
+
+export const validateVerifySmsOtpPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = verifySmsOtpSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      phoneNumber: value?.phoneNumber || "",
+      purpose: value?.purpose || "admin-email-change",
+      otp: value?.otp || "",
+      email: value?.email || "",
+      currentEmail: value?.currentEmail || ""
+    }
+  };
+};
+
 export const validateLoginSessionPayload = (body) => {
   const source = normalizeSource(body);
   const rawTtl = Number(source.sessionTtlMinutes);
@@ -301,6 +454,7 @@ export const validateLoginSessionPayload = (body) => {
       userAgent: value?.userAgent || "",
       deviceFingerprint: value?.deviceFingerprint || "",
       mfaCompleted: Boolean(value?.mfaCompleted),
+      idToken: value?.idToken || "",
       tokenHash: value?.tokenHash || ""
     }
   };

@@ -33,6 +33,14 @@ export const env = {
   mongoDbName: process.env.MONGO_DB_NAME || "kiamina_auth",
   otpHashSecret: process.env.OTP_HASH_SECRET || "local-dev-otp-secret",
   otpExpiryMinutes: toNumber(process.env.OTP_EXPIRY_MINUTES, 10),
+  smsOtpExpiryMinutes: toNumber(process.env.SMS_OTP_EXPIRY_MINUTES, 5),
+  smsOtpMaxAttempts: toNumber(process.env.SMS_OTP_MAX_ATTEMPTS, 5),
+  authTokenSecret: process.env.AUTH_TOKEN_SECRET || "local-dev-auth-token-secret",
+  accessTokenTtlMinutes: toNumber(process.env.ACCESS_TOKEN_TTL_MINUTES, 15),
+  refreshTokenTtlDays: toNumber(process.env.REFRESH_TOKEN_TTL_DAYS, 7),
+  authCookieDomain: process.env.AUTH_COOKIE_DOMAIN || "",
+  notificationsServiceUrl: process.env.NOTIFICATIONS_SERVICE_URL || "http://localhost:4104",
+  notificationsServiceTimeoutMs: toNumber(process.env.NOTIFICATIONS_SERVICE_TIMEOUT_MS, 5000),
   googleApplicationCredentials:
     process.env.GOOGLE_APPLICATION_CREDENTIALS || "",
   firebaseServiceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON || ""

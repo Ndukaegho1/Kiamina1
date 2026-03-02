@@ -8,6 +8,13 @@ It provides two workspaces in one app:
 
 The codebase is local-first and persists most state in `localStorage` and `IndexedDB` (file blobs), with optional backend API calls for OTP/email and notifications.
 
+## Preliminary Corporate Site
+
+- React component: `frontend/src/components/preliminary/PreliminaryCorporateSite.jsx`
+- Route entry: `/`
+- Public routes: `/`, `/about`, `/services`, `/insights`, `/careers`, `/contact`
+- Styling: Tailwind utility classes inside the React component
+
 ## Table Of Contents
 
 1. Project Scope

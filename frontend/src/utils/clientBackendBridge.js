@@ -1,4 +1,4 @@
-import { apiFetch } from './apiClient'
+import { apiFetch, setApiSessionId } from './apiClient'
 
 const buildJsonHeaders = (authorizationToken = '') => {
   const headers = {
@@ -102,7 +102,7 @@ export const recordAuthLoginSession = async ({
   mfaCompleted = true,
 } = {}) => {
   const sessionTtlMinutes = remember ? 10080 : 720
-  return postJson('/api/auth/login-session', {
+  const response = await postJson('/api/auth/login-session', {
     uid: String(uid || '').trim(),
     email: String(email || '').trim().toLowerCase(),
     role: String(role || 'client').trim().toLowerCase(),
@@ -110,6 +110,11 @@ export const recordAuthLoginSession = async ({
     sessionTtlMinutes,
     mfaCompleted: Boolean(mfaCompleted),
   })
+  const sessionId = String(response?.data?.session?.sessionId || '').trim()
+  if (response.ok && sessionId) {
+    setApiSessionId(sessionId, { remember: Boolean(remember) })
+  }
+  return response
 }
 
 export const persistClientOnboardingToBackend = async ({

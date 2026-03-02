@@ -64,7 +64,7 @@ import {
 import { apiFetch } from '../../utils/apiClient'
 import KiaminaLogo from '../common/KiaminaLogo'
 import DotLottiePreloader from '../common/DotLottiePreloader'
-import * as XLSX from 'xlsx'
+import { downloadObjectRowsAsXlsx } from '../../utils/excelWorkbook'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import { playSupportNotificationSound, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS } from '../../utils/supportNotificationSound'
 import { isAdminNotificationSoundEnabled } from '../../utils/adminSecurityPreferences'
@@ -2111,6 +2111,7 @@ function AdminSidebar({
     { id: 'admin-leads', label: 'Leads', icon: UsersRound, badgeCount: leadCount, badgeTone: 'neutral', section: 'technical' },
     { id: 'admin-communications', label: 'Communications', icon: Mail, badgeCount: supportUnreadCount, badgeTone: 'alert', section: 'technical' },
     { id: 'admin-notifications', label: 'Send Notification', icon: Send, badgeCount: 0, badgeTone: 'neutral', section: 'technical' },
+    { id: 'admin-insights', label: 'Insights Publishing', icon: Edit2, badgeCount: 0, badgeTone: 'neutral', section: 'technical' },
   ]
 
   const footerNavItems = [
@@ -6266,7 +6267,7 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
       .join(', ')
   }
 
-  const handleExportLeadsToExcel = () => {
+  const handleExportLeadsToExcel = async () => {
     if (filteredLeads.length === 0) {
       showToast?.('error', 'No leads available to export.')
       return
@@ -6284,11 +6285,12 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
       'All Tickets': Number(lead.ticketCount || 0),
       Updated: formatTimestamp(lead.latestUpdatedAtIso || lead.updatedAtIso),
     }))
-    const workbook = XLSX.utils.book_new()
-    const worksheet = XLSX.utils.json_to_sheet(exportRows)
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Leads')
     const exportStamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
-    XLSX.writeFile(workbook, `Kiamina_Leads_${exportStamp}.xlsx`)
+    await downloadObjectRowsAsXlsx({
+      rows: exportRows,
+      sheetName: 'Leads',
+      fileName: `Kiamina_Leads_${exportStamp}.xlsx`,
+    })
     showToast?.('success', `Exported ${filteredLeads.length} lead(s) to Excel.`)
   }
 
@@ -6351,7 +6353,7 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
           <div className="text-sm text-text-muted">Showing {filteredLeads.length} of {leads.length} lead(s)</div>
           <button
             type="button"
-            onClick={handleExportLeadsToExcel}
+            onClick={() => void handleExportLeadsToExcel()}
             disabled={filteredLeads.length === 0}
             className="h-9 px-3 rounded-md border border-border text-sm font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
           >
@@ -8223,7 +8225,7 @@ function AdminWorkHoursPage({ currentAdminAccount }) {
     [personalRows],
   )
 
-  const exportRowsToExcel = () => {
+  const exportRowsToExcel = async () => {
     const exportRows = sortedRows.map((row, index) => ({
       'S/N': index + 1,
       'Admin Name': row.adminName,
@@ -8238,10 +8240,11 @@ function AdminWorkHoursPage({ currentAdminAccount }) {
       'Duration (Hours)': Number((row.totalDurationMs / 3600000).toFixed(2)),
       Status: row.status,
     }))
-    const worksheet = XLSX.utils.json_to_sheet(exportRows)
-    const workbook = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Admin Work Hours')
-    XLSX.writeFile(workbook, `admin-work-hours-${new Date().toISOString().slice(0, 10)}.xlsx`)
+    await downloadObjectRowsAsXlsx({
+      rows: exportRows,
+      sheetName: 'Admin Work Hours',
+      fileName: `admin-work-hours-${new Date().toISOString().slice(0, 10)}.xlsx`,
+    })
   }
 
   const getStatusTone = (status) => (
@@ -8390,7 +8393,7 @@ function AdminWorkHoursPage({ currentAdminAccount }) {
           </select>
           <button
             type="button"
-            onClick={exportRowsToExcel}
+            onClick={() => void exportRowsToExcel()}
             className="h-10 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light inline-flex items-center justify-center gap-2"
           >
             <Download className="w-4 h-4" />

@@ -38,5 +38,7 @@ export const env = {
   upstashRestUrl: process.env.UPSTASH_REDIS_REST_URL || "",
   upstashRestToken: process.env.UPSTASH_REDIS_REST_TOKEN || "",
   requestsPerMinute: toNumber(process.env.RATE_LIMIT_REQUESTS_PER_MINUTE, 120),
-  authVerifyTimeoutMs: toNumber(process.env.AUTH_VERIFY_TIMEOUT_MS, 5000)
+  authVerifyTimeoutMs: toNumber(process.env.AUTH_VERIFY_TIMEOUT_MS, 5000),
+  responseCacheTtlSeconds: toNumber(process.env.RESPONSE_CACHE_TTL_SECONDS, 45),
+  responseCacheMaxBodyBytes: toNumber(process.env.RESPONSE_CACHE_MAX_BODY_BYTES, 512000)
 };
