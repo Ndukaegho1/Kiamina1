@@ -80,10 +80,13 @@ Gateway auth policy:
 
 - Public:
   - `GET /api/v1/gateway/info`
+  - `POST /api/v1/auth/register-account`
+  - `POST /api/v1/auth/login-session`
   - `POST /api/v1/auth/send-otp`
   - `POST /api/v1/auth/verify-otp`
   - `POST /api/v1/auth/verify-token`
 - Protected:
+  - Any other `/api/v1/auth/*` route not listed above
   - All `/api/v1/users/*`
   - All `/api/v1/documents/*`
   - All `/api/v1/notifications/*`
@@ -116,15 +119,29 @@ VITE_API_BASE_URL=http://localhost:4100/api/v1
 
 Then call:
 
+- `POST /auth/register-account`
+- `POST /auth/login-session`
 - `POST /auth/send-otp`
 - `POST /auth/verify-otp`
 - `POST /auth/verify-token`
 - `GET /users/me`
+- `PATCH /users/me/profile`
+- `GET /users/me/client-dashboard`
+- `GET /users/me/client-dashboard/overview`
+- `PATCH /users/me/client-dashboard`
 - `POST /documents`
 - `POST /documents/upload` (multipart field: `file`)
 - `GET /documents/owner/:ownerUserId`
+- `GET /documents/owner/:ownerUserId/summary`
 - `GET /documents/:id/download-url`
+- `POST /documents/records`
+- `POST /documents/records/import` (multipart field: `file`)
+- `GET /documents/records`
+- `GET /documents/records/summary`
+- `GET /documents/records/reports/profit-loss`
+- `GET /documents/records/reports/cashflow`
 - `POST /notifications/send-email`
+- `GET /notifications/logs`
 
 ## New environment variables
 
