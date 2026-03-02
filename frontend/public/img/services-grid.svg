@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#eef4ff" />
+  <rect x="100" y="80" width="1000" height="560" rx="28" fill="#fff" stroke="#153585" stroke-opacity=".22" stroke-width="3" />
+  <g fill="#153585" fill-opacity=".12">
+    <rect x="170" y="150" width="250" height="160" rx="18" />
+    <rect x="475" y="150" width="250" height="160" rx="18" />
+    <rect x="780" y="150" width="250" height="160" rx="18" />
+    <rect x="170" y="340" width="250" height="160" rx="18" />
+    <rect x="475" y="340" width="250" height="160" rx="18" />
+    <rect x="780" y="340" width="250" height="160" rx="18" />
+  </g>
+  <g fill="#153585">
+    <circle cx="235" cy="210" r="30" />
+    <circle cx="540" cy="210" r="30" />
+    <circle cx="845" cy="210" r="30" />
+    <circle cx="235" cy="400" r="30" />
+    <circle cx="540" cy="400" r="30" />
+    <circle cx="845" cy="400" r="30" />
+  </g>
+  <text x="170" y="580" fill="#153585" font-family="Arial, sans-serif" font-size="32" font-weight="700">Service Architecture and Delivery Pods</text>
+</svg>

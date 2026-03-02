@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#edf4ff" />
+  <rect x="70" y="70" width="1060" height="580" rx="24" fill="#fff" stroke="#153585" stroke-opacity=".25" stroke-width="3" />
+  <g stroke="#153585" stroke-opacity=".35" stroke-width="8" fill="none">
+    <path d="M130 560L370 170L620 520L900 210L1060 480" />
+    <path d="M130 250L310 430L510 210L760 470L1060 250" />
+    <path d="M210 110L210 610" />
+    <path d="M430 110L430 610" />
+    <path d="M650 110L650 610" />
+    <path d="M870 110L870 610" />
+  </g>
+  <circle cx="540" cy="360" r="48" fill="#153585" />
+  <circle cx="540" cy="360" r="22" fill="#dbe7ff" />
+  <text x="470" y="445" fill="#153585" font-family="Arial, sans-serif" font-size="24" font-weight="700">Port Harcourt</text>
+</svg>

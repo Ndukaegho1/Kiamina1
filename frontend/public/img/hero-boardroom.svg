@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Executive boardroom advisory scene</title>
+  <desc id="desc">Abstract corporate illustration for accounting strategy.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e9f0ff" />
+      <stop offset="100%" stop-color="#f7f9ff" />
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="720" fill="url(#bg)" />
+  <rect x="70" y="70" width="1060" height="580" rx="26" fill="#ffffff" stroke="#153585" stroke-opacity=".2" stroke-width="3" />
+  <rect x="130" y="460" width="940" height="120" rx="20" fill="#153585" fill-opacity=".1" />
+  <circle cx="300" cy="340" r="92" fill="#153585" fill-opacity=".15" />
+  <circle cx="520" cy="320" r="74" fill="#153585" fill-opacity=".12" />
+  <circle cx="720" cy="350" r="82" fill="#153585" fill-opacity=".16" />
+  <circle cx="910" cy="330" r="70" fill="#153585" fill-opacity=".14" />
+  <rect x="250" y="160" width="700" height="170" rx="14" fill="#153585" />
+  <rect x="285" y="194" width="230" height="14" rx="7" fill="#dbe7ff" />
+  <rect x="285" y="224" width="460" height="12" rx="6" fill="#b8ccff" />
+  <rect x="285" y="250" width="390" height="12" rx="6" fill="#b8ccff" />
+  <rect x="285" y="276" width="330" height="12" rx="6" fill="#b8ccff" />
+  <rect x="790" y="205" width="120" height="88" rx="12" fill="#dbe7ff" />
+  <text x="130" y="640" fill="#153585" font-family="Arial, sans-serif" font-size="30" font-weight="700">Kiamina Executive Advisory</text>
+</svg>

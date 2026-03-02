@@ -1,0 +1,24 @@
+﻿<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1600 900'>
+  <defs>
+    <linearGradient id='g' x1='0' y1='0' x2='1' y2='1'>
+      <stop offset='0%' stop-color='#0f2f7a' />
+      <stop offset='55%' stop-color='#1d4fae' />
+      <stop offset='100%' stop-color='#2a66d0' />
+    </linearGradient>
+  </defs>
+  <rect width='1600' height='900' fill='url(#g)' />
+  <circle cx='1320' cy='-80' r='340' fill='rgba(255,255,255,0.16)' />
+  <circle cx='1480' cy='140' r='220' fill='rgba(255,255,255,0.14)' />
+  <circle cx='1240' cy='250' r='150' fill='rgba(255,255,255,0.1)' />
+  <g fill='rgba(255,255,255,0.14)'>
+    <rect x='120' y='220' width='980' height='22' rx='11' />
+    <rect x='120' y='270' width='760' height='16' rx='8' />
+    <rect x='120' y='310' width='640' height='16' rx='8' />
+  </g>
+  <g fill='none' stroke='rgba(255,255,255,0.24)' stroke-width='2'>
+    <path d='M140 620H1460' />
+    <path d='M200 560H1380' />
+    <path d='M260 500H1300' />
+  </g>
+  <text x='120' y='395' fill='rgba(236,243,255,0.9)' font-size='40' font-family='Arial, sans-serif' font-weight='700'>Trusted Accounting Advisory</text>
+</svg>

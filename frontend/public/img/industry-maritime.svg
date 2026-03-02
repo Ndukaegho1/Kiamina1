@@ -1,0 +1,11 @@
+﻿<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 520 320'>
+  <rect width='520' height='320' rx='22' fill='#ffffff' />
+  <rect x='16' y='16' width='488' height='288' rx='18' fill='#f8fbff' stroke='#d6e2f3' />
+  <rect x='34' y='34' width='128' height='128' rx='22' fill='#0ea5e9' />
+  <text x='98' y='109' fill='#ffffff' font-size='42' font-family='Arial, sans-serif' font-weight='700' text-anchor='middle'>M</text>
+  <rect x='184' y='54' width='300' height='20' rx='10' fill='#0ea5e9' fill-opacity='0.2' />
+  <rect x='184' y='86' width='250' height='14' rx='7' fill='#0ea5e9' fill-opacity='0.16' />
+  <rect x='184' y='112' width='220' height='14' rx='7' fill='#0ea5e9' fill-opacity='0.14' />
+  <text x='34' y='224' fill='#1f2937' font-size='32' font-family='Arial, sans-serif' font-weight='700'>Maritime</text>
+  <rect x='34' y='242' width='440' height='10' rx='5' fill='#cfdbef' />
+</svg>

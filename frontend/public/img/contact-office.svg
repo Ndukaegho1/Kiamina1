@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#eef5ff" />
+  <rect x="110" y="100" width="980" height="520" rx="26" fill="#fff" stroke="#153585" stroke-opacity=".2" stroke-width="3" />
+  <rect x="240" y="220" width="720" height="320" rx="12" fill="#153585" />
+  <rect x="280" y="260" width="160" height="90" rx="10" fill="#dbe7ff" />
+  <rect x="470" y="260" width="160" height="90" rx="10" fill="#dbe7ff" />
+  <rect x="660" y="260" width="160" height="90" rx="10" fill="#dbe7ff" />
+  <rect x="280" y="380" width="540" height="110" rx="10" fill="#0f2f77" />
+  <rect x="850" y="380" width="90" height="110" rx="10" fill="#0f2f77" />
+  <rect x="560" y="170" width="80" height="50" rx="8" fill="#153585" />
+  <text x="260" y="580" fill="#153585" font-family="Arial, sans-serif" font-size="30" font-weight="700">Port Harcourt Head Office</text>
+</svg>
