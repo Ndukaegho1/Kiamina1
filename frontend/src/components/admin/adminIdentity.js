@@ -1,4 +1,5 @@
 export const ADMIN_LEVELS = {
+  OWNER: 'owner',
   SUPER: 'super',
   AREA_ACCOUNTANT: 'area_accountant',
   CUSTOMER_SERVICE: 'customer_service',
@@ -11,6 +12,7 @@ export const ADMIN_LEVELS = {
 }
 
 export const ADMIN_LEVEL_LABELS = {
+  [ADMIN_LEVELS.OWNER]: 'Owner',
   [ADMIN_LEVELS.SUPER]: 'Super Admin',
   [ADMIN_LEVELS.AREA_ACCOUNTANT]: 'Area Accountant',
   [ADMIN_LEVELS.CUSTOMER_SERVICE]: 'Customer Service Admin',
@@ -104,6 +106,13 @@ export const normalizeAdminLevel = (adminLevel) => {
   const normalizedLevel = String(adminLevel || '').trim().toLowerCase()
   if (!normalizedLevel) return ADMIN_LEVELS.SUPER
   if (
+    normalizedLevel === 'owner'
+    || normalizedLevel === 'root'
+    || normalizedLevel === 'principal'
+  ) {
+    return ADMIN_LEVELS.OWNER
+  }
+  if (
     normalizedLevel === 'super'
     || normalizedLevel === 'senior'
     || normalizedLevel === 'head'
@@ -145,20 +154,25 @@ export const normalizeAdminLevel = (adminLevel) => {
   return ADMIN_LEVELS.SUPER
 }
 
+export const isOwnerAdminLevel = (adminLevel) => normalizeAdminLevel(adminLevel) === ADMIN_LEVELS.OWNER
 export const isSuperAdminLevel = (adminLevel) => normalizeAdminLevel(adminLevel) === ADMIN_LEVELS.SUPER
 export const isAreaAccountantLevel = (adminLevel) => normalizeAdminLevel(adminLevel) === ADMIN_LEVELS.AREA_ACCOUNTANT
 export const isCustomerServiceLevel = (adminLevel) => normalizeAdminLevel(adminLevel) === ADMIN_LEVELS.CUSTOMER_SERVICE
 export const isTechnicalSupportLevel = (adminLevel) => normalizeAdminLevel(adminLevel) === ADMIN_LEVELS.TECHNICAL_SUPPORT
 export const isOperationsAdminLevel = (adminLevel) => (
-  isSuperAdminLevel(adminLevel) || isAreaAccountantLevel(adminLevel)
+  isOwnerAdminLevel(adminLevel)
+  || isSuperAdminLevel(adminLevel)
+  || isAreaAccountantLevel(adminLevel)
 )
 export const isTechnicalAdminLevel = (adminLevel) => (
-  isSuperAdminLevel(adminLevel)
+  isOwnerAdminLevel(adminLevel)
+  || isSuperAdminLevel(adminLevel)
   || isCustomerServiceLevel(adminLevel)
   || isTechnicalSupportLevel(adminLevel)
 )
 export const canImpersonateForAdminLevel = (adminLevel) => (
-  isSuperAdminLevel(adminLevel)
+  isOwnerAdminLevel(adminLevel)
+  || isSuperAdminLevel(adminLevel)
   || isCustomerServiceLevel(adminLevel)
   || isTechnicalSupportLevel(adminLevel)
 )
@@ -173,7 +187,9 @@ export const isAdminAccount = (account = {}) => (
 
 export const getDefaultPermissionsForAdminLevel = (adminLevel) => {
   const normalizedLevel = normalizeAdminLevel(adminLevel)
-  if (normalizedLevel === ADMIN_LEVELS.SUPER) return [...FULL_ADMIN_PERMISSION_IDS]
+  if (normalizedLevel === ADMIN_LEVELS.OWNER || normalizedLevel === ADMIN_LEVELS.SUPER) {
+    return [...FULL_ADMIN_PERMISSION_IDS]
+  }
   if (normalizedLevel === ADMIN_LEVELS.AREA_ACCOUNTANT) return [...AREA_ACCOUNTANT_PERMISSION_IDS]
   if (normalizedLevel === ADMIN_LEVELS.CUSTOMER_SERVICE) return [...CUSTOMER_SERVICE_PERMISSION_IDS]
   return [...TECHNICAL_SUPPORT_PERMISSION_IDS]

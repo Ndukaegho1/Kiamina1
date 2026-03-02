@@ -2,6 +2,12 @@ import { env } from "../config/env.js";
 import { issueOtpChallenge, verifyOtpChallenge } from "../services/otp.service.js";
 import { verifyFirebaseIdToken } from "../services/firebase-admin.service.js";
 import {
+  createLoginSessionRecord,
+  registerOrUpdateAuthAccount
+} from "../services/auth-accounts.service.js";
+import {
+  validateLoginSessionPayload,
+  validateRegisterAccountPayload,
   validateSendOtpPayload,
   validateVerifyOtpPayload,
   validateVerifyTokenPayload
@@ -91,6 +97,63 @@ export const verifyToken = async (req, res, next) => {
       emailVerified: Boolean(decoded.email_verified),
       authTime: decoded.auth_time || null,
       roles
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const registerAccount = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateRegisterAccountPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const result = await registerOrUpdateAuthAccount(payload);
+
+    return res.status(result.created ? 201 : 200).json({
+      message: result.created ? "Account registration record created." : "Account registration record updated.",
+      account: {
+        uid: result.account.uid,
+        email: result.account.email,
+        fullName: result.account.fullName,
+        role: result.account.role,
+        provider: result.account.provider,
+        status: result.account.status,
+        emailVerified: Boolean(result.account.emailVerified),
+        phoneVerified: Boolean(result.account.phoneVerified),
+        lastLoginAt: result.account.lastLoginAt
+      }
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const recordLoginSession = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateLoginSessionPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const result = await createLoginSessionRecord(payload);
+
+    return res.status(201).json({
+      message: "Login session recorded.",
+      account: {
+        uid: result.account.uid,
+        email: result.account.email,
+        role: result.account.role,
+        status: result.account.status
+      },
+      session: {
+        sessionId: result.session.sessionId,
+        issuedAt: result.session.issuedAt,
+        expiresAt: result.session.expiresAt,
+        loginMethod: result.session.loginMethod
+      }
     });
   } catch (error) {
     return next(error);

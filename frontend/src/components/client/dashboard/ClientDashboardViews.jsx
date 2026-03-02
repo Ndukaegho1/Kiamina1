@@ -106,6 +106,80 @@ const buildSearchSuggestions = (values = [], limit = 12) => {
   return suggestions.slice(0, Math.max(1, limit))
 }
 
+const COUNTRY_ALIAS_TO_CODE = Object.freeze({
+  nigeria: 'NG',
+  ng: 'NG',
+  'united states': 'US',
+  usa: 'US',
+  us: 'US',
+  'united kingdom': 'GB',
+  uk: 'GB',
+  gb: 'GB',
+  'great britain': 'GB',
+  canada: 'CA',
+  ca: 'CA',
+  australia: 'AU',
+  au: 'AU',
+})
+
+const COUNTRY_LABEL_BY_CODE = Object.freeze({
+  NG: 'Nigeria',
+  US: 'United States',
+  GB: 'United Kingdom',
+  CA: 'Canada',
+  AU: 'Australia',
+})
+
+const toCountryFlagEmoji = (countryCode = '') => {
+  const normalized = String(countryCode || '').trim().toUpperCase()
+  if (!/^[A-Z]{2}$/.test(normalized)) return '🏳️'
+  return normalized
+    .split('')
+    .map((letter) => String.fromCodePoint(127397 + letter.charCodeAt(0)))
+    .join('')
+}
+
+const resolveCountryDisplay = (country = '') => {
+  const label = String(country || '').trim()
+  if (!label) return { label: 'Country Not Set', shortCode: '--', flag: '🏳️' }
+
+  const normalized = label.toLowerCase()
+  const resolvedCode = COUNTRY_ALIAS_TO_CODE[normalized]
+    || (/^[A-Za-z]{2}$/.test(label) ? label.toUpperCase() : '')
+  const shortCode = resolvedCode
+    || label.replace(/[^A-Za-z]/g, '').slice(0, 2).toUpperCase()
+    || '--'
+
+  return {
+    label: COUNTRY_LABEL_BY_CODE[resolvedCode] || label,
+    shortCode,
+    flag: toCountryFlagEmoji(shortCode),
+  }
+}
+
+const getDashboardGreetingMeta = (firstName = 'Client') => {
+  const hour = new Date().getHours()
+  if (hour < 12) {
+    return {
+      icon: Sunrise,
+      eyebrow: 'Good morning',
+      headline: `Ready for a strong start, ${firstName}?`,
+    }
+  }
+  if (hour < 18) {
+    return {
+      icon: Sun,
+      eyebrow: 'Good afternoon',
+      headline: `Keep momentum going, ${firstName}.`,
+    }
+  }
+  return {
+    icon: Moon,
+    eyebrow: 'Good evening',
+    headline: `Here is your dashboard snapshot, ${firstName}.`,
+  }
+}
+
 const SPREADSHEET_PREVIEW_EXTENSIONS = new Set(['CSV', 'XLS', 'XLSX', 'XLSM', 'XLSB'])
 const TEXT_PREVIEW_EXTENSIONS = new Set(['TXT'])
 const WORD_PREVIEW_EXTENSIONS = new Set(['DOC', 'DOCX'])
@@ -392,6 +466,7 @@ function Sidebar({
   setActivePage,
   companyLogo,
   companyName,
+  businessCountry = '',
   isBusinessVerified = false,
   onLogout,
   isMobileOpen = false,
@@ -415,6 +490,8 @@ function Sidebar({
     setActivePage(pageId)
     onCloseMobile?.()
   }
+  const resolvedCompanyName = String(companyName || '').trim()
+  const resolvedCountry = resolveCountryDisplay(businessCountry)
 
   return (
     <>
@@ -460,14 +537,15 @@ function Sidebar({
               : <KiaminaLogo className="h-6 w-auto" alt="Kiamina logo" />}
           </div>
           <div className="text-sm font-medium text-text-primary inline-flex items-center gap-1.5">
-            <span>{companyName || 'Acme Corporation'}</span>
+            <span>{resolvedCompanyName || 'Company Name Not Set'}</span>
             {isBusinessVerified && <CheckCircle className="w-3.5 h-3.5 text-success" />}
           </div>
         </div>
         <button className="flex items-center gap-2 w-full px-3 py-2 bg-background rounded-md text-sm text-text-secondary hover:bg-border-light transition-colors mt-2">
-          <span>NG</span>
-          <span>Nigeria</span>
-          <ChevronDown className="w-4 h-4 ml-auto" />
+          <span>{resolvedCountry.flag}</span>
+          <span>{resolvedCountry.label}</span>
+          <span className="ml-auto text-xs text-text-muted">{resolvedCountry.shortCode}</span>
+          <ChevronDown className="w-4 h-4" />
         </button>
       </div>
 
@@ -526,6 +604,7 @@ function Sidebar({
 function TopBar({
   profilePhoto,
   clientFirstName,
+  activePage = '',
   isIdentityVerified = false,
   notifications = [],
   onNotificationClick,
@@ -546,6 +625,9 @@ function TopBar({
   onSearchResultsDismiss,
 }) {
   const displayName = clientFirstName?.trim() || 'Client'
+  const showDashboardGreeting = String(activePage || '').trim() === 'dashboard'
+  const greetingMeta = getDashboardGreetingMeta(displayName)
+  const GreetingIcon = greetingMeta.icon
   const fallbackInitial = displayName.charAt(0).toUpperCase() || 'C'
   const [showNotifications, setShowNotifications] = useState(false)
   const notificationRef = useRef(null)
@@ -581,7 +663,7 @@ function TopBar({
   }
 
   return (
-    <header className="h-14 bg-white border-b border-border flex items-center justify-between px-3 sm:px-4 lg:px-6 sticky top-0 z-40 gap-2">
+    <header className="h-16 bg-white border-b border-border flex items-center justify-between px-3 sm:px-4 lg:px-6 sticky top-0 z-40 gap-2">
       <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0">
         <button
           type="button"
@@ -591,6 +673,17 @@ function TopBar({
         >
           <Menu className="w-5 h-5" />
         </button>
+        {showDashboardGreeting && (
+          <div className="hidden lg:flex items-center gap-2.5 h-10 px-3 rounded-xl border border-primary/25 bg-gradient-to-r from-primary/10 via-white to-success/10 shadow-sm flex-shrink-0">
+            <div className="w-7 h-7 rounded-full bg-white border border-primary/20 text-primary inline-flex items-center justify-center">
+              <GreetingIcon className="w-4 h-4" />
+            </div>
+            <div className="leading-tight min-w-0">
+              <p className="text-[10px] uppercase tracking-wide text-text-muted">{greetingMeta.eyebrow}</p>
+              <p className="text-xs font-semibold text-text-primary truncate max-w-[15rem]">{greetingMeta.headline}</p>
+            </div>
+          </div>
+        )}
         <div className="relative w-full sm:max-w-[20rem] lg:max-w-[24rem]" ref={searchRef}>
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
           <input
@@ -731,16 +824,13 @@ function TopBar({
 function DashboardPage({
   onAddDocument,
   setActivePage,
-  clientFirstName,
   verificationState = 'pending',
   records = [],
   activityLogs = [],
+  documentSummary = null,
   isLoading = false,
   showSlowNetworkOverlay = false,
 }) {
-  const displayName = clientFirstName?.trim() || 'Client'
-  const hour = new Date().getHours()
-  const GreetingIcon = hour < 12 ? Sunrise : hour < 18 ? Sun : Moon
   const verificationBadgeConfig = {
     verified: {
       label: 'Verified',
@@ -776,13 +866,34 @@ function DashboardPage({
   const sortedRecords = [...(Array.isArray(records) ? records : [])]
     .sort((a, b) => parseDateValue(b.date) - parseDateValue(a.date))
 
-  // derive counts from files (not folders)
-  const approvedCount = sortedRecords.filter(r => r.status === 'Approved').length
-  const pendingCount = sortedRecords.filter(r => r.status === 'Pending Review').length
-  const rejectedCount = sortedRecords.filter(r => r.status === 'Rejected').length
-  const totalExpenseFiles = sortedRecords.filter(r => r.categoryId === 'expenses' || r.category === 'Expense').length
-  const totalSalesFiles = sortedRecords.filter(r => r.categoryId === 'sales' || r.category === 'Sales').length
-  const totalBankFiles = sortedRecords.filter(r => r.categoryId === 'bank-statements' || r.category === 'Bank Statement' || r.category === 'Bank').length
+  const hasDocumentSummary = Boolean(
+    documentSummary
+    && typeof documentSummary === 'object'
+    && documentSummary.statusCounts
+    && documentSummary.categoryCounts,
+  )
+  const summaryStatus = hasDocumentSummary ? documentSummary.statusCounts : {}
+  const summaryCategory = hasDocumentSummary ? documentSummary.categoryCounts : {}
+
+  // derive counts from backend summary when available, otherwise from local files
+  const approvedCount = hasDocumentSummary
+    ? Number(documentSummary.approvedDocuments ?? summaryStatus.ready ?? 0)
+    : sortedRecords.filter(r => r.status === 'Approved').length
+  const pendingCount = hasDocumentSummary
+    ? Number(documentSummary.pendingDocuments ?? ((summaryStatus.processing || 0) + (summaryStatus.toReview || 0) + (summaryStatus.infoRequested || 0)))
+    : sortedRecords.filter(r => r.status === 'Pending Review').length
+  const rejectedCount = hasDocumentSummary
+    ? Number(documentSummary.rejectedDocuments ?? summaryStatus.rejected ?? 0)
+    : sortedRecords.filter(r => r.status === 'Rejected').length
+  const totalExpenseFiles = hasDocumentSummary
+    ? Number(summaryCategory.expenses || 0)
+    : sortedRecords.filter(r => r.categoryId === 'expenses' || r.category === 'Expense').length
+  const totalSalesFiles = hasDocumentSummary
+    ? Number(summaryCategory.sales || 0)
+    : sortedRecords.filter(r => r.categoryId === 'sales' || r.category === 'Sales').length
+  const totalBankFiles = hasDocumentSummary
+    ? Number(summaryCategory.bankStatements || 0)
+    : sortedRecords.filter(r => r.categoryId === 'bank-statements' || r.category === 'Bank Statement' || r.category === 'Bank').length
 
   // Activity Timeline
   const formatActivityTimestamp = (value = '') => {
@@ -952,11 +1063,8 @@ function DashboardPage({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
         <div className="flex items-start gap-4 w-full">
           <div>
-            <div className="inline-flex items-center gap-2 bg-primary text-white rounded-lg px-4 py-2">
-              <GreetingIcon className="w-5 h-5" />
-              <h1 className="text-lg font-semibold">{`Greetings! ${displayName}`}</h1>
-            </div>
-            <p className="text-sm text-text-secondary mt-1">Dashboard Overview</p>
+            <h1 className="text-xl font-semibold text-text-primary">Dashboard Overview</h1>
+            <p className="text-sm text-text-secondary mt-1">Your current document and activity snapshot.</p>
             <div className={`mt-2 inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs font-medium ${activeVerificationBadge.className}`}>
               <activeVerificationBadge.icon className="w-3.5 h-3.5" />
               {activeVerificationBadge.label}

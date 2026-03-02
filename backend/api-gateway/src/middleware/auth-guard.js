@@ -2,6 +2,8 @@ import { env } from "../config/env.js";
 
 const PUBLIC_ROUTE_KEYS = new Set([
   "GET /gateway/info",
+  "POST /auth/register-account",
+  "POST /auth/login-session",
   "POST /auth/send-otp",
   "POST /auth/verify-otp",
   "POST /auth/verify-token"

@@ -28,6 +28,7 @@ import {
   getAdminLevelLabel,
   canImpersonateForAdminLevel,
   hasAdminPermission,
+  normalizeAdminLevel,
   normalizeAdminAccount,
   normalizeAdminInvite,
   isAdminInvitePending,
@@ -35,11 +36,29 @@ import {
 import { getScopedStorageKey } from './utils/storage'
 import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
 import DotLottiePreloader from './components/common/DotLottiePreloader'
-import { getNetworkAwareDurationMs, isPageReloadNavigation } from './utils/networkRuntime'
+import { getNetworkAwareDurationMs, getNetworkConnectionSnapshot, isPageReloadNavigation } from './utils/networkRuntime'
 import { apiFetch, clearApiAccessToken, setApiAccessToken } from './utils/apiClient'
+import {
+  fetchClientDashboardOverviewFromBackend,
+  persistClientOnboardingToBackend,
+  recordAuthLoginSession,
+  registerAuthAccountRecord,
+} from './utils/clientBackendBridge'
+import {
+  isClientNotificationSoundPrimed,
+  playClientNotificationSound,
+  primeClientNotificationSound,
+} from './utils/clientNotificationSound'
+import {
+  isClientNotificationEnabled,
+  isClientNotificationSoundEnabled,
+  readClientNotificationSettings,
+} from './utils/clientNotificationPreferences'
 
 const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
+const CLIENT_DOCUMENT_PAGE_IDS = ['expenses', 'sales', 'bank-statements']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
+const CLIENT_ONBOARDING_TOTAL_STEPS = 2
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
@@ -61,6 +80,17 @@ const DEFAULT_DEV_ADMIN_ACCOUNT = {
   role: 'admin',
   adminLevel: ADMIN_LEVELS.SUPER,
   adminPermissions: FULL_ADMIN_PERMISSION_IDS,
+  status: 'active',
+}
+const DEFAULT_OWNER_PRIVATE_KEY = 'KIAMINA-OWNER-ACCESS-2026'
+const DEFAULT_DEV_OWNER_ACCOUNT = {
+  fullName: 'Owner',
+  email: 'owner@kiamina.local',
+  password: 'Owner@123!',
+  role: 'admin',
+  adminLevel: ADMIN_LEVELS.OWNER,
+  adminPermissions: FULL_ADMIN_PERMISSION_IDS,
+  ownerPrivateKey: DEFAULT_OWNER_PRIVATE_KEY,
   status: 'active',
 }
 const ADMIN_GOV_ID_TYPES_NIGERIA = ['International Passport', 'NIN', "Voter's Card", "Driver's Licence"]
@@ -312,6 +342,123 @@ const readClientBriefNotifications = (email = '') => {
   } catch {
     return []
   }
+}
+
+const CLIENT_NOTIFICATION_INBOX_STORAGE_KEY = 'kiaminaClientNotificationInbox'
+
+const normalizeClientNotificationEntry = (entry = {}) => {
+  const id = String(entry?.id || '').trim()
+  if (!id) return null
+  return {
+    ...entry,
+    id,
+    read: Boolean(entry?.read),
+  }
+}
+
+const readClientNotificationInbox = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail || typeof localStorage === 'undefined') return []
+  const scopedKey = getScopedStorageKey(CLIENT_NOTIFICATION_INBOX_STORAGE_KEY, normalizedEmail)
+  try {
+    const parsed = JSON.parse(localStorage.getItem(scopedKey) || '[]')
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .map((entry) => normalizeClientNotificationEntry(entry))
+      .filter(Boolean)
+      .slice(0, 80)
+  } catch {
+    return []
+  }
+}
+
+const persistClientNotificationInbox = (email = '', notifications = []) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail || typeof localStorage === 'undefined') return
+  const scopedKey = getScopedStorageKey(CLIENT_NOTIFICATION_INBOX_STORAGE_KEY, normalizedEmail)
+  const safeNotifications = (Array.isArray(notifications) ? notifications : [])
+    .map((entry) => normalizeClientNotificationEntry(entry))
+    .filter(Boolean)
+    .slice(0, 80)
+  localStorage.setItem(scopedKey, JSON.stringify(safeNotifications))
+}
+
+const mergeClientNotifications = (existing = [], incoming = []) => {
+  const byId = new Map()
+  ;[...(Array.isArray(incoming) ? incoming : []), ...(Array.isArray(existing) ? existing : [])]
+    .forEach((entry) => {
+      const normalized = normalizeClientNotificationEntry(entry)
+      if (!normalized) return
+      const previous = byId.get(normalized.id)
+      if (!previous) {
+        byId.set(normalized.id, normalized)
+        return
+      }
+      byId.set(normalized.id, {
+        ...previous,
+        ...normalized,
+        read: Boolean(previous.read || normalized.read),
+      })
+    })
+  return Array.from(byId.values()).slice(0, 80)
+}
+
+const markClientBriefNotificationRead = (email = '', notificationId = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const normalizedId = String(notificationId || '').trim()
+  if (!normalizedEmail || !normalizedId || typeof localStorage === 'undefined') return
+  const scopedKey = getScopedStorageKey(CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY, normalizedEmail)
+  try {
+    const parsed = JSON.parse(localStorage.getItem(scopedKey) || '[]')
+    const rows = Array.isArray(parsed) ? parsed : []
+    const nextRows = rows.map((row, index) => {
+      const rowId = String(row?.id || `CBN-FALLBACK-${index}`).trim()
+      if (rowId !== normalizedId) return row
+      return {
+        ...(row && typeof row === 'object' ? row : {}),
+        read: true,
+      }
+    })
+    localStorage.setItem(scopedKey, JSON.stringify(nextRows))
+  } catch {
+    // ignore malformed storage payloads
+  }
+}
+
+const markAllClientBriefNotificationsRead = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail || typeof localStorage === 'undefined') return
+  const scopedKey = getScopedStorageKey(CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY, normalizedEmail)
+  try {
+    const parsed = JSON.parse(localStorage.getItem(scopedKey) || '[]')
+    const rows = Array.isArray(parsed) ? parsed : []
+    const nextRows = rows.map((row) => ({
+      ...(row && typeof row === 'object' ? row : {}),
+      read: true,
+    }))
+    localStorage.setItem(scopedKey, JSON.stringify(nextRows))
+  } catch {
+    // ignore malformed storage payloads
+  }
+}
+
+const markClientNotificationInboxRead = (email = '', notificationId = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const normalizedId = String(notificationId || '').trim()
+  if (!normalizedEmail || !normalizedId) return
+  const inbox = readClientNotificationInbox(normalizedEmail)
+  const nextInbox = inbox.map((entry) => (
+    entry.id === normalizedId ? { ...entry, read: true } : entry
+  ))
+  persistClientNotificationInbox(normalizedEmail, nextInbox)
+}
+
+const markAllClientNotificationInboxRead = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return
+  const inbox = readClientNotificationInbox(normalizedEmail)
+  const nextInbox = inbox.map((entry) => ({ ...entry, read: true }))
+  persistClientNotificationInbox(normalizedEmail, nextInbox)
 }
 
 const toIsoDate = (value) => {
@@ -885,15 +1032,40 @@ const normalizeVerificationDocs = (payload = {}) => ({
   govIdVerificationStatus: String(payload?.govIdVerificationStatus || '').trim(),
   govIdClarityStatus: String(payload?.govIdClarityStatus || '').trim(),
   businessReg: String(payload?.businessReg || '').trim(),
+  businessRegVerificationStatus: String(payload?.businessRegVerificationStatus || '').trim(),
+  businessRegSubmittedAt: String(payload?.businessRegSubmittedAt || '').trim(),
 })
 
-const normalizeSettingsProfile = (payload = {}) => ({
-  fullName: String(payload?.fullName || '').trim(),
-  email: String(payload?.email || '').trim().toLowerCase(),
-  phone: String(payload?.phone || '').trim(),
-  address: String(payload?.address1 || payload?.address || '').trim(),
-  businessType: String(payload?.businessType || '').trim(),
-})
+const resolveSettingsProfileNameParts = (payload = {}) => {
+  const fallbackParts = String(payload?.fullName || '').trim().split(/\s+/).filter(Boolean)
+  const firstName = String(payload?.firstName || fallbackParts[0] || '').trim()
+  const lastName = String(payload?.lastName || (fallbackParts.length > 1 ? fallbackParts[fallbackParts.length - 1] : '') || '').trim()
+  const otherNames = String(
+    payload?.otherNames
+    || (fallbackParts.length > 2 ? fallbackParts.slice(1, -1).join(' ') : ''),
+  ).trim()
+  return { firstName, lastName, otherNames }
+}
+
+const buildSettingsProfileFullName = (payload = {}) => {
+  const names = resolveSettingsProfileNameParts(payload)
+  return [names.firstName, names.otherNames, names.lastName].filter(Boolean).join(' ').trim()
+}
+
+const normalizeSettingsProfile = (payload = {}) => {
+  const names = resolveSettingsProfileNameParts(payload)
+  return {
+    firstName: names.firstName,
+    lastName: names.lastName,
+    otherNames: names.otherNames,
+    fullName: buildSettingsProfileFullName(payload) || String(payload?.fullName || '').trim(),
+    email: String(payload?.email || '').trim().toLowerCase(),
+    phone: String(payload?.phone || '').trim(),
+    address: String(payload?.address1 || payload?.address || '').trim(),
+    businessType: String(payload?.businessType || '').trim(),
+    country: String(payload?.country || payload?.addressCountry || '').trim(),
+  }
+}
 
 const readScopedSettingsProfile = (email = '') => {
   const normalizedEmail = String(email || '').trim().toLowerCase()
@@ -1090,13 +1262,15 @@ function App() {
     }
     return null
   }
-  const getSavedCompanyName = (email, fallback = 'Acme Corporation') => {
+  const getSavedCompanyName = (email, fallback = '') => {
     const parsed = getSavedScopedJson('settingsFormData', email)
     return parsed?.businessName?.trim() || fallback
   }
   const getSavedClientFirstName = (email, fallback = 'Client') => {
     const parsed = getSavedScopedJson('settingsFormData', email)
-    return parsed?.fullName?.trim()?.split(/\s+/)?.[0] || fallback
+    if (!parsed || typeof parsed !== 'object') return fallback
+    const normalizedProfile = normalizeSettingsProfile(parsed)
+    return normalizedProfile.firstName || normalizedProfile.fullName?.trim()?.split(/\s+/)?.[0] || fallback
   }
   const getSavedScopedString = (baseKey, email) => {
     const scopedKey = getScopedStorageKey(baseKey, email)
@@ -1128,20 +1302,21 @@ function App() {
     if (!import.meta.env.DEV) return
     try {
       const accounts = getSavedAccounts()
-      const normalizedSeed = normalizeAccount(DEFAULT_DEV_ADMIN_ACCOUNT)
-      const adminIndex = accounts.findIndex(
-        (account) => account.email?.trim()?.toLowerCase() === normalizedSeed.email.toLowerCase(),
-      )
-      if (adminIndex === -1) {
-        localStorage.setItem('kiaminaAccounts', JSON.stringify([...accounts, normalizedSeed]))
-        return
-      }
-
-      const existing = accounts[adminIndex]
+      const seeds = [DEFAULT_DEV_OWNER_ACCOUNT, DEFAULT_DEV_ADMIN_ACCOUNT].map((entry) => normalizeAccount(entry))
       const nextAccounts = [...accounts]
-      nextAccounts[adminIndex] = normalizeAccount({
-        ...existing,
-        ...normalizedSeed,
+      seeds.forEach((seed) => {
+        const adminIndex = nextAccounts.findIndex(
+          (account) => account.email?.trim()?.toLowerCase() === seed.email.toLowerCase(),
+        )
+        if (adminIndex === -1) {
+          nextAccounts.push(seed)
+          return
+        }
+        const existing = nextAccounts[adminIndex]
+        nextAccounts[adminIndex] = normalizeAccount({
+          ...existing,
+          ...seed,
+        })
       })
       localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
     } catch {
@@ -1187,8 +1362,12 @@ function App() {
   const getSavedOnboardingState = (email) => {
     const parsed = getSavedScopedJson('kiaminaOnboardingState', email)
     if (!parsed) return createDefaultOnboardingState()
+    const normalizedCurrentStep = Math.min(
+      CLIENT_ONBOARDING_TOTAL_STEPS,
+      Math.max(1, Number(parsed.currentStep) || 1),
+    )
     return {
-      currentStep: parsed.currentStep || 1,
+      currentStep: normalizedCurrentStep,
       completed: Boolean(parsed.completed),
       skipped: Boolean(parsed.skipped),
       verificationPending: parsed.verificationPending !== undefined ? Boolean(parsed.verificationPending) : true,
@@ -1321,6 +1500,7 @@ function App() {
   const [profilePhoto, setProfilePhoto] = useState(() => getSavedProfilePhoto(initialScopedClientEmail))
   const [companyLogo, setCompanyLogo] = useState(() => getSavedCompanyLogo(initialScopedClientEmail))
   const [companyName, setCompanyName] = useState(() => getSavedCompanyName(initialScopedClientEmail))
+  const [clientDashboardOverview, setClientDashboardOverview] = useState(null)
   const [clientFirstName, setClientFirstName] = useState(() => {
     const fallbackName = initialImpersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
       || initialAuthUser?.fullName?.trim()?.split(/\s+/)?.[0]
@@ -1520,7 +1700,7 @@ function App() {
       'Pending',
     ], 26)
   }, [dashboardSearchEntries])
-  const previousDashboardFilesRef = useRef(null)
+  const previousClientStatusSnapshotRef = useRef(null)
 
   const isImpersonatingClient = Boolean(
     isAuthenticated
@@ -1564,7 +1744,8 @@ function App() {
   }
   const hasIsoTimestamp = (value) => Number.isFinite(Date.parse(value || ''))
   const identityVerificationApprovedByAdmin = Boolean(
-    normalizeBooleanFlag(scopedClientStatusControl?.identityVerificationApproved)
+    verificationProgress.identityStepCompleted
+    || normalizeBooleanFlag(scopedClientStatusControl?.identityVerificationApproved)
     || hasIsoTimestamp(scopedClientStatusControl?.identityVerificationApprovedAt)
     || (
       String(dashboardVerificationState || '').toLowerCase() === 'verified'
@@ -1580,7 +1761,7 @@ function App() {
     verificationProgress.profile.businessType || onboardingState.data?.businessType || '',
   ).trim().toLowerCase() === 'individual'
   const isIdentityVerificationComplete = Boolean(
-    verificationProgress.identityStepCompleted && identityVerificationApprovedByAdmin,
+    verificationProgress.identityStepCompleted,
   )
   const isBusinessVerificationComplete = Boolean(
     verificationProgress.businessStepCompleted
@@ -1602,17 +1783,85 @@ function App() {
     return 'expenses'
   }
 
+  const resolveNotificationDocumentLocation = (notification = {}) => {
+    const normalizeKey = (value = '') => String(value || '').trim().toLowerCase()
+    const normalizedCategory = String(notification?.categoryId || notification?.linkPage || '').trim()
+    const normalizedFolderId = String(notification?.folderId || '').trim()
+    const normalizedFileId = normalizeKey(notification?.fileId || '')
+    const normalizedDocumentId = normalizeKey(notification?.documentId || '')
+
+    if (CLIENT_DOCUMENT_PAGE_IDS.includes(normalizedCategory) && normalizedFolderId) {
+      return {
+        categoryId: normalizedCategory,
+        folderId: normalizedFolderId,
+      }
+    }
+
+    const matchesNotificationToRecord = (record = {}) => {
+      const recordFileId = normalizeKey(record?.fileId || '')
+      const recordId = normalizeKey(record?.id || '')
+      if (normalizedFileId && recordFileId && normalizedFileId === recordFileId) return true
+      if (normalizedDocumentId && recordId && normalizedDocumentId === recordId) return true
+      return false
+    }
+
+    const dashboardMatch = dashboardRecords.find((record) => (
+      !record?.isFolder && matchesNotificationToRecord(record)
+    ))
+    if (dashboardMatch) {
+      return {
+        categoryId: String(dashboardMatch.categoryId || getNotificationPageFromRecord(dashboardMatch)).trim(),
+        folderId: String(dashboardMatch.folderId || '').trim(),
+      }
+    }
+
+    const uploadHistoryMatch = (Array.isArray(uploadHistoryRecords) ? uploadHistoryRecords : []).find((record) => (
+      !record?.isFolder && matchesNotificationToRecord(record)
+    ))
+    if (uploadHistoryMatch) {
+      return {
+        categoryId: String(
+          uploadHistoryMatch.categoryId
+          || resolveCategoryIdFromHistoryLabel(uploadHistoryMatch.category || ''),
+        ).trim(),
+        folderId: String(uploadHistoryMatch.folderId || '').trim(),
+      }
+    }
+
+    if (normalizedFolderId) {
+      const folderMatch = dashboardRecords.find((record) => String(record?.folderId || '').trim() === normalizedFolderId)
+      if (folderMatch) {
+        return {
+          categoryId: String(folderMatch.categoryId || getNotificationPageFromRecord(folderMatch)).trim(),
+          folderId: normalizedFolderId,
+        }
+      }
+    }
+
+    return {
+      categoryId: '',
+      folderId: '',
+    }
+  }
+
   useEffect(() => {
     if (!isAuthenticated || isAdminView) {
-      previousDashboardFilesRef.current = null
+      previousClientStatusSnapshotRef.current = null
       return
     }
 
-    const buildRecordKey = (record = {}) => record.fileId || record.id || `${record.folderId || ''}-${record.filename || ''}`
-    const currentMap = new Map(dashboardRecords.map((record) => [buildRecordKey(record), record]))
-    const previousMap = previousDashboardFilesRef.current
-    if (!previousMap) {
-      previousDashboardFilesRef.current = currentMap
+    const normalizedVerificationStatus = String(scopedClientStatusControl?.verificationStatus || '').trim().toLowerCase()
+    const normalizedAccountStatus = String(authUser?.status || scopedClientAccountStatus || '').trim().toLowerCase()
+    const isSuspended = normalizedAccountStatus === 'suspended'
+      || normalizedVerificationStatus.includes('suspended')
+    const statusSnapshot = {
+      isSuspended,
+      suspensionMessage: String(scopedClientStatusControl?.suspensionMessage || '').trim(),
+    }
+
+    const previousSnapshot = previousClientStatusSnapshotRef.current
+    if (!previousSnapshot) {
+      previousClientStatusSnapshotRef.current = statusSnapshot
       return
     }
 
@@ -1626,94 +1875,43 @@ function App() {
     })
     const nextNotifications = []
 
-    currentMap.forEach((record, key) => {
-      const previous = previousMap.get(key)
-      if (!previous) return
-
-      const linkPage = getNotificationPageFromRecord(record)
-      const fileName = record.filename || 'document'
-      const currentStatus = normalizeDocumentWorkflowStatus(record.status || 'Pending Review')
-      const previousStatus = normalizeDocumentWorkflowStatus(previous.status || 'Pending Review')
-
-      if (currentStatus !== previousStatus) {
-        const statusType = currentStatus === 'Approved'
-          ? 'approved'
-          : currentStatus === 'Rejected'
-            ? 'rejected'
-            : currentStatus === 'Info Requested' || currentStatus === 'Needs Clarification'
-              ? 'info'
-              : 'comment'
-        const priority = currentStatus === 'Rejected'
-          ? 'critical'
-          : currentStatus === 'Info Requested' || currentStatus === 'Needs Clarification'
-            ? 'important'
-            : 'info'
-        const statusMessage = currentStatus === 'Approved'
-          ? `Admin approved ${fileName}.`
-          : currentStatus === 'Rejected'
-            ? `Admin rejected ${fileName}.`
-            : currentStatus === 'Info Requested' || currentStatus === 'Needs Clarification'
-              ? `Admin requested more information for ${fileName}.`
-              : `Status updated for ${fileName}: ${currentStatus}.`
-        nextNotifications.push({
-          id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          type: statusType,
-          message: statusMessage,
-          timestamp,
-          read: false,
-          priority,
-          linkPage,
-          fileId: record.fileId || record.id,
-        })
-      }
-
-      const currentComment = (record.adminComment || '').trim()
-      const previousComment = (previous.adminComment || '').trim()
-      if (currentComment && currentComment !== previousComment) {
-        nextNotifications.push({
-          id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          type: 'comment',
-          message: `Admin comment on ${fileName}: ${currentComment}`,
-          timestamp,
-          read: false,
-          priority: 'important',
-          linkPage,
-          fileId: record.fileId || record.id,
-        })
-      }
-
-      const currentRequestDetails = (
-        record.requiredAction
-        || record.infoRequestDetails
-        || record.adminNotes
-        || ''
-      ).trim()
-      const previousRequestDetails = (
-        previous.requiredAction
-        || previous.infoRequestDetails
-        || previous.adminNotes
-        || ''
-      ).trim()
-      if (currentRequestDetails && currentRequestDetails !== previousRequestDetails) {
-        nextNotifications.push({
-          id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          type: 'info',
-          message: `Admin request details for ${fileName}: ${currentRequestDetails}`,
-          timestamp,
-          read: false,
-          priority: 'important',
-          linkPage,
-          fileId: record.fileId || record.id,
-        })
-      }
-    })
-
-    if (nextNotifications.length > 0) {
-      setUserNotifications((prev) => [...nextNotifications, ...prev].slice(0, 80))
+    if (!previousSnapshot.isSuspended && statusSnapshot.isSuspended) {
+      nextNotifications.push({
+        id: `N-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'suspended',
+        message: statusSnapshot.suspensionMessage
+          ? `Account suspended: ${statusSnapshot.suspensionMessage}`
+          : 'Account suspended. Contact support for details.',
+        timestamp,
+        read: false,
+        priority: 'critical',
+        linkPage: 'settings',
+      })
     }
 
-    previousDashboardFilesRef.current = currentMap
-  }, [dashboardRecords, isAuthenticated, isAdminView])
+    if (nextNotifications.length > 0) {
+      const clientNotificationSettings = readClientNotificationSettings(normalizedScopedClientEmail)
+      const filteredNotifications = nextNotifications.filter((entry) => (
+        isClientNotificationEnabled(entry, clientNotificationSettings)
+      ))
+      if (filteredNotifications.length > 0) {
+        setUserNotifications((prev) => [...filteredNotifications, ...prev].slice(0, 80))
+        if (isClientNotificationSoundEnabled(clientNotificationSettings)) {
+          playClientNotificationSound()
+        }
+      }
+    }
+
+    previousClientStatusSnapshotRef.current = statusSnapshot
+  }, [
+    authUser?.status,
+    isAdminView,
+    isAuthenticated,
+    scopedClientAccountStatus,
+    scopedClientStatusControl?.suspensionMessage,
+    scopedClientStatusControl?.verificationStatus,
+    normalizedScopedClientEmail,
+  ])
 
   const getResolvedCurrentAdminAccount = () => {
     if (!isAuthenticated || !isAdminView || !authUser?.email) return null
@@ -2036,6 +2234,21 @@ function App() {
       return
     }
 
+    const connectionSnapshot = getNetworkConnectionSnapshot()
+    const isSlowConnection = (
+      connectionSnapshot.saveData
+      || connectionSnapshot.effectiveType === 'slow-2g'
+      || connectionSnapshot.effectiveType === '2g'
+      || connectionSnapshot.effectiveType === '3g'
+      || (Number(connectionSnapshot.downlink || 0) > 0 && Number(connectionSnapshot.downlink || 0) < 2)
+      || Number(connectionSnapshot.rtt || 0) > 320
+    )
+
+    if (!isSlowConnection) {
+      setIsDashboardBootstrapLoading(false)
+      return
+    }
+
     setIsDashboardBootstrapLoading(true)
     dashboardBootstrapTimerRef.current = window.setTimeout(() => {
       dashboardBootstrapTimerRef.current = null
@@ -2179,7 +2392,7 @@ function App() {
     setSettingsProfileSnapshot(savedVerificationProgress.profile)
     setVerificationDocsSnapshot(savedVerificationProgress.docs)
     persistScopedVerificationDocs(scopedClientEmail, savedVerificationProgress.docs)
-    const fallbackCompanyName = impersonationSession?.businessName || 'Acme Corporation'
+    const fallbackCompanyName = impersonationSession?.businessName || ''
     const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
       || authUser?.fullName?.trim()?.split(/\s+/)?.[0]
       || 'Client'
@@ -2310,9 +2523,21 @@ function App() {
       const effectiveFullName = isImpersonatingClient
         ? (impersonationSession?.clientName || existing.fullName || '')
         : (authUser?.fullName || existing.fullName || '')
+      const existingNameParts = resolveSettingsProfileNameParts(existing)
       const merged = {
         ...existing,
         fullName: effectiveFullName,
+        firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
+        lastName: existingNameParts.lastName || (
+          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
+            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
+            : ''
+        ),
+        otherNames: existingNameParts.otherNames || (
+          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
+            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
+            : ''
+        ),
         email: targetEmail || existing.email || '',
         businessType: nextData.businessType ?? existing.businessType ?? '',
         businessName: nextData.businessName ?? existing.businessName ?? '',
@@ -2327,9 +2552,10 @@ function App() {
         language: nextData.language ?? existing.language ?? '',
       }
       localStorage.setItem(settingsKey, JSON.stringify(merged))
-      setSettingsProfileSnapshot(normalizeSettingsProfile(merged))
-      setCompanyName(merged.businessName?.trim() || 'Acme Corporation')
-      setClientFirstName(merged.fullName?.trim()?.split(/\s+/)?.[0] || 'Client')
+      const normalizedProfile = normalizeSettingsProfile(merged)
+      setSettingsProfileSnapshot(normalizedProfile)
+      setCompanyName(merged.businessName?.trim() || '')
+      setClientFirstName(normalizedProfile.firstName || 'Client')
       if (isImpersonatingClient) {
         logAdminActivity({
           adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
@@ -2344,7 +2570,10 @@ function App() {
   }
 
   const setOnboardingStep = (step) => {
-    persistOnboardingState({ ...onboardingState, currentStep: Math.min(5, Math.max(1, step)) }, scopedClientEmail)
+    persistOnboardingState({
+      ...onboardingState,
+      currentStep: Math.min(CLIENT_ONBOARDING_TOTAL_STEPS, Math.max(1, step)),
+    }, scopedClientEmail)
   }
 
   const syncProfileToSettings = (fullName, email) => {
@@ -2352,9 +2581,13 @@ function App() {
       const settingsKey = getScopedStorageKey('settingsFormData', email)
       const saved = localStorage.getItem(settingsKey) || (email ? localStorage.getItem('settingsFormData') : null)
       const existing = saved ? JSON.parse(saved) : {}
+      const fullNameParts = resolveSettingsProfileNameParts({ ...existing, fullName: fullName || existing.fullName || '' })
       const next = {
         ...existing,
         fullName: fullName || existing.fullName || '',
+        firstName: fullNameParts.firstName || existing.firstName || '',
+        lastName: fullNameParts.lastName || existing.lastName || '',
+        otherNames: fullNameParts.otherNames || existing.otherNames || '',
         email: email || existing.email || '',
       }
       localStorage.setItem(settingsKey, JSON.stringify(next))
@@ -2386,6 +2619,24 @@ function App() {
   const showToast = (type, message) => {
     setToast({ type, message })
     setTimeout(() => setToast(null), 4000)
+  }
+
+  const refreshClientDashboardOverview = async ({ authorizationToken = '' } = {}) => {
+    if (!isAuthenticated) return { ok: false }
+    if (isAdminView && !isImpersonatingClient) return { ok: false }
+
+    const token = String(authorizationToken || authUser?.firebaseIdToken || '').trim()
+    if (!token) return { ok: false }
+
+    const response = await fetchClientDashboardOverviewFromBackend({
+      authorizationToken: token,
+    })
+    if (!response.ok || !response.data || typeof response.data !== 'object') {
+      return { ok: false }
+    }
+
+    setClientDashboardOverview(response.data)
+    return { ok: true, data: response.data }
   }
 
   const persistAuthenticatedUserRecord = (user, storageType = 'local') => {
@@ -2518,8 +2769,6 @@ function App() {
   const handleSocialLogin = async (provider, providedFullName = '') => {
     const providerMap = {
       google: { name: 'Google', email: 'google.user@oauth.kiamina.local' },
-      apple: { name: 'Apple', email: 'apple.user@oauth.kiamina.local' },
-      linkedin: { name: 'LinkedIn', email: 'linkedin.user@oauth.kiamina.local' },
     }
     const selected = providerMap[provider]
     if (!selected) {
@@ -2569,6 +2818,21 @@ function App() {
     const user = { fullName, email: selected.email, role: socialRole }
     persistAuthUser(user, true)
     clearApiAccessToken()
+    await registerAuthAccountRecord({
+      email: selected.email,
+      fullName,
+      role: socialRole,
+      provider: provider,
+      status: existing?.status || 'active',
+      emailVerified: true,
+    })
+    await recordAuthLoginSession({
+      email: selected.email,
+      role: socialRole,
+      loginMethod: 'google',
+      remember: true,
+      mfaCompleted: true,
+    })
     syncProfileToSettings(user.fullName, user.email)
     setOtpChallenge(null)
     showToast('success', `${selected.name} authentication successful.`)
@@ -2614,7 +2878,7 @@ function App() {
     return { ok: true, requiresOtp: true }
   }
 
-  const handleAdminLogin = async ({ email, password, remember }) => {
+  const handleAdminLogin = async ({ email, password, remember, ownerPrivateKey }) => {
     const loginFailureMessage = 'Admin email or password incorrect.'
     const normalizedEmail = email?.trim()?.toLowerCase()
     if (!normalizedEmail || !password) {
@@ -2635,6 +2899,17 @@ function App() {
     }
     if (match.password !== password) {
       return { ok: false, message: loginFailureMessage }
+    }
+    const normalizedAdminLevel = normalizeAdminLevel(match.adminLevel)
+    if (normalizedAdminLevel === ADMIN_LEVELS.OWNER) {
+      const providedOwnerPrivateKey = String(ownerPrivateKey || '').trim()
+      const expectedOwnerPrivateKey = String(match.ownerPrivateKey || DEFAULT_OWNER_PRIVATE_KEY).trim()
+      if (!providedOwnerPrivateKey) {
+        return { ok: false, message: 'Owner private key is required.' }
+      }
+      if (providedOwnerPrivateKey !== expectedOwnerPrivateKey) {
+        return { ok: false, message: 'Invalid owner private key.' }
+      }
     }
 
     const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
@@ -2808,6 +3083,75 @@ function App() {
   }, [normalizedScopedClientEmail, isAuthenticated, currentUserRole])
 
   useEffect(() => {
+    if (!isAuthenticated || currentUserRole === 'admin') {
+      setUserNotifications([])
+      return
+    }
+    const normalizedEmail = String(normalizedScopedClientEmail || '').trim().toLowerCase()
+    if (!normalizedEmail) {
+      setUserNotifications([])
+      return
+    }
+    setUserNotifications(readClientNotificationInbox(normalizedEmail))
+  }, [isAuthenticated, currentUserRole, normalizedScopedClientEmail])
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUserRole === 'admin') return
+    const normalizedEmail = String(normalizedScopedClientEmail || '').trim().toLowerCase()
+    if (!normalizedEmail) return
+    persistClientNotificationInbox(normalizedEmail, userNotifications)
+  }, [userNotifications, isAuthenticated, currentUserRole, normalizedScopedClientEmail])
+
+  useEffect(() => {
+    if (!isAuthenticated || (isAdminView && !isImpersonatingClient)) {
+      setClientDashboardOverview(null)
+      return undefined
+    }
+
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+    if (!authorizationToken) {
+      setClientDashboardOverview(null)
+      return undefined
+    }
+
+    let isDisposed = false
+    const loadOverview = async () => {
+      const response = await fetchClientDashboardOverviewFromBackend({ authorizationToken })
+      if (isDisposed || !response.ok || !response.data || typeof response.data !== 'object') return
+      setClientDashboardOverview(response.data)
+    }
+
+    loadOverview()
+    const intervalId = window.setInterval(loadOverview, 45000)
+    return () => {
+      isDisposed = true
+      window.clearInterval(intervalId)
+    }
+  }, [
+    isAuthenticated,
+    isAdminView,
+    isImpersonatingClient,
+    normalizedScopedClientEmail,
+    authUser?.firebaseIdToken,
+  ])
+
+  useEffect(() => {
+    if (!isAuthenticated || currentUserRole === 'admin') return undefined
+    const handlePrimer = () => {
+      if (isClientNotificationSoundPrimed()) return
+      primeClientNotificationSound()
+    }
+    window.addEventListener('pointerdown', handlePrimer, { passive: true })
+    window.addEventListener('keydown', handlePrimer, { passive: true })
+    window.addEventListener('touchstart', handlePrimer, { passive: true })
+    return () => {
+      window.removeEventListener('pointerdown', handlePrimer)
+      window.removeEventListener('keydown', handlePrimer)
+      window.removeEventListener('touchstart', handlePrimer)
+    }
+  }, [isAuthenticated, currentUserRole])
+
+  useEffect(() => {
     if (!isAuthenticated || currentUserRole === 'admin') return undefined
     const normalizedEmail = String(normalizedScopedClientEmail || '').trim().toLowerCase()
     if (!normalizedEmail) return undefined
@@ -2824,26 +3168,54 @@ function App() {
       })
       if (unseen.length === 0) return
 
+      const inboxSnapshot = readClientNotificationInbox(normalizedEmail)
+      const inboxById = new Map(
+        inboxSnapshot
+          .map((entry) => normalizeClientNotificationEntry(entry))
+          .filter(Boolean)
+          .map((entry) => [entry.id, entry]),
+      )
+      const clientNotificationSettings = readClientNotificationSettings(normalizedEmail)
       const mapped = unseen.map((item, index) => {
         const notificationId = String(item?.id || `CBN-FALLBACK-${Date.now()}-${index}`).trim()
         const title = String(item?.title || 'New Update').trim()
         const body = String(item?.message || '').trim()
         const composedMessage = body ? `${title}: ${body}` : title
         const sentAtIso = String(item?.sentAtIso || new Date().toISOString()).trim()
+        const normalizedType = String(item?.type || 'info').trim().toLowerCase()
+        const allowedLinkPage = APP_PAGE_IDS.includes(String(item?.linkPage || '').trim())
+          ? String(item.linkPage).trim()
+          : 'dashboard'
+        const linkCategoryId = CLIENT_DOCUMENT_PAGE_IDS.includes(allowedLinkPage) ? allowedLinkPage : ''
         return {
           id: notificationId,
-          type: 'info',
+          type: normalizedType || 'info',
           message: composedMessage,
           timestamp: formatClientDocumentTimestamp(sentAtIso),
-          read: false,
+          read: Boolean(item?.read || inboxById.get(notificationId)?.read),
+          forceDelivery: (
+            item?.forceDelivery === true
+            || String(item?.forceDelivery || '').trim().toLowerCase() === 'true'
+          ),
           priority: String(item?.priority || 'normal').trim().toLowerCase(),
-          linkPage: 'dashboard',
+          linkPage: allowedLinkPage,
+          categoryId: String(item?.categoryId || linkCategoryId).trim(),
+          folderId: String(item?.folderId || '').trim(),
+          fileId: String(item?.fileId || '').trim(),
+          documentId: String(item?.documentId || '').trim(),
         }
-      })
+      }).filter((entry) => isClientNotificationEnabled(entry, clientNotificationSettings))
+      if (mapped.length === 0) return
 
-      setUserNotifications((previous) => [...mapped, ...previous].slice(0, 80))
-      const previewMessage = mapped[0]?.message || 'You have a new notification.'
-      showToast('info', previewMessage.length > 140 ? `${previewMessage.slice(0, 137)}...` : previewMessage)
+      const freshUnread = mapped.filter((entry) => !entry.read && !inboxById.has(entry.id))
+      setUserNotifications((previous) => mergeClientNotifications(previous, mapped))
+      if (freshUnread.length > 0) {
+        if (isClientNotificationSoundEnabled(clientNotificationSettings)) {
+          playClientNotificationSound()
+        }
+        const previewMessage = freshUnread[0]?.message || 'You have a new notification.'
+        showToast('info', previewMessage.length > 140 ? `${previewMessage.slice(0, 137)}...` : previewMessage)
+      }
     }
 
     syncBriefNotifications()
@@ -2911,6 +3283,8 @@ function App() {
     governmentIdNumber,
     identityVerificationPassed,
     residentialAddress,
+    ownerPrivateKey,
+    confirmOwnerPrivateKey,
     password,
     confirmPassword,
   }) => {
@@ -2928,6 +3302,10 @@ function App() {
     const normalizedGovernmentIdType = normalizeAdminGovernmentIdType(governmentIdType, normalizedWorkCountry)
     const normalizedGovernmentIdNumber = String(governmentIdNumber || '').trim()
     const normalizedResidentialAddress = String(residentialAddress || '').trim()
+    const invitedAdminLevel = normalizeAdminLevel(invite?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
+    const isOwnerInvite = invitedAdminLevel === ADMIN_LEVELS.OWNER
+    const normalizedOwnerPrivateKey = String(ownerPrivateKey || '').trim()
+    const normalizedConfirmOwnerPrivateKey = String(confirmOwnerPrivateKey || '').trim()
     if (
       !fullName?.trim()
       || !normalizedEmail
@@ -2935,11 +3313,26 @@ function App() {
       || !normalizedDepartment
       || !normalizedPhoneNumber
       || !normalizedWorkCountry
-      || !normalizedGovernmentIdType
-      || !normalizedGovernmentIdNumber
-      || !identityVerificationPassed
       || !password
       || !confirmPassword
+    ) {
+      return { ok: false, message: 'Please complete all required fields.' }
+    }
+    if (isOwnerInvite) {
+      if (!normalizedOwnerPrivateKey || !normalizedConfirmOwnerPrivateKey) {
+        return { ok: false, message: 'Owner private key and confirmation are required.' }
+      }
+      if (normalizedOwnerPrivateKey !== normalizedConfirmOwnerPrivateKey) {
+        return { ok: false, message: 'Owner private key confirmation does not match.' }
+      }
+      if (normalizedOwnerPrivateKey.length < 12) {
+        return { ok: false, message: 'Owner private key must be at least 12 characters.' }
+      }
+    } else if (
+      !normalizedGovernmentIdType
+      || !normalizedGovernmentIdNumber
+      || !identityVerificationPassed
+      || !normalizedResidentialAddress
     ) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
@@ -2949,7 +3342,7 @@ function App() {
     if (normalizedPhoneNumber.replace(/\D/g, '').length < 7) {
       return { ok: false, message: 'Enter a valid phone number.' }
     }
-    if (normalizedGovernmentIdNumber.length < 4) {
+    if (!isOwnerInvite && normalizedGovernmentIdNumber.length < 4) {
       return { ok: false, message: 'Enter a valid government ID number.' }
     }
     const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
@@ -2980,13 +3373,14 @@ function App() {
         department: normalizedDepartment,
         phoneNumber: normalizedPhoneNumber,
         workCountry: normalizedWorkCountry,
-        governmentIdType: normalizedGovernmentIdType,
-        governmentIdNumber: normalizedGovernmentIdNumber,
-        governmentIdVerifiedAt: new Date().toISOString(),
+        governmentIdType: isOwnerInvite ? '' : normalizedGovernmentIdType,
+        governmentIdNumber: isOwnerInvite ? '' : normalizedGovernmentIdNumber,
+        governmentIdVerifiedAt: isOwnerInvite ? '' : new Date().toISOString(),
         residentialAddress: normalizedResidentialAddress,
+        ownerPrivateKey: isOwnerInvite ? normalizedOwnerPrivateKey : '',
         password,
         role: 'admin',
-        adminLevel: invite.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT,
+        adminLevel: invitedAdminLevel,
         adminPermissions: Array.isArray(invite.adminPermissions) ? invite.adminPermissions : [],
         status: 'active',
         createdAt: new Date().toISOString(),
@@ -3027,13 +3421,20 @@ function App() {
         return { ok: false, message: 'Incorrect verification code.' }
       }
       if (otpChallenge.purpose === 'admin-setup') {
+        const pendingAdminLevel = normalizeAdminLevel(pendingSignup?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
+        const isOwnerSignup = pendingAdminLevel === ADMIN_LEVELS.OWNER
         const hasProfileFields = Boolean(
           String(pendingSignup?.roleInCompany || '').trim()
           && String(pendingSignup?.department || '').trim()
           && String(pendingSignup?.phoneNumber || '').trim()
           && String(pendingSignup?.workCountry || '').trim()
-          && String(pendingSignup?.governmentIdType || '').trim()
-          && String(pendingSignup?.governmentIdNumber || '').trim(),
+          && (isOwnerSignup
+            ? String(pendingSignup?.ownerPrivateKey || '').trim()
+            : (
+              String(pendingSignup?.governmentIdType || '').trim()
+              && String(pendingSignup?.governmentIdNumber || '').trim()
+              && String(pendingSignup?.residentialAddress || '').trim()
+            )),
         )
         if (!hasProfileFields) {
           return { ok: false, message: 'Please complete all required profile fields.' }
@@ -3055,8 +3456,9 @@ function App() {
         workCountry: pendingSignup.workCountry,
         governmentIdType: pendingSignup.governmentIdType,
         governmentIdNumber: pendingSignup.governmentIdNumber,
-        governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || new Date().toISOString(),
+        governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || '',
         residentialAddress: pendingSignup.residentialAddress,
+        ownerPrivateKey: pendingSignup.ownerPrivateKey || '',
         password: pendingSignup.password,
         role: pendingSignup.role || 'client',
         adminLevel: pendingSignup.adminLevel,
@@ -3090,6 +3492,23 @@ function App() {
       persistAuthUser(user, true)
       if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: true })
       else clearApiAccessToken()
+      await registerAuthAccountRecord({
+        uid: pendingSignup.uid || user?.uid || '',
+        email: pendingSignup.email,
+        fullName: pendingSignup.fullName,
+        role: nextAccount.role || pendingSignup.role || 'client',
+        provider: 'email-password',
+        status: nextAccount.status || 'active',
+        emailVerified: true,
+      })
+      await recordAuthLoginSession({
+        uid: pendingSignup.uid || user?.uid || '',
+        email: pendingSignup.email,
+        role: nextAccount.role || pendingSignup.role || 'client',
+        loginMethod: 'otp',
+        remember: true,
+        mfaCompleted: true,
+      })
       syncProfileToSettings(user.fullName, user.email)
 
       if (user.role === 'client') {
@@ -3123,7 +3542,7 @@ function App() {
             workCountry: pendingSignup.workCountry || 'Nigeria',
             governmentIdType: pendingSignup.governmentIdType || '',
             governmentIdNumber: pendingSignup.governmentIdNumber || '',
-            governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || new Date().toISOString(),
+            governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || '',
             residentialAddress: pendingSignup.residentialAddress || '',
           }))
         } catch {
@@ -3140,6 +3559,10 @@ function App() {
           })
           saveAdminInvites(nextInvites)
         }
+      }
+
+      if (user.role === 'client' && firebaseIdToken) {
+        await refreshClientDashboardOverview({ authorizationToken: firebaseIdToken })
       }
     } else {
       const accounts = getSavedAccounts()
@@ -3163,6 +3586,23 @@ function App() {
       persistAuthUser(user, shouldRememberSession)
       if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: shouldRememberSession })
       else clearApiAccessToken()
+      await recordAuthLoginSession({
+        uid: match.uid || user?.uid || '',
+        email: match.email,
+        role: match.role || otpChallenge.role || 'client',
+        loginMethod: 'otp',
+        remember: shouldRememberSession,
+        mfaCompleted: true,
+      })
+      await registerAuthAccountRecord({
+        uid: match.uid || user?.uid || '',
+        email: match.email,
+        fullName: match.fullName || user?.fullName || '',
+        role: match.role || otpChallenge.role || 'client',
+        provider: 'email-password',
+        status: match.status || 'active',
+        emailVerified: true,
+      })
       syncProfileToSettings(user.fullName, user.email)
       if (normalizeRole(match.role, match.email) === 'admin' && match.mustChangePassword) {
         window.setTimeout(() => {
@@ -3176,6 +3616,9 @@ function App() {
           action: 'Client login',
           details: 'Client authenticated successfully via OTP.',
         })
+        if (firebaseIdToken) {
+          await refreshClientDashboardOverview({ authorizationToken: firebaseIdToken })
+        }
       }
     }
 
@@ -3402,8 +3845,9 @@ function App() {
   const handleRequestAdminImpersonation = async (targetAdminEmail = '') => {
     const targetEmail = String(targetAdminEmail || '').trim().toLowerCase()
     if (!targetEmail) return { ok: false, message: 'Admin account not found.' }
-    if (!currentAdminAccount || currentAdminAccount.adminLevel !== ADMIN_LEVELS.SUPER) {
-      return { ok: false, message: 'Only Super Admin can impersonate admin accounts.' }
+    const currentAdminLevel = normalizeAdminLevel(currentAdminAccount?.adminLevel || ADMIN_LEVELS.SUPER)
+    if (currentAdminLevel !== ADMIN_LEVELS.OWNER && currentAdminLevel !== ADMIN_LEVELS.SUPER) {
+      return { ok: false, message: 'Only Owner or Super Admin can impersonate admin accounts.' }
     }
     if (isImpersonatingClient) {
       return { ok: false, message: 'Exit client impersonation mode before impersonating an admin.' }
@@ -3652,6 +4096,10 @@ function App() {
         action: 'Submitted verification',
         details: 'Client submitted verification documents for review.',
       },
+      'Submitted. Awaiting approval.': {
+        action: 'Submitted verification',
+        details: 'Client submitted verification documents for review.',
+      },
       'Notification preferences updated.': {
         action: 'Updated notification preferences',
         details: 'Client updated notification settings.',
@@ -3672,6 +4120,7 @@ function App() {
     const detailsByMessage = {
       'Changes saved successfully.': 'Admin updated tax details while in impersonation mode.',
       'Verification submitted successfully.': 'Admin submitted verification on behalf of client while in impersonation mode.',
+      'Submitted. Awaiting approval.': 'Admin submitted verification on behalf of client while in impersonation mode.',
       'Notification preferences updated.': 'Admin updated notification settings while in impersonation mode.',
       'Documents uploaded successfully.': 'Admin uploaded document on behalf of client.',
     }
@@ -3710,10 +4159,14 @@ function App() {
     setSettingsProfileSnapshot((previous) => {
       if (
         previous.fullName === normalizedProfile.fullName
+        && previous.firstName === normalizedProfile.firstName
+        && previous.lastName === normalizedProfile.lastName
+        && previous.otherNames === normalizedProfile.otherNames
         && previous.email === normalizedProfile.email
         && previous.phone === normalizedProfile.phone
         && previous.address === normalizedProfile.address
         && previous.businessType === normalizedProfile.businessType
+        && previous.country === normalizedProfile.country
       ) {
         return previous
       }
@@ -3740,7 +4193,7 @@ function App() {
     showToast('success', 'Onboarding skipped. You can complete setup later.')
   }
 
-  const handleCompleteOnboarding = (finalData) => {
+  const handleCompleteOnboarding = async (finalData) => {
     const finalVerificationProgress = resolveVerificationProgress({
       onboardingData: finalData,
       settingsDocs: readScopedVerificationDocs(scopedClientEmail),
@@ -3749,7 +4202,7 @@ function App() {
     const verificationPending = finalVerificationProgress.stepsCompleted < 3
 
     persistOnboardingState({
-      currentStep: 5,
+      currentStep: CLIENT_ONBOARDING_TOTAL_STEPS,
       completed: true,
       skipped: false,
       verificationPending,
@@ -3766,9 +4219,21 @@ function App() {
       const effectiveFullName = isImpersonatingClient
         ? (impersonationSession?.clientName || existing.fullName || '')
         : (authUser?.fullName || existing.fullName || '')
+      const existingNameParts = resolveSettingsProfileNameParts(existing)
       const merged = {
         ...existing,
         fullName: effectiveFullName,
+        firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
+        lastName: existingNameParts.lastName || (
+          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
+            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
+            : ''
+        ),
+        otherNames: existingNameParts.otherNames || (
+          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
+            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
+            : ''
+        ),
         email: scopedClientEmail || existing.email || '',
         businessType: finalData.businessType,
         businessName: finalData.businessName,
@@ -3783,8 +4248,9 @@ function App() {
         language: finalData.language,
       }
       localStorage.setItem(settingsKey, JSON.stringify(merged))
-      setCompanyName(merged.businessName?.trim() || 'Acme Corporation')
-      setClientFirstName(merged.fullName?.trim()?.split(/\s+/)?.[0] || 'Client')
+      const normalizedProfile = normalizeSettingsProfile(merged)
+      setCompanyName(merged.businessName?.trim() || '')
+      setClientFirstName(normalizedProfile.firstName || 'Client')
     } catch {
       // no-op
     }
@@ -3793,6 +4259,19 @@ function App() {
       ? 'dashboard'
       : (finalData.defaultLandingPage || getDefaultPageForRole(currentUserRole))
     handleSetActivePage(defaultLandingPage, { replace: true })
+
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+    if (!isImpersonatingClient && currentUserRole === 'client' && authorizationToken) {
+      await persistClientOnboardingToBackend({
+        authorizationToken,
+        email: scopedClientEmail || authUser?.email || '',
+        fullName: authUser?.fullName || finalData.primaryContact || '',
+        onboardingData: finalData,
+        defaultLandingPage,
+      })
+      await refreshClientDashboardOverview({ authorizationToken })
+    }
+
     if (isImpersonatingClient) {
       logAdminActivity({
         adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
@@ -3815,7 +4294,7 @@ function App() {
       routeClientToVerificationSettings({
         replace: true,
         section: 'identity',
-        toastMessage: 'Complete identity verification and wait for admin approval before uploading documents.',
+        toastMessage: 'Complete identity verification before uploading documents.',
       })
       return
     }
@@ -3854,7 +4333,7 @@ function App() {
     individualDetails = {},
   }) => {
     if (!isIdentityVerificationComplete) {
-      return { ok: false, message: 'Complete identity verification and wait for admin approval before uploading documents.' }
+      return { ok: false, message: 'Complete identity verification before uploading documents.' }
     }
     if (!category) return { ok: false, message: 'Please select a document category.' }
     if (!folderName?.trim()) return { ok: false, message: 'Please provide a folder name.' }
@@ -4057,6 +4536,10 @@ function App() {
 
       setIsModalOpen(false)
       showClientToast('success', 'Documents uploaded successfully.')
+      const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+      if (authorizationToken) {
+        await refreshClientDashboardOverview({ authorizationToken })
+      }
       return { ok: true }
     }, 'Uploading files...')
   }
@@ -4077,6 +4560,11 @@ function App() {
     || companyName
     || '',
   ).trim()
+  const clientBusinessCountry = String(
+    settingsProfileSnapshot?.country
+    || onboardingState.data?.country
+    || '',
+  ).trim()
   const isClientDashboardPageActive = Boolean(
     (!isAdminView || isImpersonatingClient)
     && activePage === 'dashboard',
@@ -4087,6 +4575,22 @@ function App() {
   )
 
   const renderClientPage = () => {
+    if (isDashboardBootstrapLoading && activePage !== 'dashboard') {
+      return (
+        <div className="animate-fade-in space-y-5">
+          <div className="bg-white rounded-lg border border-border-light shadow-card p-4">
+            <DotLottiePreloader size={110} label="Loading dashboard..." className="w-full justify-start" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {[1, 2, 3, 4, 5, 6].map((item) => (
+              <div key={`workspace-skeleton-${item}`} className="h-24 bg-white rounded-lg border border-border-light shadow-card animate-pulse" />
+            ))}
+          </div>
+          <div className="h-72 bg-white rounded-lg border border-border-light shadow-card animate-pulse" />
+        </div>
+      )
+    }
+
     const logDocumentWorkspaceActivity = (categoryId, action, details) => {
       const categoryLabel = categoryId === 'sales'
         ? 'Sales'
@@ -4177,10 +4681,10 @@ function App() {
           <ClientDashboardPage
             onAddDocument={handleAddDocument}
             setActivePage={handleSetActivePage}
-            clientFirstName={clientFirstName}
             verificationState={dashboardVerificationState}
             records={dashboardRecords}
             activityLogs={clientActivityRecords}
+            documentSummary={clientDashboardOverview?.documentSummary || null}
             isLoading={isClientDashboardOverviewLoading}
             showSlowNetworkOverlay={isSlowRuntimeOverlayVisible}
           />
@@ -4267,10 +4771,10 @@ function App() {
           <ClientDashboardPage
             onAddDocument={handleAddDocument}
             setActivePage={handleSetActivePage}
-            clientFirstName={clientFirstName}
             verificationState={dashboardVerificationState}
             records={dashboardRecords}
             activityLogs={clientActivityRecords}
+            documentSummary={clientDashboardOverview?.documentSummary || null}
             isLoading={isClientDashboardOverviewLoading}
             showSlowNetworkOverlay={isSlowRuntimeOverlayVisible}
           />
@@ -4293,6 +4797,7 @@ function App() {
   const shouldShowDashboardBootstrapLoader = Boolean(
     isDashboardBootstrapLoading
     && isAuthenticated
+    && isAdminView
     && !showAuth
     && !showAdminLogin
     && !adminSetupToken
@@ -4557,6 +5062,7 @@ function App() {
               setActivePage={handleSetActivePage}
               companyLogo={companyLogo}
               companyName={companyName}
+              businessCountry={clientBusinessCountry}
               isBusinessVerified={isBusinessVerificationComplete}
               onLogout={handleLogout}
               isMobileOpen={isMobileSidebarOpen}
@@ -4567,6 +5073,7 @@ function App() {
               <ClientTopBar
                 profilePhoto={isImpersonatingClient ? null : profilePhoto}
                 clientFirstName={clientFirstName}
+                activePage={activePage}
                 isIdentityVerified={isIdentityVerificationComplete}
                 notifications={userNotifications}
                 onOpenSidebar={() => setIsMobileSidebarOpen(true)}
@@ -4575,6 +5082,17 @@ function App() {
                   setUserNotifications((prev) => prev.map((item) => (
                     item.id === notification.id ? { ...item, read: true } : item
                   )))
+                  markClientBriefNotificationRead(normalizedScopedClientEmail, notification?.id)
+                  markClientNotificationInboxRead(normalizedScopedClientEmail, notification?.id)
+                  const resolvedLocation = resolveNotificationDocumentLocation(notification)
+                  if (resolvedLocation.categoryId && resolvedLocation.folderId) {
+                    handleOpenFolderRoute(resolvedLocation.categoryId, resolvedLocation.folderId, { replace: true })
+                    return
+                  }
+                  if (resolvedLocation.categoryId && CLIENT_DOCUMENT_PAGE_IDS.includes(resolvedLocation.categoryId)) {
+                    handleSetActivePage(resolvedLocation.categoryId, { replace: true })
+                    return
+                  }
                   if (notification.linkPage) {
                     handleSetActivePage(notification.linkPage, { replace: true })
                     return
@@ -4585,6 +5103,8 @@ function App() {
                 }}
                 onMarkAllRead={() => {
                   setUserNotifications(prev => prev.map(n => ({ ...n, read: true })))
+                  markAllClientBriefNotificationsRead(normalizedScopedClientEmail)
+                  markAllClientNotificationInboxRead(normalizedScopedClientEmail)
                 }}
                 isImpersonationMode={isImpersonatingClient}
                 roleLabel={isImpersonatingClient ? 'Client (Admin View)' : 'Client'}

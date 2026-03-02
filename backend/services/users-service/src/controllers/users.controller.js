@@ -1,12 +1,19 @@
 import {
   deleteUser,
+  ensureUserFromActor,
+  getClientDashboardByUid,
+  getClientDashboardOverviewByUid,
   getMeByUid,
   getUserById,
+  updateClientDashboardByUid,
+  updateClientProfileByUid,
   syncUserFromAuth,
   updateUser
 } from "../services/users.service.js";
 import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
 import {
+  buildClientDashboardUpdatePayload,
+  buildClientProfileUpdatePayload,
   buildUserUpdatePayload,
   validateSyncFromAuthPayload
 } from "../validation/users.validation.js";
@@ -56,12 +63,145 @@ export const getMe = async (req, res, next) => {
         .json({ message: "Missing x-user-id header from authenticated gateway request" });
     }
 
-    const user = await getMeByUid(actor.uid);
+    const user =
+      (await getMeByUid(actor.uid)) ||
+      (await ensureUserFromActor({
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles,
+        displayName: ""
+      }));
+
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
 
     return res.status(200).json(user);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const patchMeProfile = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const { payload, errors } = buildClientProfileUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message:
+          "Provide at least one profile field: firstName, lastName, otherNames, phone, businessType, businessName, country, currency, reportingCycle, startMonth, address fields"
+      });
+    }
+
+    const updated = await updateClientProfileByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      payload
+    });
+
+    if (!updated) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(updated);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getMeClientDashboard = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const dashboard = await getClientDashboardByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles
+    });
+    if (!dashboard) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(dashboard);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const patchMeClientDashboard = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const { payload, errors } = buildClientDashboardUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message:
+          "Provide at least one dashboard field: defaultLandingPage, lastVisitedPage, showGreeting, compactMode, widgets, favoritePages, notificationPreferences"
+      });
+    }
+
+    const dashboard = await updateClientDashboardByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      payload
+    });
+
+    if (!dashboard) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(dashboard);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getMeClientDashboardOverview = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const overview = await getClientDashboardOverviewByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles
+    });
+
+    if (!overview) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(overview);
   } catch (error) {
     return next(error);
   }

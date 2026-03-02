@@ -37,6 +37,11 @@ import {
 } from 'lucide-react'
 import { INDUSTRY_OPTIONS } from '../../../data/client/mockData'
 import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
+import {
+  normalizeClientNotificationSettings,
+  persistClientNotificationSettings,
+  readClientNotificationSettings,
+} from '../../../utils/clientNotificationPreferences'
 
 const SETTINGS_REDIRECT_SECTION_KEY = 'kiaminaClientSettingsRedirectSection'
 const GOVERNMENT_ID_TYPE_OPTIONS = ['NIN', "Voter's Card", 'International Passport', "Driver's Licence"]
@@ -60,6 +65,81 @@ const ACCOUNT_DELETE_RETENTION_OPTIONS = [
   'I want support to help me fix this instead',
   'I may return later',
   'I want to delete permanently now',
+]
+const CLIENT_IN_APP_NOTIFICATION_OPTIONS = [
+  {
+    key: 'inAppEnabled',
+    label: 'Enable in-app notifications',
+    desc: 'Show notification updates in your dashboard and top bar.',
+  },
+  {
+    key: 'soundEnabled',
+    label: 'Notification sound',
+    desc: 'Play a sound when a new in-app notification arrives.',
+    requiresInApp: true,
+  },
+  {
+    key: 'documentApproved',
+    label: 'Document approved updates',
+    desc: 'Get notified when submitted documents are approved.',
+    requiresInApp: true,
+  },
+  {
+    key: 'documentRejected',
+    label: 'Document rejected updates',
+    desc: 'Get notified when submitted documents are rejected.',
+    requiresInApp: true,
+  },
+  {
+    key: 'documentInfoRequested',
+    label: 'Document info requests',
+    desc: 'Get notified when more details are requested for a document.',
+    requiresInApp: true,
+  },
+  {
+    key: 'verificationUpdates',
+    label: 'Verification updates',
+    desc: 'Get notified when your verification status changes.',
+    requiresInApp: true,
+  },
+  {
+    key: 'accountSuspended',
+    label: 'Account suspension alerts',
+    desc: 'Get notified if account access is restricted.',
+    requiresInApp: true,
+  },
+  {
+    key: 'adminMessages',
+    label: 'Admin messages',
+    desc: 'Receive direct notices and reminders sent by admins. Critical forced messages can still be delivered.',
+    requiresInApp: true,
+  },
+]
+const CLIENT_EMAIL_NOTIFICATION_OPTIONS = [
+  {
+    key: 'emailNewUploads',
+    label: 'Email for new uploads',
+    desc: 'Receive email alerts when new documents are uploaded to your account.',
+  },
+  {
+    key: 'emailApprovals',
+    label: 'Email for document decisions',
+    desc: 'Receive email alerts when documents are approved or rejected.',
+  },
+  {
+    key: 'emailWeeklySummary',
+    label: 'Weekly email summary',
+    desc: 'Receive a weekly digest of your account activity.',
+  },
+  {
+    key: 'emailSecurityAlerts',
+    label: 'Security alert emails',
+    desc: 'Receive email alerts about suspicious sign-ins or security events.',
+  },
+]
+const CLIENT_NOTIFICATION_EDITABLE_KEYS = [
+  ...CLIENT_IN_APP_NOTIFICATION_OPTIONS.map((item) => item.key),
+  ...CLIENT_EMAIL_NOTIFICATION_OPTIONS.map((item) => item.key),
 ]
 const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
   const raw = String(value || '').trim()
@@ -86,6 +166,131 @@ const formatPhoneNumber = (code = '+234', number = '') => {
   const normalizedNumber = String(number || '').trim()
   if (!normalizedNumber) return ''
   return `${normalizedCode} ${normalizedNumber}`.trim()
+}
+const sanitizeLettersOnly = (value = '') => (
+  String(value || '')
+    .replace(/[^A-Za-z\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trimStart()
+)
+const toTitleCaseValue = (value = '') => (
+  String(value || '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+)
+const sanitizeDigitsOnly = (value = '') => String(value || '').replace(/\D/g, '')
+const sanitizeAlphaNumeric = (value = '') => String(value || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+const splitFullName = (value = '') => {
+  const parts = String(value || '').trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) {
+    return {
+      firstName: '',
+      lastName: '',
+      otherNames: '',
+    }
+  }
+  if (parts.length === 1) {
+    return {
+      firstName: parts[0],
+      lastName: '',
+      otherNames: '',
+    }
+  }
+  return {
+    firstName: parts[0],
+    lastName: parts[parts.length - 1],
+    otherNames: parts.slice(1, -1).join(' '),
+  }
+}
+const FINANCIAL_MONTH_NAMES = Object.freeze([
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+])
+const FINANCIAL_MONTH_LOOKUP = Object.freeze(
+  FINANCIAL_MONTH_NAMES.reduce((acc, monthName, index) => {
+    acc[monthName.toLowerCase()] = index + 1
+    acc[monthName.slice(0, 3).toLowerCase()] = index + 1
+    return acc
+  }, {}),
+)
+const padTwoDigits = (value) => String(value).padStart(2, '0')
+const FINANCIAL_MONTH_OPTIONS = Object.freeze(
+  FINANCIAL_MONTH_NAMES.map((monthName, index) => ({
+    value: padTwoDigits(index + 1),
+    label: monthName,
+  })),
+)
+const resolveFinancialBoundaryMonth = (value = '') => {
+  const raw = String(value || '').trim()
+  if (!raw) return ''
+
+  const canonicalMatch = raw.match(/^(\d{2})-(?:\d{2}|LAST)$/i)
+  if (canonicalMatch) {
+    const month = Number(canonicalMatch[1])
+    if (month >= 1 && month <= 12) return padTwoDigits(month)
+  }
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (isoMatch) {
+    const month = Number(isoMatch[2])
+    if (month >= 1 && month <= 12) return padTwoDigits(month)
+  }
+
+  const firstLastMatch = raw.match(/^(First|Last)\s+day\s+of\s+([A-Za-z]+)$/i)
+  if (firstLastMatch) {
+    const monthName = firstLastMatch[2].toLowerCase()
+    const month = FINANCIAL_MONTH_LOOKUP[monthName]
+    if (month) return padTwoDigits(month)
+  }
+
+  const shortMatch = raw.match(/^(\d{1,2})\s+([A-Za-z]+)$/)
+  if (shortMatch) {
+    const month = FINANCIAL_MONTH_LOOKUP[String(shortMatch[2] || '').toLowerCase()]
+    if (month) return padTwoDigits(month)
+  }
+
+  const numericMonth = Number(raw)
+  if (Number.isFinite(numericMonth) && numericMonth >= 1 && numericMonth <= 12) {
+    return padTwoDigits(numericMonth)
+  }
+
+  const byName = FINANCIAL_MONTH_LOOKUP[raw.toLowerCase()]
+  if (byName) return padTwoDigits(byName)
+
+  return ''
+}
+const normalizeFinancialBoundaryDate = (value = '', boundary = 'start') => {
+  const monthToken = resolveFinancialBoundaryMonth(value)
+  if (!monthToken) return ''
+  return boundary === 'end' ? `${monthToken}-LAST` : `${monthToken}-01`
+}
+const getFinancialBoundaryMonth = (value = '') => resolveFinancialBoundaryMonth(value)
+const getFinancialBoundaryMonthName = (value = '') => {
+  const monthToken = resolveFinancialBoundaryMonth(value)
+  if (!monthToken) return ''
+  const monthIndex = Number(monthToken) - 1
+  if (monthIndex < 0 || monthIndex >= FINANCIAL_MONTH_NAMES.length) return ''
+  return FINANCIAL_MONTH_NAMES[monthIndex]
+}
+const formatFinancialBoundaryDisplay = (value = '', boundary = 'start') => {
+  const monthName = getFinancialBoundaryMonthName(value)
+  if (!monthName) return ''
+  return boundary === 'end'
+    ? `Last day of ${monthName}`
+    : `First day of ${monthName}`
 }
 
 function SettingsPage({
@@ -126,7 +331,6 @@ function SettingsPage({
   const getScopedClientKey = (baseKey) => (
     scopedStorageSuffix ? `${baseKey}:${scopedStorageSuffix}` : baseKey
   )
-  const notificationSettingsKey = getScopedClientKey('notificationSettings')
   const verificationDocsKey = getScopedClientKey('verificationDocs')
   const profilePhotoKey = getScopedClientKey('profilePhoto')
   const companyLogoKey = getScopedClientKey('companyLogo')
@@ -136,6 +340,9 @@ function SettingsPage({
   // Initialize form data from localStorage
   const getInitialFormData = () => {
     const fallbackData = {
+      firstName: '',
+      lastName: '',
+      otherNames: '',
       fullName: '',
       email: '',
       phone: '',
@@ -170,11 +377,23 @@ function SettingsPage({
       const fallbackCode = String(merged.phoneCountryCode || '+234').trim() || '+234'
       const storedPhoneValue = merged.phoneLocalNumber || merged.phone
       const phoneParts = resolvePhoneParts(storedPhoneValue, fallbackCode)
+      const parsedNameParts = splitFullName(merged.fullName)
+      const resolvedFirstName = String(merged.firstName || parsedNameParts.firstName || '').trim()
+      const resolvedLastName = String(merged.lastName || parsedNameParts.lastName || '').trim()
+      const resolvedOtherNames = String(merged.otherNames || parsedNameParts.otherNames || '').trim()
+      const normalizedFinancialYearStart = normalizeFinancialBoundaryDate(merged.startMonth, 'start')
+      const normalizedFinancialYearEnd = normalizeFinancialBoundaryDate(merged.reportingCycle, 'end')
       return {
         ...merged,
+        firstName: resolvedFirstName,
+        lastName: resolvedLastName,
+        otherNames: resolvedOtherNames,
+        fullName: [resolvedFirstName, resolvedOtherNames, resolvedLastName].filter(Boolean).join(' ').trim(),
         phoneCountryCode: phoneParts.code,
         phone: phoneParts.number,
         phoneLocalNumber: phoneParts.number,
+        startMonth: normalizedFinancialYearStart || merged.startMonth || '',
+        reportingCycle: normalizedFinancialYearEnd || merged.reportingCycle || '',
       }
     } catch {
       return fallbackData
@@ -184,16 +403,9 @@ function SettingsPage({
   const [formData, setFormData] = useState(getInitialFormData)
   const [draftData, setDraftData] = useState(getInitialFormData)
   const [errors, setErrors] = useState({})
-  const [notifications, setNotifications] = useState(() => {
-    const saved = localStorage.getItem(notificationSettingsKey) || localStorage.getItem('notificationSettings')
-    return saved ? JSON.parse(saved) : {
-      newUploads: true,
-      approvals: true,
-      weeklySummary: false,
-      compliance: true,
-      security: true,
-    }
-  })
+  const readNotificationPreferences = () => readClientNotificationSettings(clientEmail || '')
+  const [notifications, setNotifications] = useState(readNotificationPreferences)
+  const [notificationDraft, setNotificationDraft] = useState(readNotificationPreferences)
   const [verificationDocs, setVerificationDocs] = useState(() => {
     const saved = localStorage.getItem(verificationDocsKey) || localStorage.getItem('verificationDocs')
     const parsed = saved ? JSON.parse(saved) : {}
@@ -205,6 +417,8 @@ function SettingsPage({
       govIdVerificationStatus: '',
       govIdClarityStatus: '',
       businessReg: null,
+      businessRegVerificationStatus: '',
+      businessRegSubmittedAt: '',
       ...parsed,
     }
   })
@@ -228,6 +442,12 @@ function SettingsPage({
   })
 
   const toTrimmedValue = (value) => String(value || '').trim()
+  const buildClientFullName = (payload = {}) => {
+    const firstName = toTrimmedValue(payload.firstName)
+    const lastName = toTrimmedValue(payload.lastName)
+    const otherNames = toTrimmedValue(payload.otherNames)
+    return [firstName, otherNames, lastName].filter(Boolean).join(' ').trim()
+  }
   const normalizeClientRole = (value = '') => {
     const normalized = toTrimmedValue(value).toLowerCase()
     if (normalized === 'manager') return 'manager'
@@ -316,7 +536,7 @@ function SettingsPage({
 
   const resolvedClientEmail = toTrimmedValue(clientEmail || formData.email || scopedStorageSuffix).toLowerCase()
   const companyId = buildCompanyId(resolvedClientEmail || formData.businessName)
-  const ownerDisplayName = toTrimmedValue(clientName || formData.fullName || 'Primary Owner')
+  const ownerDisplayName = toTrimmedValue(clientName || buildClientFullName(formData) || 'Primary Owner')
   const ownerMemberId = `TM-OWNER-${companyId}`
   const ownerFallbackEmail = resolvedClientEmail || 'owner@company.local'
   const ownerFallbackName = ownerDisplayName || 'Primary Owner'
@@ -358,11 +578,12 @@ function SettingsPage({
   })
 
   const normalizedProfileForVerification = {
-    fullName: toTrimmedValue(formData.fullName),
+    fullName: buildClientFullName(formData),
     email: toTrimmedValue(formData.email).toLowerCase(),
     phone: formatPhoneNumber(formData.phoneCountryCode, formData.phone),
     address: toTrimmedValue(formData.address1),
     businessType: toTrimmedValue(formData.businessType),
+    country: toTrimmedValue(formData.country || formData.addressCountry),
   }
   const normalizedBusinessType = toTrimmedValue(formData.businessType).toLowerCase()
   const isIndividualBusinessType = normalizedBusinessType === 'individual'
@@ -380,8 +601,8 @@ function SettingsPage({
   const identityVerifiedByAutomation = Boolean(
     identityDocumentCaptured && toTrimmedValue(verificationDocs.govIdVerifiedAt),
   )
-  const identityLockedForClient = Boolean(identityApprovedByAdmin && identityVerifiedByAutomation)
-  const identityVerified = Boolean(identityApprovedByAdmin && identityVerifiedByAutomation)
+  const identityLockedForClient = Boolean(identityVerifiedByAutomation)
+  const identityVerified = Boolean(identityVerifiedByAutomation)
   const businessVerificationDocumentReady = isIndividualBusinessType || Boolean(toTrimmedValue(verificationDocs.businessReg))
   const normalizedVerificationState = toTrimmedValue(verificationState).toLowerCase()
   const verificationApprovedByAdmin = (
@@ -392,6 +613,19 @@ function SettingsPage({
   )
   const finalBusinessApproval = isIndividualBusinessType || Boolean(businessApprovedByAdmin || verificationApprovedByAdmin)
   const businessVerified = isIndividualBusinessType || Boolean(businessVerificationDocumentReady && finalBusinessApproval)
+  const businessVerificationSubmissionStatus = toTrimmedValue(verificationDocs.businessRegVerificationStatus).toLowerCase()
+  const businessVerificationSubmitted = (
+    !isIndividualBusinessType
+    && businessVerificationSubmissionStatus === 'submitted'
+  )
+  const businessStepStatusLabel = isIndividualBusinessType
+    ? 'Auto Verified'
+    : businessVerified
+      ? 'Approved'
+      : businessVerificationSubmitted
+        ? 'Submitted - Awaiting Approval'
+        : 'Pending'
+  const businessLockedForClient = Boolean(!isIndividualBusinessType && businessVerified)
   const canStartBusinessVerification = Boolean(identityVerified)
   const verificationStepsCompleted = Number(profileStepCompleted) + Number(identityVerified) + Number(businessVerified)
   const verificationProgress = Math.round((verificationStepsCompleted / 3) * 100)
@@ -418,9 +652,12 @@ function SettingsPage({
       }
       : {
         label: 'Unverified',
-        className: 'bg-error-bg text-error',
-      }
+      className: 'bg-error-bg text-error',
+    }
   const activePendingInvites = teamInvites.filter((invite) => getInviteStatus(invite) === 'Pending')
+  const hasNotificationChanges = CLIENT_NOTIFICATION_EDITABLE_KEYS.some((key) => (
+    Boolean(notificationDraft[key]) !== Boolean(notifications[key])
+  ))
 
   useEffect(() => {
     setLogoFile(companyLogo || null)
@@ -429,6 +666,13 @@ function SettingsPage({
   useEffect(() => {
     setPhotoFile(profilePhoto || null)
   }, [profilePhoto])
+
+  useEffect(() => {
+    const normalizedSettings = normalizeClientNotificationSettings(readClientNotificationSettings(clientEmail || ''))
+    setNotifications(normalizedSettings)
+    setNotificationDraft(normalizedSettings)
+    persistClientNotificationSettings(clientEmail || '', normalizedSettings)
+  }, [clientEmail])
 
   useEffect(() => {
     try {
@@ -454,6 +698,7 @@ function SettingsPage({
   }, [
     normalizedProfileForVerification.address,
     normalizedProfileForVerification.businessType,
+    normalizedProfileForVerification.country,
     normalizedProfileForVerification.email,
     normalizedProfileForVerification.fullName,
     normalizedProfileForVerification.phone,
@@ -552,7 +797,7 @@ function SettingsPage({
   }, [activePendingInvites.length, showToast, teamInviteUnlocked])
 
   // Fields that become admin-controlled after initial successful save.
-  const adminOnlyFields = ['fullName', 'email', 'cacNumber', 'businessName', 'tin']
+  const adminOnlyFields = ['firstName', 'lastName', 'otherNames', 'email', 'cacNumber', 'businessName', 'tin']
   const complianceLockedFields = ['email', 'businessType', 'country']
 
   const [lockedAdminFields, setLockedAdminFields] = useState(() => {
@@ -574,6 +819,12 @@ function SettingsPage({
   }
 
   const isFieldLocked = (field) => {
+    if (
+      (field === 'firstName' || field === 'lastName' || field === 'otherNames' || field === 'fullName')
+      && !identityLockedForClient
+    ) {
+      return false
+    }
     return Boolean(lockedAdminFields[field]) || isComplianceLocked(field)
   }
 
@@ -633,8 +884,28 @@ function SettingsPage({
       return
     }
 
+    const rawValue = typeof value === 'string' ? value : value
+    const normalizedValue = (() => {
+      if (field === 'firstName' || field === 'lastName' || field === 'otherNames') {
+        return sanitizeLettersOnly(rawValue)
+      }
+      if (field === 'phone') {
+        return sanitizeDigitsOnly(rawValue)
+      }
+      if (field === 'cacNumber') {
+        return sanitizeAlphaNumeric(rawValue)
+      }
+      if (field === 'startMonth') {
+        return normalizeFinancialBoundaryDate(rawValue, 'start')
+      }
+      if (field === 'reportingCycle') {
+        return normalizeFinancialBoundaryDate(rawValue, 'end')
+      }
+      return rawValue
+    })()
+
     setDraftData(prev => {
-      const next = { ...prev, [field]: value }
+      const next = { ...prev, [field]: normalizedValue }
       if (field === 'businessType' && value === 'Individual') {
         next.cacNumber = ''
       }
@@ -663,11 +934,20 @@ function SettingsPage({
   }
 
   const handleNotificationChange = (key) => {
-    setNotifications(prev => {
-      const newData = { ...prev, [key]: !prev[key] }
-      localStorage.setItem(notificationSettingsKey, JSON.stringify(newData))
-      return newData
-    })
+    setNotificationDraft((prev) => normalizeClientNotificationSettings({
+      ...prev,
+      [key]: !prev[key],
+    }))
+  }
+
+  const startNotificationEdit = () => {
+    setNotificationDraft(notifications)
+    setEditMode((prev) => ({ ...prev, notifications: true }))
+  }
+
+  const cancelNotificationEdit = () => {
+    setNotificationDraft(notifications)
+    setEditMode((prev) => ({ ...prev, notifications: false }))
   }
 
   const scrollToFirstInvalidField = (newErrors) => {
@@ -684,9 +964,13 @@ function SettingsPage({
 
   const validateProfile = (data) => {
     const newErrors = {}
-    if (!hasValue(data.fullName)) newErrors.fullName = 'This field is required.'
+    if (!hasValue(data.firstName)) newErrors.firstName = 'This field is required.'
+    if (!hasValue(data.lastName)) newErrors.lastName = 'This field is required.'
     if (!hasValue(data.email)) newErrors.email = 'This field is required.'
     if (!hasValue(data.phone)) newErrors.phone = 'This field is required.'
+    if (hasValue(data.phone) && !/^\d+$/.test(String(data.phone || ''))) {
+      newErrors.phone = 'Phone number can only contain numbers.'
+    }
     if (!hasValue(data.address1)) newErrors.address1 = 'This field is required.'
     return newErrors
   }
@@ -697,6 +981,12 @@ function SettingsPage({
     if ((data.businessType === 'Business' || data.businessType === 'Non-Profit') && !hasValue(data.cacNumber)) {
       const isNigeriaRegistration = (data.country || '').trim().toLowerCase() === 'nigeria' || !hasValue(data.country)
       newErrors.cacNumber = isNigeriaRegistration ? 'CAC registration number is required.' : 'Business registration number is required.'
+    }
+    if (hasValue(data.cacNumber)) {
+      const normalizedRegistration = sanitizeAlphaNumeric(data.cacNumber)
+      if (!/^(RC|BN|IT)/.test(normalizedRegistration)) {
+        newErrors.cacNumber = 'Registration number must start with RC, BN, or IT.'
+      }
     }
     if (!hasValue(data.businessName)) newErrors.businessName = 'This field is required.'
     if (!hasValue(data.country)) newErrors.country = 'This field is required.'
@@ -710,8 +1000,10 @@ function SettingsPage({
   const validateTax = (data) => {
     const newErrors = {}
     if (!hasValue(data.tin)) newErrors.tin = 'This field is required.'
-    if (!hasValue(data.reportingCycle)) newErrors.reportingCycle = 'This field is required.'
-    if (!hasValue(data.startMonth)) newErrors.startMonth = 'This field is required.'
+    const normalizedFinancialYearEnd = normalizeFinancialBoundaryDate(data.reportingCycle, 'end')
+    const normalizedFinancialYearStart = normalizeFinancialBoundaryDate(data.startMonth, 'start')
+    if (!hasValue(normalizedFinancialYearEnd)) newErrors.reportingCycle = 'Financial Year End is required.'
+    if (!hasValue(normalizedFinancialYearStart)) newErrors.startMonth = 'Financial Year Start is required.'
     return newErrors
   }
 
@@ -733,7 +1025,17 @@ function SettingsPage({
       return false
     }
 
-    const updatedData = { ...draftData }
+    const updatedData = {
+      ...draftData,
+      firstName: toTitleCaseValue(sanitizeLettersOnly(draftData.firstName)),
+      lastName: toTitleCaseValue(sanitizeLettersOnly(draftData.lastName)),
+      otherNames: toTitleCaseValue(sanitizeLettersOnly(draftData.otherNames)),
+      phone: sanitizeDigitsOnly(draftData.phone),
+      cacNumber: sanitizeAlphaNumeric(draftData.cacNumber),
+      startMonth: normalizeFinancialBoundaryDate(draftData.startMonth, 'start'),
+      reportingCycle: normalizeFinancialBoundaryDate(draftData.reportingCycle, 'end'),
+    }
+    updatedData.fullName = buildClientFullName(updatedData)
     const normalizedPhoneNumber = formatPhoneNumber(updatedData.phoneCountryCode, updatedData.phone)
     const persistedData = {
       ...updatedData,
@@ -748,10 +1050,10 @@ function SettingsPage({
     })
     localStorage.setItem(settingsStorageKey || 'settingsFormData', JSON.stringify(persistedData))
     if (typeof setCompanyName === 'function') {
-      setCompanyName(updatedData.businessName?.trim() || 'Acme Corporation')
+      setCompanyName(updatedData.businessName?.trim() || '')
     }
     if (typeof setClientFirstName === 'function') {
-      setClientFirstName(updatedData.fullName?.trim()?.split(/\s+/)?.[0] || 'Client')
+      setClientFirstName(updatedData.firstName?.trim() || 'Client')
     }
     setLockedAdminFields(prev => {
       const next = { ...prev }
@@ -767,24 +1069,29 @@ function SettingsPage({
   }
 
   const handleSaveProfile = () => {
-    saveSection('user-profile', validateProfile, ['fullName', 'email'])
+    saveSection('user-profile', validateProfile, ['firstName', 'lastName', 'otherNames', 'email'])
   }
 
   const handleSaveNotifications = () => {
+    const normalized = persistClientNotificationSettings(clientEmail || '', notificationDraft)
+    setNotifications(normalized)
+    setNotificationDraft(normalized)
+    setEditMode((prev) => ({ ...prev, notifications: false }))
     showToast('success', 'Notification preferences updated.')
   }
 
   const handleSubmitVerification = async () => {
     if (identityLockedForClient) {
-      showToast('success', 'Identity verification is already approved.')
+      showToast('success', 'Identity verification is already completed.')
       return
     }
     if (!verificationDocs.govId || !verificationDocs.govIdType || !verificationDocs.govIdNumber) {
       showToast('error', 'Government ID, ID type, and ID card number are required.')
       return
     }
-    if (!toTrimmedValue(formData.fullName)) {
-      showToast('error', 'Full name is required in profile before identity verification.')
+    const normalizedFullName = buildClientFullName(formData)
+    if (!normalizedFullName) {
+      showToast('error', 'First and last name are required in profile before identity verification.')
       return
     }
     if (verificationDocs.govIdClarityStatus !== 'clear') {
@@ -804,7 +1111,7 @@ function SettingsPage({
     })
 
     const verifyResult = await verifyIdentityWithDojah({
-      fullName: formData.fullName,
+      fullName: normalizedFullName,
       idType: verificationDocs.govIdType,
       cardNumber: verificationDocs.govIdNumber,
     })
@@ -835,9 +1142,7 @@ function SettingsPage({
       return next
     })
     setIsIdentitySubmitting(false)
-    showToast('success', identityApprovedByAdmin
-      ? 'Identity verification is approved.'
-      : 'Identity verified. Awaiting admin approval.')
+    showToast('success', 'Identity verification completed successfully.')
   }
 
   const handleSubmitBusinessVerification = () => {
@@ -845,15 +1150,32 @@ function SettingsPage({
       showToast('success', 'Business verification step is automatically completed for Individual accounts.')
       return
     }
+    if (businessLockedForClient) {
+      showToast('success', 'Business verification is already approved and locked.')
+      return
+    }
     if (!canStartBusinessVerification) {
-      showToast('error', 'Identity verification must be approved by admin before business verification starts.')
+      showToast('error', 'Complete identity verification before business verification starts.')
       return
     }
     if (!verificationDocs.businessReg) {
       showToast('error', 'Business registration document is required.')
       return
     }
-    showToast('success', 'Verification submitted successfully.')
+    if (businessVerificationSubmitted) {
+      showToast('success', 'Submitted. Awaiting approval.')
+      return
+    }
+    setVerificationDocs((prev) => {
+      const next = {
+        ...prev,
+        businessRegVerificationStatus: 'submitted',
+        businessRegSubmittedAt: new Date().toISOString(),
+      }
+      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+      return next
+    })
+    showToast('success', 'Submitted. Awaiting approval.')
   }
 
   const handleSaveBusiness = () => {
@@ -865,6 +1187,8 @@ function SettingsPage({
         const next = {
           ...prev,
           businessReg: '',
+          businessRegVerificationStatus: '',
+          businessRegSubmittedAt: '',
         }
         localStorage.setItem(verificationDocsKey, JSON.stringify(next))
         return next
@@ -967,14 +1291,26 @@ function SettingsPage({
       resetInput()
       return
     }
+    if (docType === 'businessReg' && businessLockedForClient) {
+      showToast('error', 'Business verification is approved and locked. Contact admin for changes.')
+      resetInput()
+      return
+    }
     if (docType === 'businessReg' && !canStartBusinessVerification) {
-      showToast('error', 'Identity verification must be approved by admin before business verification starts.')
+      showToast('error', 'Complete identity verification before business verification starts.')
       resetInput()
       return
     }
 
     setVerificationDocs((prev) => {
-      const next = { ...prev, [docType]: file.name }
+      const next = {
+        ...prev,
+        [docType]: file.name,
+      }
+      if (docType === 'businessReg') {
+        next.businessRegVerificationStatus = ''
+        next.businessRegSubmittedAt = ''
+      }
       localStorage.setItem(verificationDocsKey, JSON.stringify(next))
       return next
     })
@@ -1240,36 +1576,6 @@ function SettingsPage({
 
   const industries = INDUSTRY_OPTIONS
 
-  const reportingCycles = [
-    'Last day of January',
-    'Last day of February',
-    'Last day of March',
-    'Last day of April',
-    'Last day of May',
-    'Last day of June',
-    'Last day of July',
-    'Last day of August',
-    'Last day of September',
-    'Last day of October',
-    'Last day of November',
-    'Last day of December',
-  ]
-
-  const startMonths = [
-    'First day of January',
-    'First day of February',
-    'First day of March',
-    'First day of April',
-    'First day of May',
-    'First day of June',
-    'First day of July',
-    'First day of August',
-    'First day of September',
-    'First day of October',
-    'First day of November',
-    'First day of December',
-  ]
-
   const renderReadonlyField = (label, value, required = false) => {
     const missing = required && !hasValue(value)
     const displayValue = missing ? 'Not Provided' : (hasValue(value) ? value : '-')
@@ -1321,7 +1627,9 @@ function SettingsPage({
     switch (activeSection) {
       case 'user-profile': {
         const isProfileEditMode = editMode['user-profile']
-        const fullNameLocked = isFieldLocked('fullName')
+        const firstNameLocked = isFieldLocked('firstName')
+        const lastNameLocked = isFieldLocked('lastName')
+        const otherNamesLocked = isFieldLocked('otherNames')
         const emailLocked = isFieldLocked('email')
 
         return (
@@ -1347,7 +1655,7 @@ function SettingsPage({
                 {photoFile ? (
                   <img src={photoFile} alt="Profile" className="w-full h-full object-cover" />
                 ) : (
-                  'JD'
+                  `${(formData.firstName || 'C').charAt(0)}${(formData.lastName || '').charAt(0)}`.toUpperCase()
                 )}
               </div>
               {isProfileEditMode && (
@@ -1368,7 +1676,9 @@ function SettingsPage({
 
             {!isProfileEditMode ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {renderReadonlyField('Full Name', formData.fullName, true)}
+                {renderReadonlyField('First Name', formData.firstName, true)}
+                {renderReadonlyField('Last Name', formData.lastName, true)}
+                {renderReadonlyField('Other Names', formData.otherNames, false)}
                 {renderReadonlyField('Email Address', formData.email, true)}
                 {renderReadonlyField('Phone Number', formatPhoneNumber(formData.phoneCountryCode, formData.phone), true)}
                 {renderReadonlyField('Address', formData.address1, true)}
@@ -1377,20 +1687,54 @@ function SettingsPage({
             ) : (
               <>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {fullNameLocked ? (
-                    renderLockedField('fullName', 'Full Name', true)
+                  {firstNameLocked ? (
+                    renderLockedField('firstName', 'First Name', true)
                   ) : (
                     <div>
-                      <label className="block text-sm font-medium text-text-primary mb-1.5">Full Name <span className="text-error">*</span></label>
+                      <label className="block text-sm font-medium text-text-primary mb-1.5">First Name <span className="text-error">*</span></label>
                       <input
-                        id="settings-fullName"
+                        id="settings-firstName"
                         type="text"
-                        placeholder="Enter your full legal name"
-                        value={draftData.fullName}
-                        onChange={(e) => handleInputChange('fullName', e.target.value)}
-                        className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.fullName ? 'border-error' : 'border-border'}`}
+                        placeholder="Enter your first name"
+                        value={draftData.firstName}
+                        onChange={(e) => handleInputChange('firstName', e.target.value)}
+                        className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.firstName ? 'border-error' : 'border-border'}`}
                       />
-                      {errors.fullName && <p className="text-xs text-error mt-1">{errors.fullName}</p>}
+                      {errors.firstName && <p className="text-xs text-error mt-1">{errors.firstName}</p>}
+                    </div>
+                  )}
+
+                  {lastNameLocked ? (
+                    renderLockedField('lastName', 'Last Name', true)
+                  ) : (
+                    <div>
+                      <label className="block text-sm font-medium text-text-primary mb-1.5">Last Name <span className="text-error">*</span></label>
+                      <input
+                        id="settings-lastName"
+                        type="text"
+                        placeholder="Enter your last name"
+                        value={draftData.lastName}
+                        onChange={(e) => handleInputChange('lastName', e.target.value)}
+                        className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.lastName ? 'border-error' : 'border-border'}`}
+                      />
+                      {errors.lastName && <p className="text-xs text-error mt-1">{errors.lastName}</p>}
+                    </div>
+                  )}
+
+                  {otherNamesLocked ? (
+                    renderLockedField('otherNames', 'Other Names')
+                  ) : (
+                    <div>
+                      <label className="block text-sm font-medium text-text-primary mb-1.5">Other Names</label>
+                      <input
+                        id="settings-otherNames"
+                        type="text"
+                        placeholder="Enter other names"
+                        value={draftData.otherNames}
+                        onChange={(e) => handleInputChange('otherNames', e.target.value)}
+                        className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.otherNames ? 'border-error' : 'border-border'}`}
+                      />
+                      {errors.otherNames && <p className="text-xs text-error mt-1">{errors.otherNames}</p>}
                     </div>
                   )}
 
@@ -1476,60 +1820,100 @@ function SettingsPage({
         )
       }
 
-      case 'notifications':
+      case 'notifications': {
+        const isEditingNotifications = editMode['notifications']
         return (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Notification Settings</h3>
-                <p className="text-sm text-text-muted">Configure how you receive updates</p>
+                <p className="text-sm text-text-muted">Control in-app and email updates for your account.</p>
               </div>
-              <button
-                onClick={() => setEditMode(prev => ({ ...prev, notifications: !prev.notifications }))}
-                className={`h-9 px-4 rounded-md text-sm font-medium transition-colors ${
-                  editMode['notifications'] 
-                    ? 'bg-error-bg text-error hover:bg-error/10' 
-                    : 'bg-primary text-white hover:bg-primary-light'
-                }`}
-              >
-                {editMode['notifications'] ? 'Done' : 'Edit'}
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              {[
-                { key: 'newUploads', label: 'Email notifications for new uploads', desc: 'Receive alerts when new documents are uploaded to your account' },
-                { key: 'approvals', label: 'Email notifications for document approvals', desc: 'Get notified when documents are reviewed and approved' },
-                { key: 'weeklySummary', label: 'Weekly activity summary', desc: 'Receive a weekly digest of all account activity' },
-                { key: 'compliance', label: 'Compliance reminders', desc: 'Stay informed about regulatory deadlines and requirements' },
-                { key: 'security', label: 'Security alerts', desc: 'Get notified about suspicious activity or login attempts' },
-              ].map((item) => (
-                <div key={item.key} className={`flex items-start gap-4 p-4 rounded-lg ${editMode['notifications'] ? 'bg-background' : 'bg-gray-50'}`}>
-                  <input
-                    type="checkbox"
-                    checked={notifications[item.key]}
-                    onChange={() => editMode['notifications'] && handleNotificationChange(item.key)}
-                    disabled={!editMode['notifications']}
-                    className={`w-4 h-4 mt-0.5 accent-primary ${!editMode['notifications'] ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  />
-                  <div>
-                    <div className="text-sm font-medium text-text-primary">{item.label}</div>
-                    <div className="text-xs text-text-muted mt-0.5">{item.desc}</div>
-                  </div>
+              {isEditingNotifications ? (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={cancelNotificationEdit}
+                    className="h-9 px-4 rounded-md border border-border text-sm font-medium text-text-primary hover:bg-background transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveNotifications}
+                    disabled={!hasNotificationChanges}
+                    className="h-9 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Save
+                  </button>
                 </div>
-              ))}
+              ) : (
+                <button
+                  type="button"
+                  onClick={startNotificationEdit}
+                  className="h-9 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light transition-colors"
+                >
+                  Edit
+                </button>
+              )}
             </div>
 
-            <div className="pt-4">
-              <button
-                onClick={handleSaveNotifications}
-                className="h-10 px-6 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors"
-              >
-                Save Preferences
-              </button>
+            <div className="space-y-3 rounded-lg border border-border-light bg-white p-4">
+              <h4 className="text-sm font-semibold text-text-primary">In-App Notifications</h4>
+              {CLIENT_IN_APP_NOTIFICATION_OPTIONS.map((item) => {
+                const isItemDisabled = !isEditingNotifications || (item.requiresInApp && !notificationDraft.inAppEnabled)
+                return (
+                  <label
+                    key={item.key}
+                    className={`flex items-start gap-3 rounded-md border px-3 py-2.5 transition-colors ${
+                      isItemDisabled ? 'border-border-light bg-background/50 opacity-65' : 'border-border bg-background'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={Boolean(notificationDraft[item.key])}
+                      onChange={() => !isItemDisabled && handleNotificationChange(item.key)}
+                      disabled={isItemDisabled}
+                      className={`w-4 h-4 mt-0.5 accent-primary ${isItemDisabled ? 'cursor-not-allowed' : ''}`}
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-text-primary">{item.label}</span>
+                      <span className="block text-xs text-text-muted mt-0.5">{item.desc}</span>
+                    </span>
+                  </label>
+                )
+              })}
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-border-light bg-white p-4">
+              <h4 className="text-sm font-semibold text-text-primary">Email Notifications</h4>
+              {CLIENT_EMAIL_NOTIFICATION_OPTIONS.map((item) => {
+                const isItemDisabled = !isEditingNotifications
+                return (
+                  <label
+                    key={item.key}
+                    className={`flex items-start gap-3 rounded-md border px-3 py-2.5 transition-colors ${
+                      isItemDisabled ? 'border-border-light bg-background/50 opacity-65' : 'border-border bg-background'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={Boolean(notificationDraft[item.key])}
+                      onChange={() => !isItemDisabled && handleNotificationChange(item.key)}
+                      disabled={isItemDisabled}
+                      className={`w-4 h-4 mt-0.5 accent-primary ${isItemDisabled ? 'cursor-not-allowed' : ''}`}
+                    />
+                    <span>
+                      <span className="block text-sm font-medium text-text-primary">{item.label}</span>
+                      <span className="block text-xs text-text-muted mt-0.5">{item.desc}</span>
+                    </span>
+                  </label>
+                )
+              })}
             </div>
           </div>
         )
+      }
 
       case 'identity': {
         const isIdentityEditMode = editMode['identity']
@@ -1572,8 +1956,8 @@ function SettingsPage({
               </div>
               <div className="flex flex-wrap items-center justify-between text-xs text-text-muted gap-2">
                 <span>User Profile Step: {profileStepCompleted ? 'Completed' : 'Pending'}</span>
-                <span>Identity Step: {identityVerified ? 'Approved' : (identityVerifiedByAutomation ? 'Awaiting Admin Approval' : 'Pending')}</span>
-                <span>Business Step: {businessVerified ? 'Completed' : 'Pending'}</span>
+                <span>Identity Step: {identityVerified ? 'Completed' : 'Pending'}</span>
+                <span>Business Step: {businessStepStatusLabel}</span>
               </div>
             </div>
 
@@ -1633,7 +2017,7 @@ function SettingsPage({
                       if (identityLockedForClient) return
                       const next = {
                         ...verificationDocs,
-                        govIdNumber: event.target.value,
+                        govIdNumber: sanitizeAlphaNumeric(event.target.value),
                         govIdVerifiedAt: '',
                         govIdVerificationStatus: '',
                       }
@@ -1700,6 +2084,8 @@ function SettingsPage({
         const progressLabel = `${verificationRatioLabel} verification steps completed.`
         const verificationMessage = verificationStepsCompleted === 0
           ? 'Complete user profile, identity, and business verification to invite team members.'
+          : businessVerificationSubmitted && !businessVerified
+            ? 'Business verification is submitted and awaiting admin approval before invite access can be enabled.'
           : verificationStepsCompleted < 3
             ? 'Invite access remains locked until all verification steps are completed and approved.'
             : 'Awaiting final compliance approval before invite access can be enabled.'
@@ -1959,11 +2345,19 @@ function SettingsPage({
                   <h4 className="text-sm font-semibold text-text-primary mb-4">Business Verification</h4>
                   {isIndividualBusinessType ? (
                     <div className="rounded-md border border-success/30 bg-success-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Individual business type is automatically passed for verification step 3. No business registration upload is required.
+                      Stage 3 is auto verified for Individual accounts. No business registration upload is required.
                     </div>
                   ) : !canStartBusinessVerification ? (
                     <div className="rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Complete and get approval for identity verification before starting business verification.
+                      Complete identity verification before starting business verification.
+                    </div>
+                  ) : businessLockedForClient ? (
+                    <div className="rounded-md border border-success/30 bg-success-bg/40 px-3 py-2.5 text-sm text-text-secondary">
+                      Business verification is approved and locked.
+                    </div>
+                  ) : businessVerificationSubmitted ? (
+                    <div className="rounded-md border border-primary/30 bg-info-bg/40 px-3 py-2.5 text-sm text-text-secondary">
+                      Submitted. Awaiting approval.
                     </div>
                   ) : (
                     <div className="grid grid-cols-1 gap-4">
@@ -2176,24 +2570,32 @@ function SettingsPage({
                   <h4 className="text-sm font-semibold text-text-primary mb-4">Business Verification</h4>
                   {isIndividualBusinessType ? (
                     <div className="rounded-md border border-success/30 bg-success-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Individual business type is automatically passed for verification step 3. No business registration upload is required.
+                      Stage 3 is auto verified for Individual accounts. No business registration upload is required.
                     </div>
                   ) : !canStartBusinessVerification ? (
                     <div className="rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Identity verification must be approved by admin before business verification can start.
+                      Complete identity verification before business verification can start.
                     </div>
                   ) : (
-                    <div className="border-2 border-dashed border-border rounded-lg p-4 text-center hover:border-primary transition-colors cursor-pointer" onClick={() => { const input = document.querySelector('#verification-upload-businessReg'); if (input) input.click() }}>
-                      <UploadCloud className="w-8 h-8 mx-auto mb-2 text-text-muted" />
-                      <p className="text-sm text-text-primary mb-1">Upload business registration document</p>
-                      <input
-                        type="file"
-                        id="verification-upload-businessReg"
-                        className="hidden"
-                        onChange={(e) => { handleFileUpload('businessReg', e) }}
-                      />
-                      <p className="text-xs text-text-muted">All file types supported.</p>
-                    </div>
+                    <>
+                      {businessVerificationSubmitted && !businessLockedForClient && (
+                        <div className="mb-3 rounded-md border border-primary/30 bg-info-bg/40 px-3 py-2.5 text-sm text-text-secondary">
+                          Submitted. Awaiting approval.
+                        </div>
+                      )}
+                      <div className={`border-2 border-dashed border-border rounded-lg p-4 text-center transition-colors ${businessLockedForClient ? 'bg-background/50 cursor-not-allowed' : 'hover:border-primary cursor-pointer'}`} onClick={() => { if (businessLockedForClient) return; const input = document.querySelector('#verification-upload-businessReg'); if (input) input.click() }}>
+                        <UploadCloud className="w-8 h-8 mx-auto mb-2 text-text-muted" />
+                        <p className="text-sm text-text-primary mb-1">{businessLockedForClient ? 'Business verification is locked' : 'Upload business registration document'}</p>
+                        <input
+                          type="file"
+                          id="verification-upload-businessReg"
+                          className="hidden"
+                          onChange={(e) => { handleFileUpload('businessReg', e) }}
+                          disabled={businessLockedForClient}
+                        />
+                        <p className="text-xs text-text-muted">All file types supported.</p>
+                      </div>
+                    </>
                   )}
                   {!isIndividualBusinessType && verificationDocs.businessReg && (
                     <p className="text-xs text-success mt-2">Uploaded: {verificationDocs.businessReg}</p>
@@ -2201,11 +2603,15 @@ function SettingsPage({
                   {!isIndividualBusinessType && (
                     <div className="pt-4">
                       <button
-                        disabled={!canStartBusinessVerification}
+                        disabled={!canStartBusinessVerification || businessLockedForClient || businessVerificationSubmitted}
                         onClick={handleSubmitBusinessVerification}
                         className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                       >
-                        Submit Business Verification
+                        {businessLockedForClient
+                          ? 'Business Verification Approved'
+                          : businessVerificationSubmitted
+                            ? 'Submitted - Awaiting Approval'
+                            : 'Submit Business Verification'}
                       </button>
                     </div>
                   )}
@@ -2228,12 +2634,16 @@ function SettingsPage({
       case 'tax-details': {
         const isTaxEditMode = editMode['tax-details']
         const tinLocked = isFieldLocked('tin')
+        const financialYearEndDisplay = formatFinancialBoundaryDisplay(formData.reportingCycle, 'end')
+        const financialYearStartDisplay = formatFinancialBoundaryDisplay(formData.startMonth, 'start')
+        const financialYearEndMonth = getFinancialBoundaryMonth(draftData.reportingCycle)
+        const financialYearStartMonth = getFinancialBoundaryMonth(draftData.startMonth)
         return (
           <div className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div>
                 <h3 className="text-lg font-semibold text-text-primary mb-1">Tax Details</h3>
-                <p className="text-sm text-text-muted">Configure your tax reporting preferences</p>
+                <p className="text-sm text-text-muted">Configure your financial year dates</p>
                 <p className="text-xs text-text-muted mt-1">Fields marked with <span className="text-error">*</span> are mandatory.</p>
               </div>
               <button
@@ -2249,8 +2659,8 @@ function SettingsPage({
             {!isTaxEditMode ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {renderReadonlyField('TIN (Tax Identification Number)', formData.tin, true)}
-                {renderReadonlyField('Reporting Cycle', formData.reportingCycle, true)}
-                {renderReadonlyField('Start Month', formData.startMonth, true)}
+                {renderReadonlyField('Financial Year End', financialYearEndDisplay, true)}
+                {renderReadonlyField('Financial Year Start', financialYearStartDisplay, true)}
               </div>
             ) : (
               <>
@@ -2271,37 +2681,40 @@ function SettingsPage({
                     </div>
                   )}
                   <div>
-                    <label className="block text-sm font-medium text-text-primary mb-1.5">Reporting Cycle <span className="text-error">*</span></label>
+                    <label className="block text-sm font-medium text-text-primary mb-1.5">Financial Year End <span className="text-error">*</span></label>
                     <select
                       id="settings-reportingCycle"
-                      value={draftData.reportingCycle}
+                      value={financialYearEndMonth}
                       onChange={(e) => handleInputChange('reportingCycle', e.target.value)}
                       className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.reportingCycle ? 'border-error' : 'border-border'}`}
                     >
-                      <option value="">Select reporting cycle</option>
-                      {reportingCycles.map((cycle) => (
-                        <option key={cycle} value={cycle}>{cycle}</option>
+                      <option value="">Select month</option>
+                      {FINANCIAL_MONTH_OPTIONS.map((option) => (
+                        <option key={`fy-end-${option.value}`} value={option.value}>{option.label}</option>
                       ))}
                     </select>
                     {errors.reportingCycle && <p className="text-xs text-error mt-1">{errors.reportingCycle}</p>}
+                    {!errors.reportingCycle && (
+                      <p className="text-xs text-text-muted mt-1">Always saved as the last day of the selected month.</p>
+                    )}
                   </div>
                   <div className="col-span-2">
-                    <label className="block text-sm font-medium text-text-primary mb-1.5">Start Month <span className="text-error">*</span></label>
+                    <label className="block text-sm font-medium text-text-primary mb-1.5">Financial Year Start <span className="text-error">*</span></label>
                     <select
                       id="settings-startMonth"
-                      value={draftData.startMonth}
+                      value={financialYearStartMonth}
                       onChange={(e) => handleInputChange('startMonth', e.target.value)}
                       className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${errors.startMonth ? 'border-error' : 'border-border'}`}
                     >
-                      <option value="">Select start month</option>
-                      {startMonths.map((month) => (
-                        <option key={month} value={month}>{month}</option>
+                      <option value="">Select month</option>
+                      {FINANCIAL_MONTH_OPTIONS.map((option) => (
+                        <option key={`fy-start-${option.value}`} value={option.value}>{option.label}</option>
                       ))}
                     </select>
                     {errors.startMonth ? (
                       <p className="text-xs text-error mt-1">{errors.startMonth}</p>
                     ) : (
-                      <p className="text-xs text-text-muted mt-1">These details determine your tax compliance reporting schedule.</p>
+                      <p className="text-xs text-text-muted mt-1">Always saved as the first day of the selected month.</p>
                     )}
                   </div>
                 </div>

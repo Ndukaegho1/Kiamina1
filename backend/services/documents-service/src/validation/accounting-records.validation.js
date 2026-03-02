@@ -1,8 +1,12 @@
-const CATEGORIES = new Set(["expenses", "sales", "bank-statements", "other"]);
-const STATUSES = new Set(["draft", "posted", "archived"]);
-const TRANSACTION_TYPES = new Set(["debit", "credit", "unknown"]);
+import Joi from "joi";
+
+const CATEGORIES = ["expenses", "sales", "bank-statements", "other"];
+const STATUSES = ["draft", "posted", "archived"];
+const TRANSACTION_TYPES = ["debit", "credit", "unknown"];
 
 const normalizeString = (value) => String(value ?? "").trim();
+const normalizeSource = (body) =>
+  body && typeof body === "object" && !Array.isArray(body) ? body : {};
 
 const normalizeCategory = (value) => normalizeString(value).toLowerCase();
 const normalizeStatus = (value) => normalizeString(value).toLowerCase();
@@ -62,42 +66,118 @@ const parseAmount = (value) => {
   return parsed;
 };
 
-export const validateCreateRecordPayload = (body) => {
-  const ownerUserId = normalizeString(body?.ownerUserId);
-  const category = normalizeCategory(body?.category);
-  const className = normalizeString(body?.className);
-  const amount = parseAmount(body?.amount);
-  const currency = normalizeCurrency(body?.currency);
-  const transactionType = normalizeTransactionType(body?.transactionType || "unknown");
-  const transactionDate = parseDate(body?.transactionDate);
-  const description = normalizeString(body?.description);
-  const vendorName = normalizeString(body?.vendorName);
-  const customerName = normalizeString(body?.customerName);
-  const paymentMethod = normalizeString(body?.paymentMethod);
-  const invoiceNumber = normalizeString(body?.invoiceNumber);
-  const reference = normalizeString(body?.reference);
-  const sourceDocumentId = normalizeString(body?.sourceDocumentId);
-  const status = normalizeStatus(body?.status || "draft");
-  const metadata = parseOptionalMetadata(body?.metadata);
+const parsePositiveInt = (value, fallback) => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return fallback;
+  }
+  return parsed;
+};
+
+const parseBoolean = (value, fallback = false) => {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const normalized = normalizeString(value).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+};
+
+const parseYear = (value, fallbackYear) => {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return fallbackYear;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 1970 || parsed > 2200) {
+    return null;
+  }
+  return parsed;
+};
+
+const parseMonth = (value, fallbackMonth) => {
+  const normalized = normalizeString(value);
+  if (!normalized) {
+    return fallbackMonth;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 12) {
+    return null;
+  }
+  return parsed;
+};
+
+const buildMonthDateRange = ({ year, month }) => {
+  if (!year || !month) {
+    return { dateFrom: null, dateTo: null };
+  }
+
+  const dateFrom = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+  const dateTo = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+  return { dateFrom, dateTo };
+};
+
+const categorySchema = Joi.string().valid(...CATEGORIES);
+const statusSchema = Joi.string().valid(...STATUSES);
+const transactionTypeSchema = Joi.string().valid(...TRANSACTION_TYPES);
+const currencySchema = Joi.string().pattern(/^[A-Z]{3}$/);
+const amountSchema = Joi.number().min(0);
+const timezoneSchema = Joi.string().max(64);
+const ownerRequiredSchema = Joi.string().trim().required();
+const ownerOptionalSchema = Joi.string().trim().allow("");
+
+export const validateCreateRecordPayload = (
+  body,
+  { requireOwnerUserId = true } = {}
+) => {
+  const source = normalizeSource(body);
+
+  const ownerUserId = normalizeString(source.ownerUserId);
+  const category = normalizeCategory(source.category);
+  const className = normalizeString(source.className);
+  const amount = parseAmount(source.amount);
+  const currency = normalizeCurrency(source.currency);
+  const transactionType = normalizeTransactionType(source.transactionType || "unknown");
+  const transactionDate = parseDate(source.transactionDate);
+  const description = normalizeString(source.description);
+  const vendorName = normalizeString(source.vendorName);
+  const customerName = normalizeString(source.customerName);
+  const paymentMethod = normalizeString(source.paymentMethod);
+  const invoiceNumber = normalizeString(source.invoiceNumber);
+  const reference = normalizeString(source.reference);
+  const sourceDocumentId = normalizeString(source.sourceDocumentId);
+  const status = normalizeStatus(source.status || "draft");
+  const metadata = parseOptionalMetadata(source.metadata);
   const errors = [];
 
-  if (!ownerUserId) {
+  const ownerValidation = requireOwnerUserId
+    ? ownerRequiredSchema.validate(ownerUserId)
+    : ownerOptionalSchema.validate(ownerUserId);
+  if (ownerValidation.error) {
     errors.push("ownerUserId is required");
   }
 
-  if (!CATEGORIES.has(category)) {
+  if (categorySchema.validate(category).error) {
     errors.push("category must be one of: expenses, sales, bank-statements, other");
   }
 
-  if (amount === null) {
+  if (amountSchema.validate(amount).error) {
     errors.push("amount must be a non-negative number");
   }
 
-  if (!/^[A-Z]{3}$/.test(currency)) {
+  if (currencySchema.validate(currency).error) {
     errors.push("currency must be a 3-letter code");
   }
 
-  if (!TRANSACTION_TYPES.has(transactionType)) {
+  if (transactionTypeSchema.validate(transactionType).error) {
     errors.push("transactionType must be one of: debit, credit, unknown");
   }
 
@@ -105,7 +185,7 @@ export const validateCreateRecordPayload = (body) => {
     errors.push("transactionDate must be a valid date");
   }
 
-  if (!STATUSES.has(status)) {
+  if (statusSchema.validate(status).error) {
     errors.push("status must be one of: draft, posted, archived");
   }
 
@@ -137,60 +217,61 @@ export const validateCreateRecordPayload = (body) => {
 };
 
 export const buildRecordUpdatePayload = (body) => {
+  const source = normalizeSource(body);
   const payload = {};
   const errors = [];
 
-  if (body?.ownerUserId !== undefined) {
-    const ownerUserId = normalizeString(body.ownerUserId);
-    if (!ownerUserId) {
+  if (source.ownerUserId !== undefined) {
+    const ownerUserId = normalizeString(source.ownerUserId);
+    if (ownerRequiredSchema.validate(ownerUserId).error) {
       errors.push("ownerUserId cannot be empty");
     } else {
       payload.ownerUserId = ownerUserId;
     }
   }
 
-  if (body?.category !== undefined) {
-    const category = normalizeCategory(body.category);
-    if (!CATEGORIES.has(category)) {
+  if (source.category !== undefined) {
+    const category = normalizeCategory(source.category);
+    if (categorySchema.validate(category).error) {
       errors.push("category must be one of: expenses, sales, bank-statements, other");
     } else {
       payload.category = category;
     }
   }
 
-  if (body?.className !== undefined) {
-    payload.className = normalizeString(body.className);
+  if (source.className !== undefined) {
+    payload.className = normalizeString(source.className);
   }
 
-  if (body?.amount !== undefined) {
-    const amount = parseAmount(body.amount);
-    if (amount === null) {
+  if (source.amount !== undefined) {
+    const amount = parseAmount(source.amount);
+    if (amountSchema.validate(amount).error) {
       errors.push("amount must be a non-negative number");
     } else {
       payload.amount = amount;
     }
   }
 
-  if (body?.currency !== undefined) {
-    const currency = normalizeCurrency(body.currency);
-    if (!/^[A-Z]{3}$/.test(currency)) {
+  if (source.currency !== undefined) {
+    const currency = normalizeCurrency(source.currency);
+    if (currencySchema.validate(currency).error) {
       errors.push("currency must be a 3-letter code");
     } else {
       payload.currency = currency;
     }
   }
 
-  if (body?.transactionType !== undefined) {
-    const transactionType = normalizeTransactionType(body.transactionType);
-    if (!TRANSACTION_TYPES.has(transactionType)) {
+  if (source.transactionType !== undefined) {
+    const transactionType = normalizeTransactionType(source.transactionType);
+    if (transactionTypeSchema.validate(transactionType).error) {
       errors.push("transactionType must be one of: debit, credit, unknown");
     } else {
       payload.transactionType = transactionType;
     }
   }
 
-  if (body?.transactionDate !== undefined) {
-    const transactionDate = parseDate(body.transactionDate);
+  if (source.transactionDate !== undefined) {
+    const transactionDate = parseDate(source.transactionDate);
     if (!transactionDate) {
       errors.push("transactionDate must be a valid date");
     } else {
@@ -198,46 +279,46 @@ export const buildRecordUpdatePayload = (body) => {
     }
   }
 
-  if (body?.description !== undefined) {
-    payload.description = normalizeString(body.description);
+  if (source.description !== undefined) {
+    payload.description = normalizeString(source.description);
   }
 
-  if (body?.vendorName !== undefined) {
-    payload.vendorName = normalizeString(body.vendorName);
+  if (source.vendorName !== undefined) {
+    payload.vendorName = normalizeString(source.vendorName);
   }
 
-  if (body?.customerName !== undefined) {
-    payload.customerName = normalizeString(body.customerName);
+  if (source.customerName !== undefined) {
+    payload.customerName = normalizeString(source.customerName);
   }
 
-  if (body?.paymentMethod !== undefined) {
-    payload.paymentMethod = normalizeString(body.paymentMethod);
+  if (source.paymentMethod !== undefined) {
+    payload.paymentMethod = normalizeString(source.paymentMethod);
   }
 
-  if (body?.invoiceNumber !== undefined) {
-    payload.invoiceNumber = normalizeString(body.invoiceNumber);
+  if (source.invoiceNumber !== undefined) {
+    payload.invoiceNumber = normalizeString(source.invoiceNumber);
   }
 
-  if (body?.reference !== undefined) {
-    payload.reference = normalizeString(body.reference);
+  if (source.reference !== undefined) {
+    payload.reference = normalizeString(source.reference);
   }
 
-  if (body?.sourceDocumentId !== undefined) {
-    const sourceDocumentId = normalizeString(body.sourceDocumentId);
+  if (source.sourceDocumentId !== undefined) {
+    const sourceDocumentId = normalizeString(source.sourceDocumentId);
     payload.sourceDocumentId = sourceDocumentId || null;
   }
 
-  if (body?.status !== undefined) {
-    const status = normalizeStatus(body.status);
-    if (!STATUSES.has(status)) {
+  if (source.status !== undefined) {
+    const status = normalizeStatus(source.status);
+    if (statusSchema.validate(status).error) {
       errors.push("status must be one of: draft, posted, archived");
     } else {
       payload.status = status;
     }
   }
 
-  if (body?.metadata !== undefined) {
-    const metadata = parseOptionalMetadata(body.metadata);
+  if (source.metadata !== undefined) {
+    const metadata = parseOptionalMetadata(source.metadata);
     if (!metadata) {
       errors.push("metadata must be a valid JSON object");
     } else {
@@ -248,38 +329,32 @@ export const buildRecordUpdatePayload = (body) => {
   return { payload, errors };
 };
 
-const parsePositiveInt = (value, fallback) => {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    return fallback;
-  }
-  return parsed;
-};
-
 export const validateListRecordQuery = (query, actor) => {
-  const ownerUserId = normalizeString(query?.ownerUserId);
-  const category = normalizeCategory(query?.category);
-  const status = normalizeStatus(query?.status);
-  const className = normalizeString(query?.className);
-  const search = normalizeString(query?.search);
-  const dateFrom = parseDate(query?.dateFrom);
-  const dateTo = parseDate(query?.dateTo);
-  const limit = parsePositiveInt(query?.limit, 50);
-  const skip = parsePositiveInt(query?.skip, 0);
+  const source = normalizeSource(query);
+
+  const ownerUserId = normalizeString(source.ownerUserId);
+  const category = normalizeCategory(source.category);
+  const status = normalizeStatus(source.status);
+  const className = normalizeString(source.className);
+  const search = normalizeString(source.search);
+  const dateFrom = parseDate(source.dateFrom);
+  const dateTo = parseDate(source.dateTo);
+  const limit = parsePositiveInt(source.limit, 50);
+  const skip = parsePositiveInt(source.skip, 0);
   const errors = [];
 
-  if (category && !CATEGORIES.has(category)) {
+  if (category && categorySchema.validate(category).error) {
     errors.push("category must be one of: expenses, sales, bank-statements, other");
   }
 
-  if (status && !STATUSES.has(status)) {
+  if (status && statusSchema.validate(status).error) {
     errors.push("status must be one of: draft, posted, archived");
   }
 
-  if (query?.dateFrom !== undefined && !dateFrom) {
+  if (source.dateFrom !== undefined && !dateFrom) {
     errors.push("dateFrom must be a valid date");
   }
-  if (query?.dateTo !== undefined && !dateTo) {
+  if (source.dateTo !== undefined && !dateTo) {
     errors.push("dateTo must be a valid date");
   }
 
@@ -300,25 +375,27 @@ export const validateListRecordQuery = (query, actor) => {
 };
 
 export const validateSummaryQuery = (query, actor) => {
-  const ownerUserId = normalizeString(query?.ownerUserId);
-  const category = normalizeCategory(query?.category);
-  const status = normalizeStatus(query?.status);
-  const dateFrom = parseDate(query?.dateFrom);
-  const dateTo = parseDate(query?.dateTo);
+  const source = normalizeSource(query);
+
+  const ownerUserId = normalizeString(source.ownerUserId);
+  const category = normalizeCategory(source.category);
+  const status = normalizeStatus(source.status);
+  const dateFrom = parseDate(source.dateFrom);
+  const dateTo = parseDate(source.dateTo);
   const errors = [];
 
-  if (category && !CATEGORIES.has(category)) {
+  if (category && categorySchema.validate(category).error) {
     errors.push("category must be one of: expenses, sales, bank-statements, other");
   }
 
-  if (status && !STATUSES.has(status)) {
+  if (status && statusSchema.validate(status).error) {
     errors.push("status must be one of: draft, posted, archived");
   }
 
-  if (query?.dateFrom !== undefined && !dateFrom) {
+  if (source.dateFrom !== undefined && !dateFrom) {
     errors.push("dateFrom must be a valid date");
   }
-  if (query?.dateTo !== undefined && !dateTo) {
+  if (source.dateTo !== undefined && !dateTo) {
     errors.push("dateTo must be a valid date");
   }
 
@@ -328,6 +405,105 @@ export const validateSummaryQuery = (query, actor) => {
       ownerUserId: ownerUserId || actor.uid,
       category: category || "",
       status: status || "",
+      dateFrom,
+      dateTo
+    }
+  };
+};
+
+export const validateImportRecordPayload = (body, actor) => {
+  const source = normalizeSource(body);
+
+  const ownerUserId = normalizeString(source.ownerUserId) || actor.uid;
+  const category = normalizeCategory(source.category);
+  const status = normalizeStatus(source.status || "draft");
+  const transactionType = normalizeTransactionType(
+    source.transactionType || "unknown"
+  );
+  const currency = normalizeCurrency(source.currency || "NGN");
+  const dryRun = parseBoolean(source.dryRun, false);
+  const errors = [];
+
+  if (category && categorySchema.validate(category).error) {
+    errors.push("category must be one of: expenses, sales, bank-statements, other");
+  }
+
+  if (status && statusSchema.validate(status).error) {
+    errors.push("status must be one of: draft, posted, archived");
+  }
+
+  if (transactionType && transactionTypeSchema.validate(transactionType).error) {
+    errors.push("transactionType must be one of: debit, credit, unknown");
+  }
+
+  if (currencySchema.validate(currency).error) {
+    errors.push("currency must be a 3-letter code");
+  }
+
+  return {
+    errors,
+    payload: {
+      ownerUserId,
+      category: category || "",
+      status: status || "draft",
+      transactionType: transactionType || "unknown",
+      currency,
+      dryRun
+    }
+  };
+};
+
+export const validateMonthlyReportQuery = (query, actor) => {
+  const source = normalizeSource(query);
+
+  const ownerUserId = normalizeString(source.ownerUserId) || actor.uid;
+  const category = normalizeCategory(source.category);
+  const status = normalizeStatus(source.status);
+  const timezone = normalizeString(source.timezone || "UTC") || "UTC";
+  const explicitDateFrom = parseDate(source.dateFrom);
+  const explicitDateTo = parseDate(source.dateTo);
+  const now = new Date();
+  const year = parseYear(source.year, now.getUTCFullYear());
+  const month = parseMonth(source.month, now.getUTCMonth() + 1);
+  const errors = [];
+
+  if (category && categorySchema.validate(category).error) {
+    errors.push("category must be one of: expenses, sales, bank-statements, other");
+  }
+
+  if (status && statusSchema.validate(status).error) {
+    errors.push("status must be one of: draft, posted, archived");
+  }
+
+  if (source.dateFrom !== undefined && !explicitDateFrom) {
+    errors.push("dateFrom must be a valid date");
+  }
+  if (source.dateTo !== undefined && !explicitDateTo) {
+    errors.push("dateTo must be a valid date");
+  }
+  if (!year) {
+    errors.push("year must be an integer between 1970 and 2200");
+  }
+  if (!month) {
+    errors.push("month must be an integer between 1 and 12");
+  }
+  if (timezoneSchema.validate(timezone).error) {
+    errors.push("timezone cannot be longer than 64 characters");
+  }
+
+  const monthRange = buildMonthDateRange({ year, month });
+  const dateFrom = explicitDateFrom || monthRange.dateFrom;
+  const dateTo = explicitDateTo || monthRange.dateTo;
+
+  return {
+    errors,
+    payload: {
+      ownerUserId,
+      category: category || "",
+      status: status || "",
+      timezone,
+      year,
+      month,
       dateFrom,
       dateTo
     }

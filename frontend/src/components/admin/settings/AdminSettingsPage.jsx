@@ -22,6 +22,7 @@ import {
   getDefaultPermissionsForAdminLevel,
   getAdminLevelLabel,
   getEffectiveAdminPermissions,
+  isOwnerAdminLevel,
   normalizeAdminLevel,
   normalizeAdminAccount,
   normalizeAdminInvite,
@@ -38,6 +39,11 @@ import {
 import { getNetworkAwareDurationMs } from '../../../utils/networkRuntime'
 import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
 import { apiFetch, clearApiAccessToken } from '../../../utils/apiClient'
+import {
+  DEFAULT_ADMIN_SECURITY_PREFERENCES,
+  getAdminSecurityStorageKey,
+  normalizeAdminSecurityPreferences,
+} from '../../../utils/adminSecurityPreferences'
 
 const ACCOUNTS_STORAGE_KEY = 'kiaminaAccounts'
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
@@ -203,7 +209,6 @@ const formatPhoneNumber = (code = '+234', number = '') => {
 }
 
 const getProfileStorageKey = (email = '') => `kiaminaAdminProfile:${email.trim().toLowerCase()}`
-const getSecurityStorageKey = (email = '') => `kiaminaAdminSecurity:${email.trim().toLowerCase()}`
 const getClientSessionControl = () => {
   try {
     const parsed = JSON.parse(localStorage.getItem(CLIENT_SESSION_CONTROL_STORAGE_KEY) || '{}')
@@ -294,7 +299,9 @@ function AdminSettingsPage({
     [currentAdminAccount],
   )
   const currentAdminLevel = currentAdmin.adminLevel || ADMIN_LEVELS.SUPER
+  const isOwnerAdmin = isOwnerAdminLevel(currentAdminLevel)
   const isSuperAdmin = currentAdminLevel === ADMIN_LEVELS.SUPER
+  const canManagePrivilegedAdminActions = isOwnerAdmin || isSuperAdmin
 
   const [adminAccounts, setAdminAccounts] = useState(() => getAdminAccounts(readAccounts()))
   const [clientAccounts, setClientAccounts] = useState(() => getClientAccounts(readAccounts()))
@@ -332,10 +339,7 @@ function AdminSettingsPage({
   const [emailChangeChallenge, setEmailChangeChallenge] = useState(null)
 
   const [securityForm, setSecurityForm] = useState({
-    sessionTimeout: '30',
-    emailNotificationPreference: true,
-    activityAlertPreference: true,
-    twoFactorEnabled: true,
+    ...DEFAULT_ADMIN_SECURITY_PREFERENCES,
   })
 
   const [createAdminForm, setCreateAdminForm] = useState({
@@ -351,6 +355,7 @@ function AdminSettingsPage({
     governmentIdNumber: '',
     governmentIdFile: '',
     residentialAddress: '',
+    ownerPrivateKey: '',
     adminLevel: ADMIN_LEVELS.AREA_ACCOUNTANT,
     permissions: getDefaultPermissionsForAdminLevel(ADMIN_LEVELS.AREA_ACCOUNTANT),
   })
@@ -416,30 +421,15 @@ function AdminSettingsPage({
     }
 
     try {
-      const savedSecurity = localStorage.getItem(getSecurityStorageKey(normalizedEmail))
+      const savedSecurity = localStorage.getItem(getAdminSecurityStorageKey(normalizedEmail))
       if (savedSecurity) {
         const parsedSecurity = JSON.parse(savedSecurity)
-        setSecurityForm({
-          sessionTimeout: `${parsedSecurity.sessionTimeout || '30'}`,
-          emailNotificationPreference: parsedSecurity.emailNotificationPreference !== false,
-          activityAlertPreference: parsedSecurity.activityAlertPreference !== false,
-          twoFactorEnabled: parsedSecurity.twoFactorEnabled !== false,
-        })
+        setSecurityForm(normalizeAdminSecurityPreferences(parsedSecurity))
       } else {
-        setSecurityForm({
-          sessionTimeout: '30',
-          emailNotificationPreference: true,
-          activityAlertPreference: true,
-          twoFactorEnabled: true,
-        })
+        setSecurityForm(normalizeAdminSecurityPreferences())
       }
     } catch {
-      setSecurityForm({
-        sessionTimeout: '30',
-        emailNotificationPreference: true,
-        activityAlertPreference: true,
-        twoFactorEnabled: true,
-      })
+      setSecurityForm(normalizeAdminSecurityPreferences())
     }
   }, [currentAdmin.email, currentAdmin.fullName, currentAdmin.roleInCompany, currentAdmin.department, currentAdmin.phoneNumber])
 
@@ -495,6 +485,7 @@ function AdminSettingsPage({
   const allowDemoInvite = import.meta.env.DEV === true
   const normalizedCreateAdminWorkCountry = normalizeAdminVerificationCountry(createAdminForm.workCountry)
   const createAdminGovIdOptions = getAdminGovernmentIdOptions(normalizedCreateAdminWorkCountry)
+  const isCreateAdminOwnerLevel = normalizeAdminLevel(createAdminForm.adminLevel) === ADMIN_LEVELS.OWNER
 
   const notify = (type, message) => {
     if (typeof showToast === 'function') showToast(type, message)
@@ -605,10 +596,12 @@ function AdminSettingsPage({
   const saveSecuritySettings = () => {
     const normalizedEmail = currentAdmin.email?.trim()?.toLowerCase()
     if (!normalizedEmail) return
+    const normalizedSecurityForm = normalizeAdminSecurityPreferences(securityForm)
     localStorage.setItem(
-      getSecurityStorageKey(normalizedEmail),
-      JSON.stringify(securityForm),
+      getAdminSecurityStorageKey(normalizedEmail),
+      JSON.stringify(normalizedSecurityForm),
     )
+    setSecurityForm(normalizedSecurityForm)
     appendScopedActivityLog({
       action: 'Updated security preferences',
       details: normalizedEmail,
@@ -817,8 +810,8 @@ function AdminSettingsPage({
       }
     }
 
-    const previousSecurityKey = getSecurityStorageKey(previousEmail)
-    const nextSecurityKey = getSecurityStorageKey(nextEmail)
+    const previousSecurityKey = getAdminSecurityStorageKey(previousEmail)
+    const nextSecurityKey = getAdminSecurityStorageKey(nextEmail)
     const securityValue = localStorage.getItem(previousSecurityKey)
     if (securityValue) {
       localStorage.setItem(nextSecurityKey, securityValue)
@@ -852,9 +845,18 @@ function AdminSettingsPage({
     const normalizedGovernmentIdType = normalizeAdminGovernmentIdType(createAdminForm.governmentIdType, normalizedWorkCountry)
     const normalizedGovernmentIdNumber = String(createAdminForm.governmentIdNumber || '').trim()
     const normalizedResidentialAddress = String(createAdminForm.residentialAddress || '').trim()
+    const normalizedOwnerPrivateKey = String(createAdminForm.ownerPrivateKey || '').trim()
     const normalizedRoleInCompany = String(createAdminForm.roleInCompany || '').trim()
     const normalizedDepartment = String(createAdminForm.department || '').trim()
     const normalizedPhoneNumber = formatPhoneNumber(createAdminForm.phoneCountryCode, createAdminForm.phoneNumber)
+    const normalizedTargetLevel = normalizeAdminLevel(createAdminForm.adminLevel)
+    const isCreatingOwner = normalizedTargetLevel === ADMIN_LEVELS.OWNER
+    if (isCreatingOwner && !isOwnerAdmin) {
+      const message = 'Only Owner can create another Owner account.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
     if (
       !createAdminForm.fullName.trim()
       || !createAdminForm.email.trim()
@@ -862,16 +864,32 @@ function AdminSettingsPage({
       || !normalizedDepartment
       || !normalizedPhoneNumber
       || !createAdminForm.password
-      || !normalizedGovernmentIdType
-      || !normalizedGovernmentIdNumber
     ) {
       const message = 'Complete all create-admin fields.'
       setFormError(message)
       notify('error', message)
       return
     }
-    if (normalizedGovernmentIdNumber.length < 4) {
+    if (!isCreatingOwner && !normalizedResidentialAddress) {
+      const message = 'Residential address is required for this admin role.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+    if (!isCreatingOwner && (!normalizedGovernmentIdType || !normalizedGovernmentIdNumber)) {
+      const message = 'Government ID details are required for this admin role.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+    if (!isCreatingOwner && normalizedGovernmentIdNumber.length < 4) {
       const message = 'Enter a valid government ID number.'
+      setFormError(message)
+      notify('error', message)
+      return
+    }
+    if (isCreatingOwner && normalizedOwnerPrivateKey.length < 12) {
+      const message = 'Owner private key must be at least 12 characters.'
       setFormError(message)
       notify('error', message)
       return
@@ -882,7 +900,7 @@ function AdminSettingsPage({
       notify('error', message)
       return
     }
-    if (createAdminIdentityVerification.status !== 'verified') {
+    if (!isCreatingOwner && createAdminIdentityVerification.status !== 'verified') {
       const message = 'Submit identity verification before creating this admin.'
       setFormError(message)
       notify('error', message)
@@ -908,10 +926,12 @@ function AdminSettingsPage({
         phoneNumber: normalizedPhoneNumber,
         phoneCountryCode: createAdminForm.phoneCountryCode || '+234',
         workCountry: normalizedWorkCountry,
-        governmentIdType: normalizedGovernmentIdType,
-        governmentIdNumber: normalizedGovernmentIdNumber,
-        governmentIdFile: String(createAdminForm.governmentIdFile || '').trim(),
+        governmentIdType: isCreatingOwner ? '' : normalizedGovernmentIdType,
+        governmentIdNumber: isCreatingOwner ? '' : normalizedGovernmentIdNumber,
+        governmentIdFile: isCreatingOwner ? '' : String(createAdminForm.governmentIdFile || '').trim(),
         residentialAddress: normalizedResidentialAddress,
+        ownerPrivateKey: isCreatingOwner ? normalizedOwnerPrivateKey : '',
+        adminLevel: normalizedTargetLevel,
       },
     })
   }
@@ -921,6 +941,13 @@ function AdminSettingsPage({
   }
 
   const verifyCreateAdminIdentity = async () => {
+    if (isCreateAdminOwnerLevel) {
+      setCreateAdminIdentityVerification({
+        status: 'verified',
+        message: 'Owner role does not require ID verification.',
+      })
+      return
+    }
     const fullName = String(createAdminForm.fullName || '').trim()
     const idType = String(createAdminForm.governmentIdType || '').trim()
     const cardNumber = String(createAdminForm.governmentIdNumber || '').trim()
@@ -976,15 +1003,19 @@ function AdminSettingsPage({
 
   const copyCreatedAdminSignupInfo = async () => {
     if (!createdAdminCredentialPacket) return
+    const ownerPrivateKeyLine = createdAdminCredentialPacket.ownerPrivateKey
+      ? `Owner Private Key: ${createdAdminCredentialPacket.ownerPrivateKey}`
+      : null
     const copied = await copyTextToClipboard(
       [
         `Admin Name: ${createdAdminCredentialPacket.fullName}`,
         `Role: ${getAdminLevelLabel(createdAdminCredentialPacket.adminLevel)}`,
         `Work Email: ${createdAdminCredentialPacket.email}`,
         `Temporary Password: ${createdAdminCredentialPacket.password}`,
+        ownerPrivateKeyLine,
         `Admin Login URL: ${createdAdminCredentialPacket.loginUrl}`,
         'Instruction: Sign in and immediately create your permanent password in Admin Settings.',
-      ].join('\n'),
+      ].filter(Boolean).join('\n'),
     )
     if (copied) {
       notify('success', 'Signup information copied.')
@@ -996,6 +1027,10 @@ function AdminSettingsPage({
   const queueInviteAdmin = () => {
     if (!inviteForm.email.trim()) {
       setFormError('Invite email is required.')
+      return
+    }
+    if (normalizeAdminLevel(inviteForm.adminLevel) === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+      setFormError('Only Owner can send Owner invites.')
       return
     }
     const selectedPermissions = normalizePermissionSelection(inviteForm.permissions)
@@ -1018,6 +1053,11 @@ function AdminSettingsPage({
     if (!allowDemoInvite) {
       setFormError('Demo invite is disabled in this environment.')
       notify('error', 'Demo invite is disabled in this environment.')
+      return
+    }
+    if (normalizeAdminLevel(inviteForm.adminLevel) === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+      setFormError('Only Owner can send Owner invites.')
+      notify('error', 'Only Owner can send Owner invites.')
       return
     }
     const selectedPermissions = normalizePermissionSelection(inviteForm.permissions)
@@ -1272,9 +1312,9 @@ function AdminSettingsPage({
   }
 
   const queueLogoutAllClients = () => {
-    if (!isSuperAdmin) {
-      setFormError('Only Super Admin can log out all users.')
-      notify('error', 'Only Super Admin can log out all users.')
+    if (!canManagePrivilegedAdminActions) {
+      setFormError('Only Owner or Super Admin can log out all users.')
+      notify('error', 'Only Owner or Super Admin can log out all users.')
       return
     }
     const totalClients = clientAccounts.length
@@ -1295,7 +1335,7 @@ function AdminSettingsPage({
     try {
       const executeAction = async () => {
         await waitForNetworkAwareDelay()
-        const superAdminOnlyActionTypes = new Set([
+        const privilegedAdminActionTypes = new Set([
           'create-admin',
           'invite-admin',
           'suspend-admin',
@@ -1309,12 +1349,20 @@ function AdminSettingsPage({
           'assign-client-area-accountant',
           'logout-all-clients',
         ])
-        if (superAdminOnlyActionTypes.has(confirmAction.type) && !isSuperAdmin) {
-          setFormError('Only Super Admin can perform this action.')
+        if (privilegedAdminActionTypes.has(confirmAction.type) && !canManagePrivilegedAdminActions) {
+          setFormError('Only Owner or Super Admin can perform this action.')
           return
         }
 
         if (confirmAction.type === 'create-admin') {
+          const targetAdminLevel = normalizeAdminLevel(confirmAction.payload.adminLevel)
+          const isOwnerTarget = targetAdminLevel === ADMIN_LEVELS.OWNER
+          if (isOwnerTarget && !isOwnerAdmin) {
+            const message = 'Only Owner can create another Owner account.'
+            setFormError(message)
+            notify('error', message)
+            return
+          }
           const allAccounts = readAccounts()
           const exists = allAccounts.some(
             (account) => account.email?.trim()?.toLowerCase() === confirmAction.payload.email,
@@ -1338,13 +1386,14 @@ function AdminSettingsPage({
             governmentIdType: confirmAction.payload.governmentIdType || '',
             governmentIdNumber: confirmAction.payload.governmentIdNumber || '',
             governmentIdFile: confirmAction.payload.governmentIdFile || '',
-            governmentIdVerifiedAt: new Date().toISOString(),
+            governmentIdVerifiedAt: isOwnerTarget ? '' : new Date().toISOString(),
             residentialAddress: confirmAction.payload.residentialAddress || '',
+            ownerPrivateKey: confirmAction.payload.ownerPrivateKey || '',
             role: 'admin',
-            adminLevel: confirmAction.payload.adminLevel,
+            adminLevel: targetAdminLevel,
             adminPermissions: resolvePermissionSelection(
               confirmAction.payload.permissions,
-              confirmAction.payload.adminLevel,
+              targetAdminLevel,
             ),
             status: 'active',
             mustChangePassword: true,
@@ -1362,6 +1411,7 @@ function AdminSettingsPage({
             email: createdAdmin.email,
             password: confirmAction.payload.password,
             adminLevel: createdAdmin.adminLevel,
+            ownerPrivateKey: isOwnerTarget ? (confirmAction.payload.ownerPrivateKey || '') : '',
             loginUrl: `${window.location.origin}/admin/login`,
           })
           setCreateAdminForm({
@@ -1377,6 +1427,7 @@ function AdminSettingsPage({
             governmentIdNumber: '',
             governmentIdFile: '',
             residentialAddress: '',
+            ownerPrivateKey: '',
             adminLevel: ADMIN_LEVELS.AREA_ACCOUNTANT,
             permissions: getDefaultPermissionsForAdminLevel(ADMIN_LEVELS.AREA_ACCOUNTANT),
           })
@@ -1387,6 +1438,11 @@ function AdminSettingsPage({
         }
 
         if (confirmAction.type === 'invite-admin') {
+          const inviteAdminLevel = normalizeAdminLevel(confirmAction.payload.adminLevel)
+          if (inviteAdminLevel === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+            setFormError('Only Owner can send Owner invites.')
+            return
+          }
           const allAccounts = readAccounts()
           const existingAccount = allAccounts.find(
             (account) => account.email?.trim()?.toLowerCase() === confirmAction.payload.email,
@@ -1403,10 +1459,10 @@ function AdminSettingsPage({
             id: `INV-${Date.now()}`,
             token: createInviteToken(),
             email: confirmAction.payload.email,
-            adminLevel: confirmAction.payload.adminLevel,
+            adminLevel: inviteAdminLevel,
             adminPermissions: resolvePermissionSelection(
               confirmAction.payload.permissions,
-              confirmAction.payload.adminLevel,
+              inviteAdminLevel,
             ),
             status: 'pending',
             invitedBy: currentAdmin.email || '',
@@ -1438,6 +1494,10 @@ function AdminSettingsPage({
           const targetInvite = existingInvites.find((invite) => invite.token === targetToken)
           if (!targetInvite) {
             setFormError('Invite not found.')
+            return
+          }
+          if (normalizeAdminLevel(targetInvite.adminLevel) === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+            setFormError('Only Owner can delete an Owner invite.')
             return
           }
           appendAdminTrashEntry({
@@ -1473,6 +1533,15 @@ function AdminSettingsPage({
           )
           if (targetIndex === -1) {
             setFormError('Admin account not found.')
+            return
+          }
+          const targetAdminLevel = normalizeAdminLevel(allAccounts[targetIndex]?.adminLevel)
+          if (targetAdminLevel === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+            setFormError('Only Owner can change Owner permissions.')
+            return
+          }
+          if (targetAdminLevel === ADMIN_LEVELS.SUPER && !isOwnerAdmin) {
+            setFormError('Only Owner can change Super Admin permissions.')
             return
           }
 
@@ -1524,6 +1593,15 @@ function AdminSettingsPage({
             setFormError('Admin account not found.')
             return
           }
+          const targetAdminLevel = normalizeAdminLevel(allAccounts[targetIndex]?.adminLevel)
+          if (targetAdminLevel === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+            setFormError('Only Owner can update Owner account status.')
+            return
+          }
+          if (targetAdminLevel === ADMIN_LEVELS.SUPER && !isOwnerAdmin) {
+            setFormError('Only Owner can update Super Admin status.')
+            return
+          }
 
           const nextStatus = confirmAction.type === 'suspend-admin' ? 'suspended' : 'active'
           allAccounts[targetIndex] = normalizeAdminAccount({
@@ -1553,6 +1631,15 @@ function AdminSettingsPage({
           )
           if (!targetAccount) {
             setFormError('Admin account not found.')
+            return
+          }
+          const targetAdminLevel = normalizeAdminLevel(targetAccount.adminLevel)
+          if (targetAdminLevel === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+            setFormError('Only Owner can delete an Owner account.')
+            return
+          }
+          if (targetAdminLevel === ADMIN_LEVELS.SUPER && !isOwnerAdmin) {
+            setFormError('Only Owner can delete a Super Admin account.')
             return
           }
           appendAdminTrashEntry({
@@ -1595,6 +1682,14 @@ function AdminSettingsPage({
           }
 
           const previousAdminLevel = normalizeAdminLevel(allAccounts[targetIndex].adminLevel)
+          if ((previousAdminLevel === ADMIN_LEVELS.OWNER || nextAdminLevel === ADMIN_LEVELS.OWNER) && !isOwnerAdmin) {
+            setFormError('Only Owner can assign or change Owner role.')
+            return
+          }
+          if (previousAdminLevel === ADMIN_LEVELS.SUPER && !isOwnerAdmin) {
+            setFormError('Only Owner can change Super Admin role.')
+            return
+          }
           if (previousAdminLevel === nextAdminLevel) return
           allAccounts[targetIndex] = normalizeAdminAccount({
             ...allAccounts[targetIndex],
@@ -1607,7 +1702,7 @@ function AdminSettingsPage({
           const nextLabel = getAdminLevelLabel(nextAdminLevel)
           appendScopedActivityLog({
             action: 'Changed admin role',
-            details: `Admin role changed from ${previousLabel} to ${nextLabel} by Super Admin.`,
+            details: `Admin role changed from ${previousLabel} to ${nextLabel} by ${getAdminLevelLabel(currentAdminLevel)}.`,
           })
           refreshAdminData()
           notify('success', `Role updated: ${previousLabel} -> ${nextLabel}.`)
@@ -1628,6 +1723,15 @@ function AdminSettingsPage({
             setFormError('Admin account not found.')
             return
           }
+          const targetAdminLevel = normalizeAdminLevel(allAccounts[targetIndex]?.adminLevel)
+          if (targetAdminLevel === ADMIN_LEVELS.OWNER && !isOwnerAdmin) {
+            setFormError('Only Owner can reset Owner password.')
+            return
+          }
+          if (targetAdminLevel === ADMIN_LEVELS.SUPER && !isOwnerAdmin) {
+            setFormError('Only Owner can reset Super Admin password.')
+            return
+          }
           const tempPassword = `Temp@${Math.floor(100000 + Math.random() * 900000)}`
           allAccounts[targetIndex] = {
             ...allAccounts[targetIndex],
@@ -1637,7 +1741,7 @@ function AdminSettingsPage({
           writeAccounts(allAccounts)
           appendScopedActivityLog({
             action: 'Reset admin password',
-            details: `${targetEmail} temporary password issued by Super Admin.`,
+            details: `${targetEmail} temporary password issued by ${getAdminLevelLabel(currentAdminLevel)}.`,
           })
           refreshAdminData()
           notify('success', `Temporary password for ${targetEmail}: ${tempPassword}`)
@@ -1862,7 +1966,7 @@ function AdminSettingsPage({
 
         <section className="bg-white rounded-lg shadow-card border border-border-light p-6">
           <h3 className="text-base font-semibold text-text-primary">2. Permission Overview</h3>
-          {isSuperAdmin ? (
+          {canManagePrivilegedAdminActions ? (
             <div className="mt-4 rounded-md border border-success/30 bg-success-bg px-3 py-3 text-sm text-success inline-flex items-center gap-2">
               <ShieldCheck className="w-4 h-4" />
               Full System Access
@@ -1930,6 +2034,15 @@ function AdminSettingsPage({
               <label className="inline-flex items-center gap-2 text-sm text-text-primary">
                 <input
                   type="checkbox"
+                  checked={securityForm.notificationSoundEnabled}
+                  onChange={(event) => setSecurityForm((prev) => ({ ...prev, notificationSoundEnabled: event.target.checked }))}
+                  className="w-4 h-4 accent-primary"
+                />
+                Notification sound alerts
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-text-primary">
+                <input
+                  type="checkbox"
                   checked={securityForm.twoFactorEnabled}
                   onChange={(event) => setSecurityForm((prev) => ({ ...prev, twoFactorEnabled: event.target.checked }))}
                   className="w-4 h-4 accent-primary"
@@ -1985,15 +2098,15 @@ function AdminSettingsPage({
                   <button
                     type="button"
                     onClick={queueLogoutAllClients}
-                    disabled={!isSuperAdmin || clientAccounts.length === 0}
+                    disabled={!canManagePrivilegedAdminActions || clientAccounts.length === 0}
                     className="h-8 px-2.5 border border-error/50 rounded text-xs font-medium text-error hover:bg-error-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                   >
                     <LogOut className="w-3.5 h-3.5" />
                     Logout All Users
                   </button>
                 </div>
-                {!isSuperAdmin && (
-                  <p className="text-xs text-text-muted mt-2">Only Super Admin can use "Logout All Users".</p>
+                {!canManagePrivilegedAdminActions && (
+                  <p className="text-xs text-text-muted mt-2">Only Owner or Super Admin can use "Logout All Users".</p>
                 )}
                 <div className="mt-3 max-h-40 overflow-y-auto rounded border border-border-light">
                   {clientAccounts.length === 0 ? (
@@ -2139,7 +2252,7 @@ function AdminSettingsPage({
                   type="checkbox"
                   checked={systemSettings.impersonationEnabled !== false}
                   onChange={(event) => setSystemSettings((prev) => ({ ...prev, impersonationEnabled: event.target.checked }))}
-                  disabled={!isSuperAdmin}
+                  disabled={!canManagePrivilegedAdminActions}
                   className="w-4 h-4 accent-primary disabled:opacity-50 disabled:cursor-not-allowed"
                 />
                 Enable client impersonation
@@ -2155,8 +2268,8 @@ function AdminSettingsPage({
               />
             </div>
           </div>
-          {!isSuperAdmin && (
-            <p className="text-xs text-text-muted mt-3">Only Super Admin can toggle impersonation controls.</p>
+          {!canManagePrivilegedAdminActions && (
+            <p className="text-xs text-text-muted mt-3">Only Owner or Super Admin can toggle impersonation controls.</p>
           )}
           <div className="mt-4">
             <button
@@ -2172,15 +2285,15 @@ function AdminSettingsPage({
         <section className="xl:col-span-3 bg-white rounded-lg shadow-card border border-border-light p-6">
           <div className="flex items-center justify-between">
             <h3 className="text-base font-semibold text-text-primary">4. Admin Management</h3>
-            {!isSuperAdmin && (
+            {!canManagePrivilegedAdminActions && (
               <div className="text-xs text-warning bg-warning-bg border border-warning/30 px-2.5 py-1.5 rounded inline-flex items-center gap-1.5">
                 <AlertCircle className="w-3.5 h-3.5" />
-                Super Admin only
+                Owner or Super Admin only
               </div>
             )}
           </div>
 
-          {!isSuperAdmin ? (
+          {!canManagePrivilegedAdminActions ? (
             <div className="mt-4 rounded-lg border border-border-light bg-background p-4">
               <p className="text-sm font-medium text-text-primary">Insufficient Permissions</p>
               <p className="text-sm text-text-muted mt-1">You do not have access to admin lifecycle controls.</p>
@@ -2245,102 +2358,120 @@ function AdminSettingsPage({
                         className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
                       />
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <select
-                        value={normalizedCreateAdminWorkCountry}
-                        onChange={(event) => {
-                          setCreateAdminForm((prev) => ({
-                            ...prev,
-                            workCountry: normalizeAdminVerificationCountry(event.target.value),
-                            governmentIdType: '',
-                            governmentIdNumber: '',
-                            governmentIdFile: '',
-                          }))
-                          resetCreateAdminIdentityVerification()
-                        }}
-                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                      >
-                        <option value="Nigeria">Nigeria</option>
-                        <option value="International">Outside Nigeria</option>
-                      </select>
-                      <select
-                        value={createAdminForm.governmentIdType}
-                        onChange={(event) => {
-                          setCreateAdminForm((prev) => ({ ...prev, governmentIdType: event.target.value }))
-                          resetCreateAdminIdentityVerification()
-                        }}
-                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                      >
-                        <option value="">Government ID Type</option>
-                        {createAdminGovIdOptions.map((option) => (
-                          <option key={option} value={option}>{option}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <input
-                      type="text"
-                      placeholder={normalizedCreateAdminWorkCountry === 'Nigeria' ? 'Government ID Number (NIN / Passport / Voter ID / Driver Licence)' : 'Government ID Number'}
-                      value={createAdminForm.governmentIdNumber}
-                      onChange={(event) => {
-                        setCreateAdminForm((prev) => ({ ...prev, governmentIdNumber: event.target.value }))
-                        resetCreateAdminIdentityVerification()
-                      }}
-                      className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                    />
-                    <p className="text-xs text-text-muted">
-                      Nigeria: International Passport, NIN, Voter&apos;s Card, or Driver&apos;s Licence. Outside Nigeria: government-issued ID.
-                    </p>
-                    <div className="space-y-2 rounded-md border border-border-light bg-background px-3 py-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <label className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Government ID Upload</label>
-                        {createAdminForm.governmentIdFile && (
-                          <span className="text-xs text-success">Uploaded: {createAdminForm.governmentIdFile}</span>
-                        )}
-                      </div>
-                      <input
-                        key={createAdminIdUploadKey}
-                        type="file"
-                        accept="image/*"
-                        onChange={(event) => {
-                          const file = event.target.files?.[0] || null
-                          setCreateAdminForm((prev) => ({
-                            ...prev,
-                            governmentIdFile: file?.name || '',
-                          }))
-                          resetCreateAdminIdentityVerification()
-                        }}
-                        className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-2 file:border-0 file:bg-white file:px-2 file:py-1"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => void verifyCreateAdminIdentity()}
-                        disabled={isCreateAdminIdentityVerifying}
-                        className="h-9 px-3 border border-primary text-primary rounded-md text-xs font-semibold hover:bg-primary-tint transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
-                      >
-                        {isCreateAdminIdentityVerifying && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                        {isCreateAdminIdentityVerifying ? 'Identifying...' : 'Submit for Verification'}
-                      </button>
-                      {createAdminIdentityVerification.message && (
-                        <p
-                          className={`text-xs ${
-                            createAdminIdentityVerification.status === 'verified'
-                              ? 'text-success'
-                              : createAdminIdentityVerification.status === 'failed'
-                                ? 'text-error'
-                                : 'text-text-muted'
-                          }`}
-                        >
-                          {createAdminIdentityVerification.message}
+                    {!isCreateAdminOwnerLevel && (
+                      <>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <select
+                            value={normalizedCreateAdminWorkCountry}
+                            onChange={(event) => {
+                              setCreateAdminForm((prev) => ({
+                                ...prev,
+                                workCountry: normalizeAdminVerificationCountry(event.target.value),
+                                governmentIdType: '',
+                                governmentIdNumber: '',
+                                governmentIdFile: '',
+                              }))
+                              resetCreateAdminIdentityVerification()
+                            }}
+                            className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                          >
+                            <option value="Nigeria">Nigeria</option>
+                            <option value="International">Outside Nigeria</option>
+                          </select>
+                          <select
+                            value={createAdminForm.governmentIdType}
+                            onChange={(event) => {
+                              setCreateAdminForm((prev) => ({ ...prev, governmentIdType: event.target.value }))
+                              resetCreateAdminIdentityVerification()
+                            }}
+                            className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                          >
+                            <option value="">Government ID Type</option>
+                            {createAdminGovIdOptions.map((option) => (
+                              <option key={option} value={option}>{option}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <input
+                          type="text"
+                          placeholder={normalizedCreateAdminWorkCountry === 'Nigeria' ? 'Government ID Number (NIN / Passport / Voter ID / Driver Licence)' : 'Government ID Number'}
+                          value={createAdminForm.governmentIdNumber}
+                          onChange={(event) => {
+                            setCreateAdminForm((prev) => ({ ...prev, governmentIdNumber: event.target.value }))
+                            resetCreateAdminIdentityVerification()
+                          }}
+                          className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                        />
+                        <p className="text-xs text-text-muted">
+                          Nigeria: International Passport, NIN, Voter&apos;s Card, or Driver&apos;s Licence. Outside Nigeria: government-issued ID.
                         </p>
-                      )}
-                    </div>
+                        <div className="space-y-2 rounded-md border border-border-light bg-background px-3 py-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <label className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Government ID Upload</label>
+                            {createAdminForm.governmentIdFile && (
+                              <span className="text-xs text-success">Uploaded: {createAdminForm.governmentIdFile}</span>
+                            )}
+                          </div>
+                          <input
+                            key={createAdminIdUploadKey}
+                            type="file"
+                            accept="image/*"
+                            onChange={(event) => {
+                              const file = event.target.files?.[0] || null
+                              setCreateAdminForm((prev) => ({
+                                ...prev,
+                                governmentIdFile: file?.name || '',
+                              }))
+                              resetCreateAdminIdentityVerification()
+                            }}
+                            className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-2 file:border-0 file:bg-white file:px-2 file:py-1"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void verifyCreateAdminIdentity()}
+                            disabled={isCreateAdminIdentityVerifying}
+                            className="h-9 px-3 border border-primary text-primary rounded-md text-xs font-semibold hover:bg-primary-tint transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                          >
+                            {isCreateAdminIdentityVerifying && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            {isCreateAdminIdentityVerifying ? 'Identifying...' : 'Submit for Verification'}
+                          </button>
+                          {createAdminIdentityVerification.message && (
+                            <p
+                              className={`text-xs ${
+                                createAdminIdentityVerification.status === 'verified'
+                                  ? 'text-success'
+                                  : createAdminIdentityVerification.status === 'failed'
+                                    ? 'text-error'
+                                    : 'text-text-muted'
+                              }`}
+                            >
+                              {createAdminIdentityVerification.message}
+                            </p>
+                          )}
+                        </div>
+                      </>
+                    )}
+                    {isCreateAdminOwnerLevel && (
+                      <div className="rounded-md border border-border-light bg-[#FAFBFF] px-3 py-2">
+                        <p className="text-xs text-text-secondary">Owner role skips government ID verification.</p>
+                      </div>
+                    )}
                     <input
                       type="text"
-                      placeholder="Residential Address"
+                      placeholder={isCreateAdminOwnerLevel ? 'Residential Address (Optional)' : 'Residential Address'}
                       value={createAdminForm.residentialAddress}
                       onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, residentialAddress: event.target.value }))}
                       className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
                     />
+                    {isCreateAdminOwnerLevel && (
+                      <input
+                        type="password"
+                        placeholder="Owner Private Key (min 12 characters)"
+                        value={createAdminForm.ownerPrivateKey}
+                        onChange={(event) => setCreateAdminForm((prev) => ({ ...prev, ownerPrivateKey: event.target.value }))}
+                        className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                      />
+                    )}
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <input
@@ -2364,13 +2495,18 @@ function AdminSettingsPage({
                     </div>
                     <select
                       value={createAdminForm.adminLevel}
-                      onChange={(event) => setCreateAdminForm((prev) => ({
-                        ...prev,
-                        adminLevel: event.target.value,
-                        permissions: getDefaultPermissionsForAdminLevel(event.target.value),
-                      }))}
+                      onChange={(event) => {
+                        setCreateAdminForm((prev) => ({
+                          ...prev,
+                          adminLevel: event.target.value,
+                          ownerPrivateKey: '',
+                          permissions: getDefaultPermissionsForAdminLevel(event.target.value),
+                        }))
+                        resetCreateAdminIdentityVerification()
+                      }}
                       className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
                     >
+                      {isOwnerAdmin && <option value={ADMIN_LEVELS.OWNER}>Owner</option>}
                       <option value={ADMIN_LEVELS.SUPER}>Super Admin</option>
                       <option value={ADMIN_LEVELS.AREA_ACCOUNTANT}>Area Accountant Admin</option>
                       <option value={ADMIN_LEVELS.CUSTOMER_SERVICE}>Customer Service Admin</option>
@@ -2441,6 +2577,9 @@ function AdminSettingsPage({
                         </p>
                         <p className="text-xs text-text-secondary">Role: {getAdminLevelLabel(createdAdminCredentialPacket.adminLevel)}</p>
                         <p className="text-xs text-text-secondary break-all">Temporary Password: {createdAdminCredentialPacket.password}</p>
+                        {createdAdminCredentialPacket.ownerPrivateKey && (
+                          <p className="text-xs text-text-secondary break-all">Owner Private Key: {createdAdminCredentialPacket.ownerPrivateKey}</p>
+                        )}
                         <p className="text-xs text-text-secondary break-all">Login URL: {createdAdminCredentialPacket.loginUrl}</p>
                         <p className="text-[11px] text-text-muted">Share this packet securely. The admin should change to a permanent password immediately.</p>
                       </div>
@@ -2470,6 +2609,7 @@ function AdminSettingsPage({
                       }))}
                       className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
                     >
+                      {isOwnerAdmin && <option value={ADMIN_LEVELS.OWNER}>Owner Invite</option>}
                       <option value={ADMIN_LEVELS.SUPER}>Super Admin Invite</option>
                       <option value={ADMIN_LEVELS.AREA_ACCOUNTANT}>Area Accountant Invite</option>
                       <option value={ADMIN_LEVELS.CUSTOMER_SERVICE}>Customer Service Invite</option>
@@ -2565,6 +2705,10 @@ function AdminSettingsPage({
                 <div className="md:hidden p-3 space-y-3">
                   {adminAccounts.map((account) => {
                     const isSelfAccount = account.email?.trim()?.toLowerCase() === currentAdmin.email?.trim()?.toLowerCase()
+                    const normalizedAccountLevel = normalizeAdminLevel(account.adminLevel)
+                    const canManageProtectedLevel = isOwnerAdmin
+                      || (normalizedAccountLevel !== ADMIN_LEVELS.OWNER && normalizedAccountLevel !== ADMIN_LEVELS.SUPER)
+                    const canManageAccount = !isSelfAccount && canManageProtectedLevel
                     return (
                       <div key={`admin-mobile-${account.email}`} className="rounded-md border border-border-light bg-white p-3">
                         <div className="flex items-start justify-between gap-3">
@@ -2578,12 +2722,13 @@ function AdminSettingsPage({
                         </div>
                         <div className="mt-3">
                           <p className="text-[11px] uppercase tracking-wide text-text-muted mb-1">Role</p>
-                          {isSuperAdmin && !isSelfAccount ? (
+                          {canManagePrivilegedAdminActions && canManageAccount ? (
                             <select
                               value={normalizeAdminLevel(account.adminLevel)}
                               onChange={(event) => queueAccountRoleChange(account, event.target.value)}
                               className="w-full h-8 px-2.5 border border-border rounded text-xs text-text-primary focus:outline-none focus:border-primary"
                             >
+                              {isOwnerAdmin && <option value={ADMIN_LEVELS.OWNER}>Owner</option>}
                               <option value={ADMIN_LEVELS.SUPER}>Super Admin</option>
                               <option value={ADMIN_LEVELS.AREA_ACCOUNTANT}>Area Accountant Admin</option>
                               <option value={ADMIN_LEVELS.CUSTOMER_SERVICE}>Customer Service Admin</option>
@@ -2596,7 +2741,7 @@ function AdminSettingsPage({
                         <div className="mt-3 grid grid-cols-2 gap-2">
                           <button
                             type="button"
-                            disabled={isSelfAccount}
+                            disabled={!canManageAccount}
                             onClick={() => queueAccountStatusChange(account.status === 'suspended' ? 'activate-admin' : 'suspend-admin', account)}
                             className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
                           >
@@ -2605,7 +2750,7 @@ function AdminSettingsPage({
                           </button>
                           <button
                             type="button"
-                            disabled={isSelfAccount}
+                            disabled={!canManageAccount}
                             onClick={() => queueResetAdminPassword(account)}
                             className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
                           >
@@ -2614,7 +2759,7 @@ function AdminSettingsPage({
                           </button>
                           <button
                             type="button"
-                            disabled={isSelfAccount}
+                            disabled={!canManageAccount}
                             onClick={() => queueImpersonateAdmin(account)}
                             className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
                           >
@@ -2623,15 +2768,16 @@ function AdminSettingsPage({
                           </button>
                           <button
                             type="button"
+                            disabled={!canManageAccount}
                             onClick={() => openPermissionEditor(account)}
-                            className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background inline-flex items-center justify-center gap-1.5"
+                            className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
                           >
                             <ShieldCheck className="w-3.5 h-3.5" />
                             Permissions
                           </button>
                           <button
                             type="button"
-                            disabled={isSelfAccount}
+                            disabled={!canManageAccount}
                             onClick={() => queueAccountStatusChange('delete-admin', account)}
                             className="col-span-2 h-8 px-2.5 border border-error/50 rounded text-xs font-medium text-error hover:bg-error-bg disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
                           >
@@ -2657,17 +2803,22 @@ function AdminSettingsPage({
                     <tbody>
                       {adminAccounts.map((account) => {
                         const isSelfAccount = account.email?.trim()?.toLowerCase() === currentAdmin.email?.trim()?.toLowerCase()
+                        const normalizedAccountLevel = normalizeAdminLevel(account.adminLevel)
+                        const canManageProtectedLevel = isOwnerAdmin
+                          || (normalizedAccountLevel !== ADMIN_LEVELS.OWNER && normalizedAccountLevel !== ADMIN_LEVELS.SUPER)
+                        const canManageAccount = !isSelfAccount && canManageProtectedLevel
                         return (
                           <tr key={account.email} className="border-t border-border-light hover:bg-background">
                             <td className="px-4 py-3 text-sm text-text-primary">{account.fullName}</td>
                             <td className="px-4 py-3 text-sm text-text-secondary">{account.email}</td>
                             <td className="px-4 py-3 text-sm">
-                              {isSuperAdmin && !isSelfAccount ? (
+                              {canManagePrivilegedAdminActions && canManageAccount ? (
                                 <select
                                   value={normalizeAdminLevel(account.adminLevel)}
                                   onChange={(event) => queueAccountRoleChange(account, event.target.value)}
                                   className="h-8 min-w-[190px] px-2.5 border border-border rounded text-xs text-text-primary focus:outline-none focus:border-primary"
                                 >
+                                  {isOwnerAdmin && <option value={ADMIN_LEVELS.OWNER}>Owner</option>}
                                   <option value={ADMIN_LEVELS.SUPER}>Super Admin</option>
                                   <option value={ADMIN_LEVELS.AREA_ACCOUNTANT}>Area Accountant Admin</option>
                                   <option value={ADMIN_LEVELS.CUSTOMER_SERVICE}>Customer Service Admin</option>
@@ -2686,7 +2837,7 @@ function AdminSettingsPage({
                               <div className="flex flex-wrap items-center gap-2">
                                 <button
                                   type="button"
-                                  disabled={isSelfAccount}
+                                  disabled={!canManageAccount}
                                   onClick={() => queueAccountStatusChange(account.status === 'suspended' ? 'activate-admin' : 'suspend-admin', account)}
                                   className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                                 >
@@ -2695,7 +2846,7 @@ function AdminSettingsPage({
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={isSelfAccount}
+                                  disabled={!canManageAccount}
                                   onClick={() => queueResetAdminPassword(account)}
                                   className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                                 >
@@ -2704,7 +2855,7 @@ function AdminSettingsPage({
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={isSelfAccount}
+                                  disabled={!canManageAccount}
                                   onClick={() => queueImpersonateAdmin(account)}
                                   className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                                 >
@@ -2713,15 +2864,16 @@ function AdminSettingsPage({
                                 </button>
                                 <button
                                   type="button"
+                                  disabled={!canManageAccount}
                                   onClick={() => openPermissionEditor(account)}
-                                  className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background inline-flex items-center gap-1.5"
+                                  className="h-8 px-2.5 border border-border rounded text-xs font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                                 >
                                   <ShieldCheck className="w-3.5 h-3.5" />
                                   Permissions
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={isSelfAccount}
+                                  disabled={!canManageAccount}
                                   onClick={() => queueAccountStatusChange('delete-admin', account)}
                                   className="h-8 px-2.5 border border-error/50 rounded text-xs font-medium text-error hover:bg-error-bg disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
                                 >
@@ -2832,7 +2984,7 @@ function AdminSettingsPage({
                         <p className="text-xs text-text-secondary mt-1">{getAdminLevelLabel(invite.adminLevel)}</p>
                         <p className="text-xs text-text-muted mt-2">Created: {formatDateTime(invite.createdAt)}</p>
                         <p className="text-xs text-text-muted">Expires: {formatDateTime(invite.expiresAt)}</p>
-                        {isSuperAdmin && (
+                        {canManagePrivilegedAdminActions && (
                           <button
                             type="button"
                             onClick={() => queueDeleteAdminInvite(invite)}
@@ -2853,7 +3005,7 @@ function AdminSettingsPage({
                           <th className="px-4 py-2.5 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Role</th>
                           <th className="px-4 py-2.5 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Created</th>
                           <th className="px-4 py-2.5 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Expires</th>
-                          {isSuperAdmin && (
+                          {canManagePrivilegedAdminActions && (
                             <th className="px-4 py-2.5 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Actions</th>
                           )}
                         </tr>
@@ -2865,7 +3017,7 @@ function AdminSettingsPage({
                             <td className="px-4 py-3 text-sm text-text-secondary">{getAdminLevelLabel(invite.adminLevel)}</td>
                             <td className="px-4 py-3 text-sm text-text-secondary">{formatDateTime(invite.createdAt)}</td>
                             <td className="px-4 py-3 text-sm text-text-secondary">{formatDateTime(invite.expiresAt)}</td>
-                            {isSuperAdmin && (
+                            {canManagePrivilegedAdminActions && (
                               <td className="px-4 py-3 text-sm">
                                 <button
                                   type="button"

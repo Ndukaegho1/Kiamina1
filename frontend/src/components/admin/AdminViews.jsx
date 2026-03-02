@@ -47,6 +47,7 @@ import {
   hasAdminPermission,
   isAdminInvitePending,
   isOperationsAdminLevel,
+  isOwnerAdminLevel,
   isSuperAdminLevel,
   isTechnicalAdminLevel,
   normalizeAdminLevel,
@@ -66,6 +67,7 @@ import DotLottiePreloader from '../common/DotLottiePreloader'
 import * as XLSX from 'xlsx'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import { playSupportNotificationSound, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS } from '../../utils/supportNotificationSound'
+import { isAdminNotificationSoundEnabled } from '../../utils/adminSecurityPreferences'
 import { buildClientDownloadFilename } from '../../utils/downloadFilename'
 import { buildFileCacheKey } from '../../utils/fileCache'
 import {
@@ -599,6 +601,9 @@ const appendScopedClientActivityLog = (email, entry = {}) => {
 }
 
 const toTrimmedValue = (value) => String(value || '').trim()
+const normalizeBooleanPreference = (value = false) => (
+  value === true || String(value || '').trim().toLowerCase() === 'true'
+)
 const PHONE_COUNTRY_CODE_OPTIONS = ['+234', '+1', '+44', '+61']
 const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
   const raw = String(value || '').trim()
@@ -625,6 +630,87 @@ const formatPhoneNumber = (code = '+234', number = '') => {
   const normalizedNumber = String(number || '').trim()
   if (!normalizedNumber) return ''
   return `${normalizedCode} ${normalizedNumber}`.trim()
+}
+const FINANCIAL_MONTH_NAMES = Object.freeze([
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+])
+const FINANCIAL_MONTH_LOOKUP = Object.freeze(
+  FINANCIAL_MONTH_NAMES.reduce((acc, monthName, index) => {
+    acc[monthName.toLowerCase()] = index + 1
+    acc[monthName.slice(0, 3).toLowerCase()] = index + 1
+    return acc
+  }, {}),
+)
+const padMonth = (value) => String(value).padStart(2, '0')
+const FINANCIAL_MONTH_OPTIONS = Object.freeze(
+  FINANCIAL_MONTH_NAMES.map((monthName, index) => ({
+    value: padMonth(index + 1),
+    label: monthName,
+  })),
+)
+const getFinancialBoundaryMonth = (value = '') => {
+  const raw = toTrimmedValue(value)
+  if (!raw) return ''
+
+  const canonicalMatch = raw.match(/^(\d{2})-(?:\d{2}|LAST)$/i)
+  if (canonicalMatch) {
+    const month = Number(canonicalMatch[1])
+    if (month >= 1 && month <= 12) return padMonth(month)
+  }
+
+  const isoMatch = raw.match(/^\d{4}-(\d{2})-(\d{2})$/)
+  if (isoMatch) {
+    const month = Number(isoMatch[1])
+    if (month >= 1 && month <= 12) return padMonth(month)
+  }
+
+  const firstLastMatch = raw.match(/^(First|Last)\s+day\s+of\s+([A-Za-z]+)$/i)
+  if (firstLastMatch) {
+    const month = FINANCIAL_MONTH_LOOKUP[toTrimmedValue(firstLastMatch[2]).toLowerCase()]
+    if (month) return padMonth(month)
+  }
+
+  const shortMonthMatch = raw.match(/^(\d{1,2})\s+([A-Za-z]+)$/)
+  if (shortMonthMatch) {
+    const month = FINANCIAL_MONTH_LOOKUP[toTrimmedValue(shortMonthMatch[2]).toLowerCase()]
+    if (month) return padMonth(month)
+  }
+
+  const numericMonth = Number(raw)
+  if (Number.isFinite(numericMonth) && numericMonth >= 1 && numericMonth <= 12) {
+    return padMonth(numericMonth)
+  }
+
+  const monthByName = FINANCIAL_MONTH_LOOKUP[raw.toLowerCase()]
+  if (monthByName) return padMonth(monthByName)
+
+  return ''
+}
+const normalizeFinancialBoundaryDate = (value = '', boundary = 'start') => {
+  const month = getFinancialBoundaryMonth(value)
+  if (!month) return ''
+  return boundary === 'end' ? `${month}-LAST` : `${month}-01`
+}
+const formatFinancialBoundaryDisplay = (value = '', boundary = 'start') => {
+  const month = getFinancialBoundaryMonth(value)
+  if (!month) return ''
+  const monthIndex = Number(month) - 1
+  const monthName = FINANCIAL_MONTH_NAMES[monthIndex]
+  if (!monthName) return ''
+  return boundary === 'end'
+    ? `Last day of ${monthName}`
+    : `First day of ${monthName}`
 }
 
 const toIsoOrFallback = (value, fallback = new Date().toISOString()) => {
@@ -681,6 +767,7 @@ const normalizeNotificationDraft = (draft = {}) => ({
   scheduledForIso: toTrimmedValue(draft.scheduledForIso) ? toIsoOrFallback(draft.scheduledForIso, '') : '',
   searchUser: String(draft.searchUser || ''),
   selectedUsers: Array.isArray(draft.selectedUsers) ? [...draft.selectedUsers] : [],
+  forceAdminMessage: normalizeBooleanPreference(draft.forceAdminMessage),
   filters: {
     business: toTrimmedValue(draft.filters?.business),
     country: toTrimmedValue(draft.filters?.country),
@@ -748,6 +835,7 @@ const normalizeScheduledNotification = (entry = {}, index = 0) => {
     link: toTrimmedValue(entry.link),
     priority: toTrimmedValue(entry.priority) || 'normal',
     selectedUsers: Array.isArray(entry.selectedUsers) ? [...entry.selectedUsers] : [],
+    forceAdminMessage: normalizeBooleanPreference(entry.forceAdminMessage),
     status: normalizeScheduledNotificationStatus(entry.status),
     createdAtIso,
     updatedAtIso: toIsoOrFallback(entry.updatedAtIso, createdAtIso),
@@ -945,6 +1033,7 @@ const dispatchAdminNotification = async ({
   message = '',
   link = '',
   priority = 'normal',
+  forceAdminMessage = false,
   deliveryOrigin = 'manual',
 }) => {
   const recipients = resolveNotificationRecipients({ mode, bulkAudience, selectedUsers })
@@ -953,6 +1042,7 @@ const dispatchAdminNotification = async ({
   const normalizedMessage = String(message || '')
   const normalizedLink = toTrimmedValue(link)
   const normalizedPriority = toTrimmedValue(priority) || 'normal'
+  const shouldForceAdminMessage = normalizeBooleanPreference(forceAdminMessage)
   const normalizedAudience = getNotificationAudienceLabel({ mode, bulkAudience, selectedUsers })
 
   if (recipients.length === 0) {
@@ -1003,6 +1093,7 @@ const dispatchAdminNotification = async ({
       message: normalizedMessage,
       link: normalizedLink,
       priority: normalizedPriority,
+      forceDelivery: shouldForceAdminMessage,
       sentAtIso,
       read: false,
     }
@@ -1081,6 +1172,7 @@ const runScheduledNotificationProcessor = async () => {
         message: entry.message,
         link: entry.link,
         priority: entry.priority,
+        forceAdminMessage: entry.forceAdminMessage,
         deliveryOrigin: 'scheduled',
       })
 
@@ -1208,6 +1300,25 @@ const normalizeComplianceStatus = (value, fallback = COMPLIANCE_STATUS.PENDING) 
 const isActionRequiredStatus = (status) => (
   normalizeComplianceStatus(status, '') === COMPLIANCE_STATUS.ACTION
 )
+
+const CLIENT_VERIFICATION_LOCK_MESSAGE = 'Client is not fully verified. Document decisions are locked until full verification.'
+
+const requiresClientFullVerificationForReviewDecision = (status = '') => {
+  const normalizedStatus = normalizeDocumentReviewStatus(status, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
+  return (
+    normalizedStatus === DOCUMENT_REVIEW_STATUS.APPROVED
+    || normalizedStatus === DOCUMENT_REVIEW_STATUS.REJECTED
+    || normalizedStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+  )
+}
+
+const isClientFullyVerifiedForDocumentReview = (clientEmail = '') => {
+  const normalizedEmail = String(clientEmail || '').trim().toLowerCase()
+  if (!normalizedEmail) return false
+  const client = readClientRows().find((item) => item.email === normalizedEmail)
+  const normalizedCompliance = normalizeComplianceStatus(client?.verificationStatus, COMPLIANCE_STATUS.PENDING)
+  return normalizedCompliance === COMPLIANCE_STATUS.FULL
+}
 
 const createClientDocumentFallback = () => ({
   expenses: [],
@@ -1438,6 +1549,12 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
 
   const key = `${CLIENT_DOCUMENTS_STORAGE_KEY}:${clientEmail}`
   const client = readClientRows().find((item) => item.email === clientEmail)
+  if (
+    requiresClientFullVerificationForReviewDecision(normalizedNextStatus)
+    && !isClientFullyVerifiedForDocumentReview(clientEmail)
+  ) {
+    return null
+  }
   const bundle = readClientDocumentBundle(client || { email: clientEmail })
   const targetBucket = document.source.bucketKey
   const targetRows = Array.isArray(bundle[targetBucket]) ? bundle[targetBucket] : []
@@ -1586,6 +1703,42 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
     details: `${document.filename || 'Document'} status changed to ${normalizedNextStatus}.`,
   })
 
+  const linkPage = targetBucket === 'sales'
+    ? 'sales'
+    : targetBucket === 'bankStatements'
+      ? 'bank-statements'
+      : 'expenses'
+  const notificationType = normalizedNextStatus === DOCUMENT_REVIEW_STATUS.APPROVED
+    ? 'approved'
+    : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED
+      ? 'rejected'
+      : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+        ? 'info'
+        : 'status'
+  const notificationMessage = normalizedNextStatus === DOCUMENT_REVIEW_STATUS.APPROVED
+    ? `${document.filename || 'Document'} was approved.`
+    : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED
+      ? `${document.filename || 'Document'} was rejected${notes ? `: ${notes}` : '.'}`
+      : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+        ? `${document.filename || 'Document'} needs more information${notes ? `: ${notes}` : '.'}`
+        : `${document.filename || 'Document'} status changed to ${normalizedNextStatus}.`
+  appendClientBriefNotificationsToStorage(clientEmail, [{
+    id: `DOC-STATUS-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    type: notificationType,
+    title: 'Document Update',
+    message: notificationMessage,
+    priority: normalizedNextStatus === DOCUMENT_REVIEW_STATUS.REJECTED
+      ? 'critical'
+      : normalizedNextStatus === DOCUMENT_REVIEW_STATUS.INFO_REQUESTED
+        ? 'important'
+        : 'info',
+    sentAtIso: timestampIso,
+    linkPage,
+    fileId: document.source?.fileId || '',
+    documentId: document.source?.rowId || '',
+    folderId: document.source?.folderId || '',
+  }])
+
   return nextBundle
 }
 
@@ -1716,10 +1869,20 @@ const readClientRows = () => {
   })
 }
 
-const getActivityLogsFromStorage = () => {
+const getActivityLogsFromStorage = (viewerAccount = null) => {
+  const normalizedViewer = normalizeAdminAccount({
+    ...DEFAULT_ADMIN_ACCOUNT,
+    role: 'admin',
+    ...(viewerAccount || {}),
+  })
+  const canViewOwnerActivity = isOwnerAdminLevel(normalizedViewer.adminLevel)
   const storedLogs = safeParseJson(localStorage.getItem(ADMIN_ACTIVITY_STORAGE_KEY), [])
   if (!Array.isArray(storedLogs)) return []
   return storedLogs
+    .filter((log) => {
+      if (canViewOwnerActivity) return true
+      return !isOwnerAdminLevel(log?.adminLevel || ADMIN_LEVELS.SUPER)
+    })
     .map((log, index) => ({
       id: log.id || `LOG-STORED-${index}`,
       adminName: log.adminName || 'Admin User',
@@ -1767,12 +1930,13 @@ const buildAdminDashboardSnapshot = (adminAccount = null) => {
       .map((client) => String(client?.email || '').trim().toLowerCase())
       .filter(Boolean),
   )
-  const documents = readAllDocumentsForReview(normalizedAdmin)
+  // Dashboard pipeline metrics are global for visibility across all admin levels.
+  const documents = readAllDocumentsForReview()
   const supportSnapshot = getSupportCenterSnapshot()
   const tickets = Array.isArray(supportSnapshot?.tickets) ? supportSnapshot.tickets : []
   const leads = Array.isArray(supportSnapshot?.leads) ? supportSnapshot.leads : []
   const workSessions = getAdminWorkSessionsFromStorage()
-  const activityLogs = getActivityLogsFromStorage()
+  const activityLogs = getActivityLogsFromStorage(normalizedAdmin)
   const inviteEntries = safeParseJson(localStorage.getItem(ADMIN_INVITES_STORAGE_KEY), [])
   const pendingInvites = (Array.isArray(inviteEntries) ? inviteEntries : [])
     .map((invite) => normalizeAdminInvite(invite))
@@ -3320,8 +3484,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     country: safeClient?.country || settings.country || onboardingData.country || '',
     industry: settings.industry || onboardingData.industry || '',
     tin: settings.tin || onboardingData.tin || '',
-    reportingCycle: settings.reportingCycle || onboardingData.reportingCycle || '',
-    startMonth: settings.startMonth || onboardingData.startMonth || '',
+    reportingCycle: normalizeFinancialBoundaryDate(settings.reportingCycle || onboardingData.reportingCycle || '', 'end'),
+    startMonth: normalizeFinancialBoundaryDate(settings.startMonth || onboardingData.startMonth || '', 'start'),
     currency: settings.currency || onboardingData.currency || 'NGN',
     language: settings.language || onboardingData.language || 'English',
     businessReg: settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg || '',
@@ -3344,11 +3508,15 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   }
   const hasIsoTimestamp = (value) => Number.isFinite(Date.parse(value || ''))
   const hasIdentityDocumentSubmission = Boolean(
-    toTrimmedValue(verificationDocs.govId) && toTrimmedValue(verificationDocs.govIdType),
+    toTrimmedValue(verificationDocs.govId)
+    && toTrimmedValue(verificationDocs.govIdType)
+    && toTrimmedValue(verificationDocs.govIdNumber),
   )
   const hasBusinessDocumentSubmission = Boolean(toTrimmedValue(verificationDocs.businessReg))
+  const identityVerifiedByAutomation = Boolean(toTrimmedValue(verificationDocs.govIdVerifiedAt))
   const identityVerificationApproved = Boolean(
-    normalizeBooleanFlag(statusControl?.identityVerificationApproved)
+    identityVerifiedByAutomation
+    || normalizeBooleanFlag(statusControl?.identityVerificationApproved)
     || hasIsoTimestamp(statusControl?.identityVerificationApprovedAt),
   )
   const businessVerificationApproved = Boolean(
@@ -3377,8 +3545,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       country: safeClient?.country || settings.country || onboardingData.country || '',
       industry: settings.industry || onboardingData.industry || '',
       tin: settings.tin || onboardingData.tin || '',
-      reportingCycle: settings.reportingCycle || onboardingData.reportingCycle || '',
-      startMonth: settings.startMonth || onboardingData.startMonth || '',
+      reportingCycle: normalizeFinancialBoundaryDate(settings.reportingCycle || onboardingData.reportingCycle || '', 'end'),
+      startMonth: normalizeFinancialBoundaryDate(settings.startMonth || onboardingData.startMonth || '', 'start'),
       currency: settings.currency || onboardingData.currency || 'NGN',
       language: settings.language || onboardingData.language || 'English',
       businessReg: settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg || '',
@@ -3418,6 +3586,26 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         </button>
       </div>
     )
+  }
+
+  const pushClientVerificationBellNotification = ({
+    type = 'info',
+    message = '',
+    priority = 'important',
+  } = {}) => {
+    if (!normalizedEmail) return
+    const normalizedMessage = toTrimmedValue(message)
+    if (!normalizedMessage) return
+    appendClientBriefNotificationsToStorage(normalizedEmail, [{
+      id: `VER-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      type,
+      title: 'Verification Update',
+      message: normalizedMessage,
+      priority,
+      sentAtIso: new Date().toISOString(),
+      read: false,
+      linkPage: 'settings',
+    }])
   }
 
   const saveVerificationStatus = (forcedStatus) => {
@@ -3478,6 +3666,28 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         affectedUser: safeClient.businessName || normalizedEmail,
         details: `Set compliance state to ${nextVerificationStatus}.${nextSuspensionMessage ? ` Note: ${nextSuspensionMessage}` : ''}`,
       })
+
+      if (nextVerificationStatus === COMPLIANCE_STATUS.FULL) {
+        pushClientVerificationBellNotification({
+          type: 'approved',
+          message: 'Verification approved. Your account is fully verified.',
+          priority: 'important',
+        })
+      } else if (nextVerificationStatus === COMPLIANCE_STATUS.ACTION) {
+        pushClientVerificationBellNotification({
+          type: 'info',
+          message: nextSuspensionMessage
+            ? `Verification update requires your attention: ${nextSuspensionMessage}`
+            : 'Verification update requires your attention.',
+          priority: 'important',
+        })
+      } else {
+        pushClientVerificationBellNotification({
+          type: 'info',
+          message: 'Verification status was updated and is now pending review.',
+          priority: 'normal',
+        })
+      }
 
       const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
       if (refreshed) setClientSnapshot(refreshed)
@@ -3541,6 +3751,13 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         ? 'Identity verification approved from Admin Client Profile.'
         : 'Identity verification approval was revoked from Admin Client Profile.',
     })
+    pushClientVerificationBellNotification({
+      type: approved ? 'approved' : 'info',
+      message: approved
+        ? 'Identity verification approved.'
+        : 'Identity verification approval was revoked.',
+      priority: approved ? 'important' : 'normal',
+    })
 
     const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
     if (refreshed) setClientSnapshot(refreshed)
@@ -3557,7 +3774,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     }
     if (!normalizedEmail) return
     if (approved && !identityVerificationApproved) {
-      showToast?.('error', 'Identity must be approved before business verification.')
+      showToast?.('error', 'Identity verification must be completed before business verification.')
       return
     }
     if (approved && !hasBusinessDocumentSubmission) {
@@ -3602,6 +3819,13 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         ? 'Business verification approved from Admin Client Profile.'
         : 'Business verification approval was revoked from Admin Client Profile.',
     })
+    pushClientVerificationBellNotification({
+      type: approved ? 'approved' : 'info',
+      message: approved
+        ? 'Business verification approved. Stage 3 is complete.'
+        : 'Business verification approval was revoked.',
+      priority: approved ? 'important' : 'normal',
+    })
 
     const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
     if (refreshed) setClientSnapshot(refreshed)
@@ -3637,8 +3861,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         country: toTrimmedValue(profileDraft.country),
         industry: toTrimmedValue(profileDraft.industry),
         tin: toTrimmedValue(profileDraft.tin),
-        reportingCycle: toTrimmedValue(profileDraft.reportingCycle),
-        startMonth: toTrimmedValue(profileDraft.startMonth),
+        reportingCycle: normalizeFinancialBoundaryDate(profileDraft.reportingCycle, 'end'),
+        startMonth: normalizeFinancialBoundaryDate(profileDraft.startMonth, 'start'),
         currency: toTrimmedValue(profileDraft.currency) || 'NGN',
         language: toTrimmedValue(profileDraft.language) || 'English',
         cacNumber: nextBusinessRegistration,
@@ -3661,8 +3885,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
           country: toTrimmedValue(profileDraft.country),
           industry: toTrimmedValue(profileDraft.industry),
           tin: toTrimmedValue(profileDraft.tin),
-          reportingCycle: toTrimmedValue(profileDraft.reportingCycle),
-          startMonth: toTrimmedValue(profileDraft.startMonth),
+          reportingCycle: normalizeFinancialBoundaryDate(profileDraft.reportingCycle, 'end'),
+          startMonth: normalizeFinancialBoundaryDate(profileDraft.startMonth, 'start'),
           currency: toTrimmedValue(profileDraft.currency) || 'NGN',
           language: toTrimmedValue(profileDraft.language) || 'English',
           cacNumber: nextBusinessRegistration,
@@ -3776,8 +4000,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     ['Country', safeClient.country || settings.country || onboardingData.country],
     ['Industry', settings.industry || onboardingData.industry],
     ['TIN', settings.tin || onboardingData.tin],
-    ['Reporting Cycle', settings.reportingCycle || onboardingData.reportingCycle],
-    ['Start Month', settings.startMonth || onboardingData.startMonth],
+    ['Financial Year End', formatFinancialBoundaryDisplay(settings.reportingCycle || onboardingData.reportingCycle, 'end')],
+    ['Financial Year Start', formatFinancialBoundaryDisplay(settings.startMonth || onboardingData.startMonth, 'start')],
     ['Currency', settings.currency || onboardingData.currency],
     ['Language', settings.language || onboardingData.language],
     ['Business Reg / CAC', settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg],
@@ -3845,32 +4069,14 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs uppercase tracking-wide text-text-muted">Identity Verification</p>
               <span className={`inline-flex items-center h-6 px-2.5 rounded text-xs font-semibold ${identityVerificationApproved ? 'bg-success-bg text-success' : 'bg-warning-bg text-warning'}`}>
-                {identityVerificationApproved ? 'Approved' : 'Pending'}
+                {identityVerificationApproved ? 'Auto Verified' : 'Pending'}
               </span>
             </div>
             <p className="text-xs text-text-muted mt-2">
               {hasIdentityDocumentSubmission
-                ? 'Government ID and ID type submitted.'
-                : 'Waiting for Government ID + ID type submission.'}
+                ? 'Stage 2 is automatic. Identity is completed once ID checks pass.'
+                : 'Waiting for Government ID type, card number, and ID image submission.'}
             </p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => saveIdentityVerificationApproval(true)}
-                disabled={!canEditClientSettings || isSavingVerificationStatus || identityVerificationApproved || !hasIdentityDocumentSubmission}
-                className="h-8 px-3 border border-success text-success rounded-md text-xs font-semibold hover:bg-success-bg transition-colors disabled:opacity-60"
-              >
-                Approve Identity
-              </button>
-              <button
-                type="button"
-                onClick={() => saveIdentityVerificationApproval(false)}
-                disabled={!canEditClientSettings || isSavingVerificationStatus || !identityVerificationApproved}
-                className="h-8 px-3 border border-error text-error rounded-md text-xs font-semibold hover:bg-error-bg transition-colors disabled:opacity-60"
-              >
-                Revoke
-              </button>
-            </div>
           </div>
           <div className="rounded-md border border-border-light bg-background p-3">
             <div className="flex items-center justify-between gap-2">
@@ -4113,8 +4319,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                     country: safeClient?.country || settings.country || onboardingData.country || '',
                     industry: settings.industry || onboardingData.industry || '',
                     tin: settings.tin || onboardingData.tin || '',
-                    reportingCycle: settings.reportingCycle || onboardingData.reportingCycle || '',
-                    startMonth: settings.startMonth || onboardingData.startMonth || '',
+                    reportingCycle: normalizeFinancialBoundaryDate(settings.reportingCycle || onboardingData.reportingCycle || '', 'end'),
+                    startMonth: normalizeFinancialBoundaryDate(settings.startMonth || onboardingData.startMonth || '', 'start'),
                     currency: settings.currency || onboardingData.currency || 'NGN',
                     language: settings.language || onboardingData.language || 'English',
                     businessReg: settings.cacNumber || settings.businessReg || onboardingData.cacNumber || onboardingData.businessReg || '',
@@ -4219,12 +4425,38 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
               )}
             </div>
             <div>
-              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Reporting Cycle</label>
-              <input value={profileDraft.reportingCycle} onChange={(event) => setProfileDraft((prev) => ({ ...prev, reportingCycle: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Financial Year End</label>
+              <select
+                value={getFinancialBoundaryMonth(profileDraft.reportingCycle)}
+                onChange={(event) => {
+                  const normalized = normalizeFinancialBoundaryDate(event.target.value, 'end')
+                  setProfileDraft((prev) => ({ ...prev, reportingCycle: normalized }))
+                }}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="">Select month</option>
+                {FINANCIAL_MONTH_OPTIONS.map((option) => (
+                  <option key={`admin-fy-end-${option.value}`} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-text-muted mt-1">Always saved as the last day of the selected month.</p>
             </div>
             <div>
-              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Start Month</label>
-              <input value={profileDraft.startMonth} onChange={(event) => setProfileDraft((prev) => ({ ...prev, startMonth: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
+              <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Financial Year Start</label>
+              <select
+                value={getFinancialBoundaryMonth(profileDraft.startMonth)}
+                onChange={(event) => {
+                  const normalized = normalizeFinancialBoundaryDate(event.target.value, 'start')
+                  setProfileDraft((prev) => ({ ...prev, startMonth: normalized }))
+                }}
+                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              >
+                <option value="">Select month</option>
+                {FINANCIAL_MONTH_OPTIONS.map((option) => (
+                  <option key={`admin-fy-start-${option.value}`} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-text-muted mt-1">Always saved as the first day of the selected month.</p>
             </div>
             <div>
               <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Currency</label>
@@ -4341,6 +4573,7 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
     || hasAdminPermission(resolvedAdminAccount, 'reject_documents')
   )
   const canRequestInfo = isSuperAdmin || hasAdminPermission(resolvedAdminAccount, 'request_info_documents')
+  const isClientFullyVerified = isClientFullyVerifiedForDocumentReview(safeClient?.email || '')
 
   useEffect(() => {
     if (!safeClient) return
@@ -4440,6 +4673,13 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       return
     }
     if (normalizedNextStatus === currentStatus) return
+    if (
+      requiresClientFullVerificationForReviewDecision(normalizedNextStatus)
+      && !isClientFullyVerified
+    ) {
+      showToast?.('error', CLIENT_VERIFICATION_LOCK_MESSAGE)
+      return
+    }
 
     let notes = row.notes || ''
     let unlockReason = ''
@@ -4479,7 +4719,12 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       unlockReason,
     })
     if (!updatedBundle) {
-      showToast?.('error', 'Unable to update document status.')
+      showToast?.(
+        'error',
+        requiresClientFullVerificationForReviewDecision(normalizedNextStatus)
+          ? CLIENT_VERIFICATION_LOCK_MESSAGE
+          : 'Unable to update document status.',
+      )
       return
     }
 
@@ -4581,6 +4826,11 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
             View-only mode. This role can review document details but cannot change review status.
           </div>
         )}
+        {!isClientFullyVerified && (
+          <div className="px-4 py-3 border-b border-border-light bg-warning-bg text-xs text-warning">
+            {CLIENT_VERIFICATION_LOCK_MESSAGE}
+          </div>
+        )}
         <table className="w-full">
           <thead>
             <tr className="bg-[#F9FAFB]">
@@ -4631,9 +4881,9 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
                     className="h-8 px-2.5 border border-border rounded-md text-xs focus:outline-none focus:border-primary"
                   >
                     <option value={DOCUMENT_REVIEW_STATUS.PENDING_REVIEW}>Pending Review</option>
-                    <option value={DOCUMENT_REVIEW_STATUS.APPROVED}>Approved</option>
-                    <option value={DOCUMENT_REVIEW_STATUS.REJECTED}>Rejected</option>
-                    <option value={DOCUMENT_REVIEW_STATUS.INFO_REQUESTED} disabled={!canRequestInfo}>Info Requested</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.APPROVED} disabled={!isClientFullyVerified}>Approved</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.REJECTED} disabled={!isClientFullyVerified}>Rejected</option>
+                    <option value={DOCUMENT_REVIEW_STATUS.INFO_REQUESTED} disabled={!canRequestInfo || !isClientFullyVerified}>Info Requested</option>
                   </select>
                 </td>
               </tr>
@@ -4883,6 +5133,10 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   })
   const canUnlockApproved = isSuperAdmin
   const adminActorName = currentAdminAccount?.fullName || 'Admin User'
+  const selectedDocumentClientFullyVerified = selectedDocument?.source?.clientEmail
+    ? isClientFullyVerifiedForDocumentReview(selectedDocument.source.clientEmail)
+    : true
+  const selectedDocumentDecisionLocked = Boolean(selectedDocument?.source?.clientEmail) && !selectedDocumentClientFullyVerified
 
   useEffect(() => {
     const syncFromStorage = () => {
@@ -5120,10 +5374,20 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   }
 
   const applyReviewStatus = (nextStatus, notes = '', options = {}) => {
-    if (!selectedDocument) return
+    if (!selectedDocument) return false
     const normalizedNextStatus = normalizeDocumentReviewStatus(nextStatus, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
     const updatedNote = notes || selectedDocument.notes || ''
     const unlockReason = toTrimmedValue(options?.unlockReason)
+    const isDecisionStatus = requiresClientFullVerificationForReviewDecision(normalizedNextStatus)
+    const selectedClientEmail = String(selectedDocument?.source?.clientEmail || '').trim().toLowerCase()
+    if (
+      isDecisionStatus
+      && selectedClientEmail
+      && !isClientFullyVerifiedForDocumentReview(selectedClientEmail)
+    ) {
+      showToast('error', CLIENT_VERIFICATION_LOCK_MESSAGE)
+      return false
+    }
 
     if (selectedDocument.source) {
       const updatedBundle = updateClientDocumentReviewStatus(selectedDocument, normalizedNextStatus, updatedNote, {
@@ -5131,20 +5395,24 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
         unlockReason,
       })
       if (!updatedBundle) {
-        showToast('error', 'Unable to update document status.')
-        return
+        showToast(
+          'error',
+          isDecisionStatus ? CLIENT_VERIFICATION_LOCK_MESSAGE : 'Unable to update document status.',
+        )
+        return false
       }
       const nextRows = readAllDocumentsForReview(resolvedAdminAccount)
       setDocuments(nextRows)
       const nextSelected = nextRows.find((row) => row.id === selectedDocument.id)
       setSelectedDocument(nextSelected || null)
-      return
+      return true
     }
 
     setDocuments((prev) => prev.map((row) => (
       row.id === selectedDocument.id ? { ...row, status: normalizedNextStatus, notes: updatedNote } : row
     )))
     setSelectedDocument((prev) => (prev ? { ...prev, status: normalizedNextStatus, notes: updatedNote } : prev))
+    return true
   }
 
   const handleApprove = () => {
@@ -5154,7 +5422,8 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
     }
     if (!selectedDocument) return
     void runReviewAction(() => {
-      applyReviewStatus(DOCUMENT_REVIEW_STATUS.APPROVED)
+      const didApply = applyReviewStatus(DOCUMENT_REVIEW_STATUS.APPROVED)
+      if (!didApply) return
       showToast('success', 'Document approved successfully.')
     }, 'Approving document...')
   }
@@ -5181,7 +5450,8 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
       unlockReason = input.trim()
     }
     void runReviewAction(() => {
-      applyReviewStatus(DOCUMENT_REVIEW_STATUS.PENDING_REVIEW, selectedDocument.notes || '', { unlockReason })
+      const didApply = applyReviewStatus(DOCUMENT_REVIEW_STATUS.PENDING_REVIEW, selectedDocument.notes || '', { unlockReason })
+      if (!didApply) return
       showToast('success', 'Document moved to pending review.')
     }, 'Moving file to pending review...')
   }
@@ -5193,7 +5463,8 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
     }
     if (!selectedDocument || !rejectionReason.trim()) return
     void runReviewAction(() => {
-      applyReviewStatus(DOCUMENT_REVIEW_STATUS.REJECTED, rejectionReason.trim())
+      const didApply = applyReviewStatus(DOCUMENT_REVIEW_STATUS.REJECTED, rejectionReason.trim())
+      if (!didApply) return
       setShowRejectionModal(false)
       setRejectionReason('')
       showToast('success', 'Document rejected. User has been notified.')
@@ -5213,7 +5484,8 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
       return
     }
     void runReviewAction(() => {
-      applyReviewStatus(DOCUMENT_REVIEW_STATUS.INFO_REQUESTED, message.trim())
+      const didApply = applyReviewStatus(DOCUMENT_REVIEW_STATUS.INFO_REQUESTED, message.trim())
+      if (!didApply) return
       showToast('success', 'Information request sent to user.')
     }, 'Sending information request...')
   }
@@ -5599,6 +5871,9 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                   {!canReviewDocuments && (
                     <p className="text-xs text-text-muted mb-2">View-only mode. This role cannot approve, reject, or change review state.</p>
                   )}
+                  {selectedDocumentDecisionLocked && (
+                    <p className="text-xs text-warning mb-2">{CLIENT_VERIFICATION_LOCK_MESSAGE}</p>
+                  )}
                   <div className="flex items-center gap-2 mb-4">
                     <button onClick={handleZoomOut} className="p-2 hover:bg-background rounded-md transition-colors" title="Zoom Out">
                       <ZoomOut className="w-4 h-4 text-text-secondary" />
@@ -5624,7 +5899,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={handleApprove}
-                      disabled={!canReviewDocuments || isProcessingReviewAction}
+                      disabled={!canReviewDocuments || selectedDocumentDecisionLocked || isProcessingReviewAction}
                       className="h-9 bg-success text-white rounded-md text-sm font-medium hover:bg-success/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <CheckCircle className="w-4 h-4" />
@@ -5632,7 +5907,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                     </button>
                     <button
                       onClick={() => setShowRejectionModal(true)}
-                      disabled={!canReviewDocuments || isProcessingReviewAction}
+                      disabled={!canReviewDocuments || selectedDocumentDecisionLocked || isProcessingReviewAction}
                       className="h-9 bg-error text-white rounded-md text-sm font-medium hover:bg-error/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <XCircle className="w-4 h-4" />
@@ -5640,7 +5915,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
                     </button>
                     <button
                       onClick={handleRequestInfo}
-                      disabled={!canRequestInfo || isProcessingReviewAction}
+                      disabled={!canRequestInfo || selectedDocumentDecisionLocked || isProcessingReviewAction}
                       className="h-9 bg-warning text-white rounded-md text-sm font-medium hover:bg-warning/90 transition-colors flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                       <HelpCircle className="w-4 h-4" />
@@ -6476,6 +6751,7 @@ function AdminCommunicationsCenter({ showToast, currentAdminAccount, onAdminActi
   const [scheduledNotifications, setScheduledNotifications] = useState(() => readAdminScheduledNotificationsFromStorage())
   const [supportSnapshot, setSupportSnapshot] = useState(() => getSupportCenterSnapshot())
   const supportUnreadRef = useRef(-1)
+  const currentAdminEmail = toTrimmedValue(currentAdminAccount?.email).toLowerCase()
 
   useEffect(() => {
     const refreshNotifications = () => {
@@ -6512,7 +6788,7 @@ function AdminCommunicationsCenter({ showToast, currentAdminAccount, onAdminActi
       const windowActive = typeof document !== 'undefined'
         ? (document.visibilityState === 'visible' && document.hasFocus())
         : true
-      if (nextUnreadCount > 0 && (activeTab !== 'support' || !windowActive)) {
+      if (nextUnreadCount > 0 && (activeTab !== 'support' || !windowActive) && isAdminNotificationSoundEnabled(currentAdminEmail)) {
         delayedSoundTimer = window.setTimeout(() => {
           playSupportNotificationSound()
         }, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS)
@@ -6528,14 +6804,14 @@ function AdminCommunicationsCenter({ showToast, currentAdminAccount, onAdminActi
     const windowActive = typeof document !== 'undefined'
       ? (document.visibilityState === 'visible' && document.hasFocus())
       : true
-    if (activeTab !== 'support' || !windowActive) {
+    if ((activeTab !== 'support' || !windowActive) && isAdminNotificationSoundEnabled(currentAdminEmail)) {
       playSupportNotificationSound()
     }
 
     return () => {
       if (delayedSoundTimer) window.clearTimeout(delayedSoundTimer)
     }
-  }, [supportUnreadCount, activeTab])
+  }, [supportUnreadCount, activeTab, currentAdminEmail])
 
   const handleEditDraft = (draftId = '') => {
     const normalizedDraftId = toTrimmedValue(draftId)
@@ -6839,6 +7115,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
   const [message, setMessage] = useState('')
   const [link, setLink] = useState('')
   const [priority, setPriority] = useState('normal')
+  const [forceAdminMessage, setForceAdminMessage] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [showConfirm, setShowConfirm] = useState(false)
   const [isSending, setIsSending] = useState(false)
@@ -6882,6 +7159,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
     setMessage(draft.message || '')
     setLink(draft.link || '')
     setPriority(draft.priority || 'normal')
+    setForceAdminMessage(normalizeBooleanPreference(draft.forceAdminMessage))
     setSearchUser(draft.searchUser || '')
     setSelectedUsers(Array.isArray(draft.selectedUsers) ? draft.selectedUsers : [])
     setFilters({
@@ -6908,6 +7186,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
     || link.trim()
     || searchUser.trim()
     || selectedUsers.length > 0
+    || forceAdminMessage
     || Object.values(filters).some((value) => toTrimmedValue(value)),
   )
   const isMessageReadyToSend = Boolean(
@@ -6927,6 +7206,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
     message,
     link,
     priority,
+    forceAdminMessage,
     searchUser,
     selectedUsers,
     filters,
@@ -6972,6 +7252,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
     message,
     link,
     priority,
+    forceAdminMessage,
     searchUser,
     selectedUsers,
     filters,
@@ -7052,6 +7333,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
           message,
           link,
           priority,
+          forceAdminMessage,
           selectedUsers,
           status: 'Scheduled',
           createdAtIso: new Date().toISOString(),
@@ -7070,6 +7352,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
           message,
           link,
           priority,
+          forceAdminMessage,
           deliveryOrigin: 'manual',
         })
         if (!sendResult.ok) {
@@ -7092,6 +7375,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
       setTitle('')
       setMessage('')
       setLink('')
+      setForceAdminMessage(false)
       setSearchUser('')
       setFilters({
         business: '',
@@ -7239,6 +7523,21 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
               />
             </div>
+
+            <label className="flex items-start gap-3 rounded-lg border border-border-light bg-background/50 px-3 py-3">
+              <input
+                type="checkbox"
+                checked={forceAdminMessage}
+                onChange={(event) => setForceAdminMessage(event.target.checked)}
+                className="w-4 h-4 mt-0.5 accent-primary"
+              />
+              <span>
+                <span className="block text-sm font-medium text-text-primary">Force admin message delivery</span>
+                <span className="block text-xs text-text-muted mt-0.5">
+                  Deliver this admin message even when a client disabled admin-message notifications.
+                </span>
+              </span>
+            </label>
 
             <div>
               <label className="block text-sm font-medium text-text-primary mb-2">Delivery</label>
@@ -7501,6 +7800,21 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                 </div>
               </div>
 
+              <label className="flex items-start gap-3 rounded-lg border border-border-light bg-background/50 px-3 py-3">
+                <input
+                  type="checkbox"
+                  checked={forceAdminMessage}
+                  onChange={(event) => setForceAdminMessage(event.target.checked)}
+                  className="w-4 h-4 mt-0.5 accent-primary"
+                />
+                <span>
+                  <span className="block text-sm font-medium text-text-primary">Force admin message delivery</span>
+                  <span className="block text-xs text-text-muted mt-0.5">
+                    Deliver this admin message even when a client disabled admin-message notifications.
+                  </span>
+                </span>
+              </label>
+
               <div>
                 <label className="block text-sm font-medium text-text-primary mb-2">Delivery</label>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -7600,6 +7914,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
               <p className="text-xs text-text-muted mt-3">
                 This notification will be sent to {mode === 'bulk' ? getAudienceCount() : selectedUsers.length} recipient(s)
                 {deliveryMode === 'scheduled' && scheduledForIso ? ` on ${formatTimestamp(scheduledForIso)}` : ' immediately'}.
+                {forceAdminMessage ? ' Forced admin delivery is enabled.' : ''}
               </p>
             </div>
             <div className="p-4 border-t border-border-light flex justify-end">
@@ -7634,6 +7949,7 @@ function AdminSendNotificationPage({ showToast, runWithSlowRuntimeWatch }) {
                     {deliveryMode === 'scheduled' && scheduledForIso
                       ? `Scheduled time: ${formatTimestamp(scheduledForIso)}.`
                       : 'This action cannot be undone.'}
+                    {forceAdminMessage ? ' Forced admin delivery is enabled.' : ''}
                   </p>
                 </div>
               </div>
@@ -8204,13 +8520,13 @@ function AdminWorkHoursPage({ currentAdminAccount }) {
 }
 
 // Activity Log Page
-function AdminActivityLogPage() {
-  const [logs, setLogs] = useState(() => getActivityLogsFromStorage())
+function AdminActivityLogPage({ currentAdminAccount = null }) {
+  const [logs, setLogs] = useState(() => getActivityLogsFromStorage(currentAdminAccount))
   const [scopeFilter, setScopeFilter] = useState('all')
 
   useEffect(() => {
     const syncLogs = () => {
-      const storedLogs = getActivityLogsFromStorage()
+      const storedLogs = getActivityLogsFromStorage(currentAdminAccount)
       setLogs(storedLogs)
     }
     syncLogs()
@@ -8220,7 +8536,7 @@ function AdminActivityLogPage() {
       window.removeEventListener('storage', syncLogs)
       window.clearInterval(intervalId)
     }
-  }, [])
+  }, [currentAdminAccount])
 
   const getActionStyle = (action) => {
     if (action.includes('Approved')) return 'bg-success-bg text-success'

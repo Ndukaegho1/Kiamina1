@@ -1,8 +1,23 @@
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const CHANNELS = new Set(["email", "sms", "push", "webhook"]);
-const STATUSES = new Set(["queued", "sent", "failed"]);
+import Joi from "joi";
+
+const CHANNELS = ["email", "sms", "push", "webhook"];
+const STATUSES = ["queued", "sent", "failed"];
+const EMAIL_SCHEMA = Joi.string()
+  .trim()
+  .lowercase()
+  .email({ tlds: { allow: false } });
 
 const normalizeString = (value) => String(value ?? "").trim();
+const normalizeSource = (body) =>
+  body && typeof body === "object" && !Array.isArray(body) ? body : {};
+
+const toErrors = (error) => {
+  if (!error) {
+    return [];
+  }
+
+  return error.details.map((detail) => detail.message.replace(/"/g, ""));
+};
 
 const normalizeEmailList = (value) => {
   if (Array.isArray(value)) {
@@ -30,142 +45,199 @@ const normalizeDate = (value) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+const sendEmailSchema = Joi.object({
+  subject: Joi.string().trim().allow("").max(200).default("").messages({
+    "string.max": "subject must be at most 200 characters"
+  }),
+  message: Joi.string().trim().required().max(5000).messages({
+    "any.required": "message is required",
+    "string.empty": "message is required",
+    "string.max": "message must be at most 5000 characters"
+  })
+});
+
+const patchStatusSchema = Joi.object({
+  status: Joi.string().trim().lowercase().required().valid(...STATUSES).messages({
+    "any.required": "status is required",
+    "string.empty": "status is required",
+    "any.only": "status must be one of: queued, sent, failed"
+  }),
+  errorMessage: Joi.string().trim().allow("").max(500).optional().messages({
+    "string.max": "errorMessage must be at most 500 characters"
+  })
+});
+
+const channelSchema = Joi.string().trim().lowercase().valid(...CHANNELS).messages({
+  "any.only": "channel must be one of: email, sms, push, webhook"
+});
+const subjectSchema = Joi.string().trim().allow("").max(200).messages({
+  "string.max": "subject must be at most 200 characters"
+});
+const messageSchema = Joi.string().trim().required().max(5000).messages({
+  "any.required": "message cannot be empty",
+  "string.empty": "message cannot be empty",
+  "string.max": "message must be at most 5000 characters"
+});
+const statusSchema = Joi.string().trim().lowercase().valid(...STATUSES).messages({
+  "any.only": "status must be one of: queued, sent, failed"
+});
+const providerMessageIdSchema = Joi.string().trim().allow("").max(255).messages({
+  "string.max": "providerMessageId must be at most 255 characters"
+});
+const errorMessageSchema = Joi.string().trim().allow("").max(500).messages({
+  "string.max": "errorMessage must be at most 500 characters"
+});
+
+const validateEmailList = (emails) => {
+  if (!emails || emails.length === 0) {
+    return "to must be a valid email or comma-separated list of emails";
+  }
+
+  const invalid = emails.some((email) => EMAIL_SCHEMA.validate(email).error);
+  if (invalid) {
+    return "to contains invalid email addresses";
+  }
+
+  return "";
+};
+
 export const validateSendEmailPayload = (body) => {
-  const to = normalizeEmailList(body?.to);
-  const subject = body?.subject === undefined ? "" : normalizeString(body.subject);
-  const message = normalizeString(body?.message);
-  const errors = [];
+  const source = normalizeSource(body);
+  const to = normalizeEmailList(source.to);
+  const { value, error } = sendEmailSchema.validate(
+    {
+      subject: source.subject,
+      message: source.message
+    },
+    {
+      abortEarly: false,
+      convert: true,
+      stripUnknown: true
+    }
+  );
 
-  if (!to || to.length === 0) {
-    errors.push("to must be a valid email or comma-separated list of emails");
-  } else if (to.some((email) => !EMAIL_REGEX.test(email))) {
-    errors.push("to contains invalid email addresses");
-  }
-
-  if (!message) {
-    errors.push("message is required");
-  } else if (message.length > 5000) {
-    errors.push("message must be at most 5000 characters");
-  }
-
-  if (subject.length > 200) {
-    errors.push("subject must be at most 200 characters");
+  const errors = toErrors(error);
+  const toError = validateEmailList(to);
+  if (toError) {
+    errors.unshift(toError);
   }
 
   return {
     errors,
     payload: {
       to: to || [],
-      subject,
-      message
+      subject: value?.subject || "",
+      message: value?.message || ""
     }
   };
 };
 
 export const validatePatchStatusPayload = (body) => {
-  const status = normalizeString(body?.status).toLowerCase();
-  const errorMessage =
-    body?.errorMessage === undefined ? undefined : normalizeString(body.errorMessage);
+  const source = normalizeSource(body);
+  const { value, error } = patchStatusSchema.validate(source, {
+    abortEarly: false,
+    convert: true,
+    stripUnknown: true
+  });
 
-  if (!status) {
-    return { error: "status is required" };
-  }
-
-  if (!STATUSES.has(status)) {
-    return { error: "status must be one of: queued, sent, failed" };
-  }
-
-  if (errorMessage !== undefined && errorMessage.length > 500) {
-    return { error: "errorMessage must be at most 500 characters" };
+  if (error) {
+    return { error: toErrors(error)[0] || "status is required" };
   }
 
   return {
-    status,
-    errorMessage
+    status: value.status,
+    errorMessage: value.errorMessage
   };
 };
 
 export const buildNotificationLogUpdatePayload = (body) => {
+  const source = normalizeSource(body);
   const payload = {};
   const errors = [];
 
-  if (body?.channel !== undefined) {
-    const channel = normalizeString(body.channel).toLowerCase();
-    if (!CHANNELS.has(channel)) {
+  if (source.channel !== undefined) {
+    const channel = normalizeString(source.channel).toLowerCase();
+    const { error } = channelSchema.validate(channel);
+    if (error) {
       errors.push("channel must be one of: email, sms, push, webhook");
     } else {
       payload.channel = channel;
     }
   }
 
-  if (body?.to !== undefined) {
-    const to = normalizeEmailList(body.to);
-    if (!to || to.length === 0 || to.some((email) => !EMAIL_REGEX.test(email))) {
+  if (source.to !== undefined) {
+    const to = normalizeEmailList(source.to);
+    if (!to || to.length === 0 || to.some((email) => EMAIL_SCHEMA.validate(email).error)) {
       errors.push("to must contain valid email addresses");
     } else {
       payload.to = to.join(",");
     }
   }
 
-  if (body?.subject !== undefined) {
-    const subject = normalizeString(body.subject);
-    if (subject.length > 200) {
+  if (source.subject !== undefined) {
+    const subject = normalizeString(source.subject);
+    const { error } = subjectSchema.validate(subject);
+    if (error) {
       errors.push("subject must be at most 200 characters");
     } else {
       payload.subject = subject;
     }
   }
 
-  if (body?.message !== undefined) {
-    const message = normalizeString(body.message);
-    if (!message) {
-      errors.push("message cannot be empty");
-    } else if (message.length > 5000) {
-      errors.push("message must be at most 5000 characters");
+  if (source.message !== undefined) {
+    const message = normalizeString(source.message);
+    const { error } = messageSchema.validate(message);
+    if (error) {
+      errors.push(
+        message ? "message must be at most 5000 characters" : "message cannot be empty"
+      );
     } else {
       payload.message = message;
     }
   }
 
-  if (body?.status !== undefined) {
-    const status = normalizeString(body.status).toLowerCase();
-    if (!STATUSES.has(status)) {
+  if (source.status !== undefined) {
+    const status = normalizeString(source.status).toLowerCase();
+    const { error } = statusSchema.validate(status);
+    if (error) {
       errors.push("status must be one of: queued, sent, failed");
     } else {
       payload.status = status;
     }
   }
 
-  if (body?.providerMessageId !== undefined) {
-    const providerMessageId = normalizeString(body.providerMessageId);
-    if (providerMessageId.length > 255) {
+  if (source.providerMessageId !== undefined) {
+    const providerMessageId = normalizeString(source.providerMessageId);
+    const { error } = providerMessageIdSchema.validate(providerMessageId);
+    if (error) {
       errors.push("providerMessageId must be at most 255 characters");
     } else {
       payload.providerMessageId = providerMessageId;
     }
   }
 
-  if (body?.scheduledAt !== undefined) {
-    const scheduledAt = normalizeDate(body.scheduledAt);
-    if (scheduledAt === null && body.scheduledAt !== null) {
+  if (source.scheduledAt !== undefined) {
+    const scheduledAt = normalizeDate(source.scheduledAt);
+    if (scheduledAt === null && source.scheduledAt !== null) {
       errors.push("scheduledAt must be a valid date");
     } else {
       payload.scheduledAt = scheduledAt;
     }
   }
 
-  if (body?.sentAt !== undefined) {
-    const sentAt = normalizeDate(body.sentAt);
-    if (sentAt === null && body.sentAt !== null) {
+  if (source.sentAt !== undefined) {
+    const sentAt = normalizeDate(source.sentAt);
+    if (sentAt === null && source.sentAt !== null) {
       errors.push("sentAt must be a valid date");
     } else {
       payload.sentAt = sentAt;
     }
   }
 
-  if (body?.errorMessage !== undefined) {
-    const errorMessage = normalizeString(body.errorMessage);
-    if (errorMessage.length > 500) {
+  if (source.errorMessage !== undefined) {
+    const errorMessage = normalizeString(source.errorMessage);
+    const { error } = errorMessageSchema.validate(errorMessage);
+    if (error) {
       errors.push("errorMessage must be at most 500 characters");
     } else {
       payload.errorMessage = errorMessage;

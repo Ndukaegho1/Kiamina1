@@ -1,8 +1,22 @@
-const CATEGORIES = new Set(["expenses", "sales", "bank-statements", "other"]);
-const STATUSES = new Set(["processing", "to-review", "ready"]);
-const STORAGE_PROVIDERS = new Set(["firebase", "s3", "local", "unknown"]);
+import Joi from "joi";
+
+const CATEGORIES = ["expenses", "sales", "bank-statements", "other"];
+const STATUSES = ["processing", "to-review", "ready"];
+const STORAGE_PROVIDERS = ["firebase", "s3", "local", "unknown"];
 
 const normalizeString = (value) => String(value ?? "").trim();
+const normalizeSource = (body) =>
+  body && typeof body === "object" && !Array.isArray(body) ? body : {};
+const normalizeCategory = (value) => normalizeString(value).toLowerCase();
+const normalizeStatus = (value) => normalizeString(value).toLowerCase();
+
+const toErrors = (error) => {
+  if (!error) {
+    return [];
+  }
+
+  return error.details.map((detail) => detail.message.replace(/"/g, ""));
+};
 
 const parseTags = (value) => {
   if (value === undefined) {
@@ -68,42 +82,93 @@ const parseMetadata = (value) => {
   return null;
 };
 
-const normalizeCategory = (value) => normalizeString(value).toLowerCase();
-const normalizeStatus = (value) => normalizeString(value).toLowerCase();
+const createDocumentSchema = Joi.object({
+  ownerUserId: Joi.string().trim().required().messages({
+    "any.required": "ownerUserId is required",
+    "string.empty": "ownerUserId is required"
+  }),
+  fileName: Joi.string().trim().required().max(255).messages({
+    "any.required": "fileName is required",
+    "string.empty": "fileName is required",
+    "string.max": "fileName must be at most 255 characters"
+  }),
+  category: Joi.string().trim().lowercase().required().valid(...CATEGORIES).messages({
+    "any.required": "category is required",
+    "string.empty": "category is required",
+    "any.only": "category must be one of: expenses, sales, bank-statements, other"
+  }),
+  className: Joi.string().trim().allow("").max(120).default("").messages({
+    "string.max": "className must be at most 120 characters"
+  }),
+  tags: Joi.array().items(Joi.string()).default([]),
+  metadata: Joi.object().default({})
+});
+
+const uploadSchema = Joi.object({
+  ownerUserId: Joi.string().trim().allow("").max(128).default("").messages({
+    "string.max": "ownerUserId must be at most 128 characters"
+  }),
+  category: Joi.string().trim().lowercase().valid(...CATEGORIES).default("other").messages({
+    "any.only": "category must be one of: expenses, sales, bank-statements, other"
+  }),
+  className: Joi.string().trim().allow("").max(120).default("").messages({
+    "string.max": "className must be at most 120 characters"
+  }),
+  tags: Joi.array().items(Joi.string()).default([]),
+  metadata: Joi.object().default({})
+});
+
+const statusSchema = Joi.string().trim().lowercase().required().valid(...STATUSES).messages({
+  "any.required": "status is required",
+  "string.empty": "status is required",
+  "any.only": "status must be one of: processing, to-review, ready"
+});
+
+const ownerUserIdUpdateSchema = Joi.string().trim().required().messages({
+  "string.empty": "ownerUserId cannot be empty"
+});
+const fileNameUpdateSchema = Joi.string().trim().required().max(255).messages({
+  "string.empty": "fileName cannot be empty",
+  "string.max": "fileName must be at most 255 characters"
+});
+const categoryUpdateSchema = Joi.string().trim().lowercase().valid(...CATEGORIES).messages({
+  "any.only": "category must be one of: expenses, sales, bank-statements, other"
+});
+const classNameUpdateSchema = Joi.string().trim().allow("").max(120).messages({
+  "string.max": "className must be at most 120 characters"
+});
+const storageProviderSchema = Joi.string().trim().lowercase().valid(...STORAGE_PROVIDERS).messages({
+  "any.only": "storageProvider must be one of: firebase, s3, local, unknown"
+});
+const storagePathSchema = Joi.string().trim().allow("").max(500).messages({
+  "string.max": "storagePath must be at most 500 characters"
+});
 
 export const validateCreateDocumentPayload = (body) => {
-  const ownerUserId = normalizeString(body?.ownerUserId);
-  const fileName = normalizeString(body?.fileName);
-  const category = normalizeCategory(body?.category);
-  const className = body?.className === undefined ? "" : normalizeString(body.className);
-  const tags = parseTags(body?.tags);
-  const metadata = parseMetadata(body?.metadata);
-  const errors = [];
+  const source = normalizeSource(body);
+  const tags = parseTags(source.tags);
+  const metadata = parseMetadata(source.metadata);
 
-  if (!ownerUserId) {
-    errors.push("ownerUserId is required");
-  }
+  const { value, error } = createDocumentSchema.validate(
+    {
+      ownerUserId: normalizeString(source.ownerUserId),
+      fileName: normalizeString(source.fileName),
+      category: normalizeCategory(source.category),
+      className: source.className === undefined ? "" : normalizeString(source.className),
+      tags: tags || [],
+      metadata: metadata || {}
+    },
+    {
+      abortEarly: false,
+      convert: true,
+      stripUnknown: true
+    }
+  );
 
-  if (!fileName) {
-    errors.push("fileName is required");
-  } else if (fileName.length > 255) {
-    errors.push("fileName must be at most 255 characters");
-  }
-
-  if (!category) {
-    errors.push("category is required");
-  } else if (!CATEGORIES.has(category)) {
-    errors.push("category must be one of: expenses, sales, bank-statements, other");
-  }
-
-  if (className.length > 120) {
-    errors.push("className must be at most 120 characters");
-  }
-
+  const errors = toErrors(error);
   if (!tags) {
     errors.push("tags must be an array of strings or comma-separated string");
   }
-
   if (!metadata) {
     errors.push("metadata must be a valid JSON object");
   }
@@ -111,60 +176,63 @@ export const validateCreateDocumentPayload = (body) => {
   return {
     errors,
     payload: {
-      ownerUserId,
-      fileName,
-      category,
-      className,
-      tags: tags || [],
-      metadata: metadata || {}
+      ownerUserId: value?.ownerUserId || "",
+      fileName: value?.fileName || "",
+      category: value?.category || "",
+      className: value?.className || "",
+      tags: value?.tags || [],
+      metadata: value?.metadata || {}
     }
   };
 };
 
 export const buildDocumentUpdatePayload = (body) => {
+  const source = normalizeSource(body);
   const payload = {};
   const errors = [];
 
-  if (body?.ownerUserId !== undefined) {
-    const ownerUserId = normalizeString(body.ownerUserId);
-    if (!ownerUserId) {
+  if (source.ownerUserId !== undefined) {
+    const ownerUserId = normalizeString(source.ownerUserId);
+    const { error } = ownerUserIdUpdateSchema.validate(ownerUserId);
+    if (error) {
       errors.push("ownerUserId cannot be empty");
     } else {
       payload.ownerUserId = ownerUserId;
     }
   }
 
-  if (body?.fileName !== undefined) {
-    const fileName = normalizeString(body.fileName);
-    if (!fileName) {
-      errors.push("fileName cannot be empty");
-    } else if (fileName.length > 255) {
-      errors.push("fileName must be at most 255 characters");
+  if (source.fileName !== undefined) {
+    const fileName = normalizeString(source.fileName);
+    const { error } = fileNameUpdateSchema.validate(fileName);
+    if (error) {
+      errors.push(fileName ? "fileName must be at most 255 characters" : "fileName cannot be empty");
     } else {
       payload.fileName = fileName;
     }
   }
 
-  if (body?.category !== undefined) {
-    const category = normalizeCategory(body.category);
-    if (!CATEGORIES.has(category)) {
+  if (source.category !== undefined) {
+    const category = normalizeCategory(source.category);
+    const { error } = categoryUpdateSchema.validate(category);
+    if (error) {
       errors.push("category must be one of: expenses, sales, bank-statements, other");
     } else {
       payload.category = category;
     }
   }
 
-  if (body?.className !== undefined) {
-    const className = normalizeString(body.className);
-    if (className.length > 120) {
+  if (source.className !== undefined) {
+    const className = normalizeString(source.className);
+    const { error } = classNameUpdateSchema.validate(className);
+    if (error) {
       errors.push("className must be at most 120 characters");
     } else {
       payload.className = className;
     }
   }
 
-  if (body?.tags !== undefined) {
-    const tags = parseTags(body.tags);
+  if (source.tags !== undefined) {
+    const tags = parseTags(source.tags);
     if (!tags) {
       errors.push("tags must be an array of strings or comma-separated string");
     } else {
@@ -172,8 +240,8 @@ export const buildDocumentUpdatePayload = (body) => {
     }
   }
 
-  if (body?.metadata !== undefined) {
-    const metadata = parseMetadata(body.metadata);
+  if (source.metadata !== undefined) {
+    const metadata = parseMetadata(source.metadata);
     if (!metadata) {
       errors.push("metadata must be a valid JSON object");
     } else {
@@ -181,27 +249,30 @@ export const buildDocumentUpdatePayload = (body) => {
     }
   }
 
-  if (body?.storageProvider !== undefined) {
-    const storageProvider = normalizeString(body.storageProvider).toLowerCase();
-    if (!STORAGE_PROVIDERS.has(storageProvider)) {
+  if (source.storageProvider !== undefined) {
+    const storageProvider = normalizeString(source.storageProvider).toLowerCase();
+    const { error } = storageProviderSchema.validate(storageProvider);
+    if (error) {
       errors.push("storageProvider must be one of: firebase, s3, local, unknown");
     } else {
       payload.storageProvider = storageProvider;
     }
   }
 
-  if (body?.storagePath !== undefined) {
-    const storagePath = normalizeString(body.storagePath);
-    if (storagePath.length > 500) {
+  if (source.storagePath !== undefined) {
+    const storagePath = normalizeString(source.storagePath);
+    const { error } = storagePathSchema.validate(storagePath);
+    if (error) {
       errors.push("storagePath must be at most 500 characters");
     } else {
       payload.storagePath = storagePath;
     }
   }
 
-  if (body?.status !== undefined) {
-    const status = normalizeStatus(body.status);
-    if (!STATUSES.has(status)) {
+  if (source.status !== undefined) {
+    const status = normalizeStatus(source.status);
+    const { error } = statusSchema.validate(status);
+    if (error) {
       errors.push("status must be one of: processing, to-review, ready");
     } else {
       payload.status = status;
@@ -212,47 +283,42 @@ export const buildDocumentUpdatePayload = (body) => {
 };
 
 export const validateStatusPayload = (body) => {
-  const status = normalizeStatus(body?.status);
+  const source = normalizeSource(body);
+  const status = normalizeStatus(source.status);
+  const { error } = statusSchema.validate(status);
 
-  if (!status) {
-    return {
-      error: "status is required"
-    };
-  }
-
-  if (!STATUSES.has(status)) {
-    return {
-      error: "status must be one of: processing, to-review, ready"
-    };
+  if (error) {
+    const message = status ? "status must be one of: processing, to-review, ready" : "status is required";
+    return { error: message };
   }
 
   return { status };
 };
 
 export const validateUploadBody = (body) => {
-  const ownerUserId = body?.ownerUserId === undefined ? "" : normalizeString(body.ownerUserId);
-  const category = normalizeCategory(body?.category || "other");
-  const className = body?.className === undefined ? "" : normalizeString(body.className);
-  const tags = parseTags(body?.tags);
-  const metadata = parseMetadata(body?.metadata);
-  const errors = [];
+  const source = normalizeSource(body);
+  const tags = parseTags(source.tags);
+  const metadata = parseMetadata(source.metadata);
 
-  if (ownerUserId && ownerUserId.length > 128) {
-    errors.push("ownerUserId must be at most 128 characters");
-  }
+  const { value, error } = uploadSchema.validate(
+    {
+      ownerUserId: source.ownerUserId === undefined ? "" : normalizeString(source.ownerUserId),
+      category: normalizeCategory(source.category || "other"),
+      className: source.className === undefined ? "" : normalizeString(source.className),
+      tags: tags || [],
+      metadata: metadata || {}
+    },
+    {
+      abortEarly: false,
+      convert: true,
+      stripUnknown: true
+    }
+  );
 
-  if (!CATEGORIES.has(category)) {
-    errors.push("category must be one of: expenses, sales, bank-statements, other");
-  }
-
-  if (className.length > 120) {
-    errors.push("className must be at most 120 characters");
-  }
-
+  const errors = toErrors(error);
   if (!tags) {
     errors.push("tags must be an array of strings or comma-separated string");
   }
-
   if (!metadata) {
     errors.push("metadata must be a valid JSON object");
   }
@@ -260,11 +326,11 @@ export const validateUploadBody = (body) => {
   return {
     errors,
     payload: {
-      ownerUserId,
-      category,
-      className,
-      tags: tags || [],
-      metadata: metadata || {}
+      ownerUserId: value?.ownerUserId || "",
+      category: value?.category || "other",
+      className: value?.className || "",
+      tags: value?.tags || [],
+      metadata: value?.metadata || {}
     }
   };
 };

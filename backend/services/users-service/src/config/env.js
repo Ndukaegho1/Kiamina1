@@ -30,5 +30,7 @@ export const env = {
   port: toNumber(process.env.PORT, 4102),
   corsOrigins: parseCsv(process.env.CORS_ORIGINS),
   mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017",
-  mongoDbName: process.env.MONGO_DB_NAME || "kiamina_users"
+  mongoDbName: process.env.MONGO_DB_NAME || "kiamina_users",
+  documentsServiceUrl: process.env.DOCUMENTS_SERVICE_URL || "http://localhost:4103",
+  documentsServiceTimeoutMs: toNumber(process.env.DOCUMENTS_SERVICE_TIMEOUT_MS, 6000)
 };

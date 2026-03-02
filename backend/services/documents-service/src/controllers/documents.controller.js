@@ -4,6 +4,7 @@ import {
   deleteDocument,
   getDocumentById,
   getDocumentsByOwner,
+  getDocumentSummaryByOwner,
   updateDocument
 } from "../services/documents.service.js";
 import {
@@ -77,6 +78,29 @@ export const listByOwner = async (req, res, next) => {
 
     const documents = await getDocumentsByOwner(ownerUserId);
     return res.status(200).json(documents);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getOwnerSummary = async (req, res, next) => {
+  try {
+    const actor = requireActor(req, res);
+    if (!actor) {
+      return;
+    }
+
+    const { ownerUserId } = req.params;
+    const actorIsPrivileged = isPrivilegedActor(actor);
+
+    if (!actorIsPrivileged && ownerUserId !== actor.uid) {
+      return res.status(403).json({
+        message: "You can only view summary for your own documents."
+      });
+    }
+
+    const summary = await getDocumentSummaryByOwner(ownerUserId);
+    return res.status(200).json(summary);
   } catch (error) {
     return next(error);
   }

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Lock, Mail, ArrowLeft } from 'lucide-react'
+import { Lock, Mail, ArrowLeft, KeyRound } from 'lucide-react'
 import AdminOtpModal from './AdminOtpModal'
 import KiaminaLogo from '../../common/KiaminaLogo'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
@@ -15,6 +15,7 @@ function AdminLoginPortal({
   const [formState, setFormState] = useState({
     email: '',
     password: '',
+    ownerPrivateKey: '',
     remember: true,
   })
   const [showPassword, setShowPassword] = useState(false)
@@ -71,6 +72,21 @@ function AdminLoginPortal({
                 className="w-full h-11 pl-9 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
               />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">Owner Private Key</label>
+            <div className="relative">
+              <KeyRound className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+              <input
+                type="password"
+                value={formState.ownerPrivateKey}
+                onChange={(event) => setFormState((prev) => ({ ...prev, ownerPrivateKey: event.target.value }))}
+                placeholder="Required for Owner accounts"
+                className="w-full h-11 pl-9 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+              />
+            </div>
+            <p className="text-xs text-text-muted mt-1">Owner accounts require this private key after password.</p>
           </div>
 
           <div className="flex items-center justify-between">

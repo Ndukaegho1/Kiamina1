@@ -5,6 +5,7 @@ import {
   ADMIN_PERMISSION_DEFINITIONS,
   getAdminLevelLabel,
   isAdminInvitePending,
+  normalizeAdminLevel,
   sanitizeAdminPermissions,
 } from '../adminIdentity'
 import AdminOtpModal from './AdminOtpModal'
@@ -58,6 +59,8 @@ function AdminAccountSetup({
     governmentIdNumber: '',
     governmentIdFile: '',
     residentialAddress: '',
+    ownerPrivateKey: '',
+    confirmOwnerPrivateKey: '',
     password: '',
     confirmPassword: '',
   })
@@ -73,22 +76,31 @@ function AdminAccountSetup({
   const govIdTypeOptions = getAdminGovIdTypeOptions(normalizedWorkCountry)
 
   const isInviteValid = isAdminInvitePending(invite)
+  const inviteAdminLevel = normalizeAdminLevel(invite?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
+  const isOwnerInvite = inviteAdminLevel === ADMIN_LEVELS.OWNER
   const invitePermissions = useMemo(() => {
     if (!invite) return []
-    if (invite.adminLevel === ADMIN_LEVELS.SUPER) {
+    if (inviteAdminLevel === ADMIN_LEVELS.OWNER || inviteAdminLevel === ADMIN_LEVELS.SUPER) {
       return ['Full System Access']
     }
     const permissionIds = sanitizeAdminPermissions(invite.adminPermissions)
     return permissionIds
       .map((permissionId) => ADMIN_PERMISSION_DEFINITIONS.find((permission) => permission.id === permissionId)?.label)
       .filter(Boolean)
-  }, [invite])
+  }, [invite, inviteAdminLevel])
 
   const resetIdentityVerificationState = () => {
     setIdentityVerificationState({ status: '', message: '' })
   }
 
   const handleVerifyIdentity = async () => {
+    if (isOwnerInvite) {
+      setIdentityVerificationState({
+        status: 'verified',
+        message: 'Owner role does not require ID verification.',
+      })
+      return
+    }
     if (!setupForm.fullName.trim() || !setupForm.governmentIdType || !setupForm.governmentIdNumber.trim()) {
       setErrorMessage('Full name, government ID type, and ID card number are required before verification.')
       return
@@ -129,9 +141,23 @@ function AdminAccountSetup({
   const submitSetup = async (event) => {
     event.preventDefault()
     if (!invite?.token) return
-    if (identityVerificationState.status !== 'verified') {
+    if (!isOwnerInvite && identityVerificationState.status !== 'verified') {
       setErrorMessage('Submit identity verification before creating account.')
       return
+    }
+    if (!isOwnerInvite && !setupForm.residentialAddress.trim()) {
+      setErrorMessage('Residential address is required for this admin role.')
+      return
+    }
+    if (isOwnerInvite) {
+      if (!setupForm.ownerPrivateKey.trim() || !setupForm.confirmOwnerPrivateKey.trim()) {
+        setErrorMessage('Owner private key and confirmation are required.')
+        return
+      }
+      if (setupForm.ownerPrivateKey.trim() !== setupForm.confirmOwnerPrivateKey.trim()) {
+        setErrorMessage('Owner private key confirmation does not match.')
+        return
+      }
     }
 
     setErrorMessage('')
@@ -148,6 +174,8 @@ function AdminAccountSetup({
       governmentIdNumber: setupForm.governmentIdNumber,
       identityVerificationPassed: identityVerificationState.status === 'verified',
       residentialAddress: setupForm.residentialAddress,
+      ownerPrivateKey: setupForm.ownerPrivateKey,
+      confirmOwnerPrivateKey: setupForm.confirmOwnerPrivateKey,
       password: setupForm.password,
       confirmPassword: setupForm.confirmPassword,
     })
@@ -283,107 +311,119 @@ function AdminAccountSetup({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Country</label>
-              <select
-                value={normalizedWorkCountry}
-                onChange={(event) => {
-                  setSetupForm((prev) => ({
-                    ...prev,
-                    workCountry: normalizeAdminVerificationCountry(event.target.value),
-                    governmentIdType: '',
-                  }))
-                  resetIdentityVerificationState()
-                }}
-                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              >
-                <option value="Nigeria">Nigeria</option>
-                <option value="International">Outside Nigeria</option>
-              </select>
+          {!isOwnerInvite && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">Country</label>
+                  <select
+                    value={normalizedWorkCountry}
+                    onChange={(event) => {
+                      setSetupForm((prev) => ({
+                        ...prev,
+                        workCountry: normalizeAdminVerificationCountry(event.target.value),
+                        governmentIdType: '',
+                      }))
+                      resetIdentityVerificationState()
+                    }}
+                    className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                  >
+                    <option value="Nigeria">Nigeria</option>
+                    <option value="International">Outside Nigeria</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Type</label>
+                  <select
+                    value={setupForm.governmentIdType}
+                    onChange={(event) => {
+                      setSetupForm((prev) => ({ ...prev, governmentIdType: event.target.value }))
+                      resetIdentityVerificationState()
+                    }}
+                    className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                  >
+                    <option value="">Select ID type</option>
+                    {govIdTypeOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Number</label>
+                <input
+                  type="text"
+                  value={setupForm.governmentIdNumber}
+                  onChange={(event) => {
+                    setSetupForm((prev) => ({ ...prev, governmentIdNumber: event.target.value }))
+                    resetIdentityVerificationState()
+                  }}
+                  placeholder={normalizedWorkCountry === 'Nigeria' ? 'Enter NIN / Passport / Voter ID number' : 'Enter government-issued ID number'}
+                  className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                />
+                <p className="text-xs text-text-muted mt-1">
+                  Nigeria admins can use International Passport, NIN, Voter&apos;s Card, or Driver&apos;s Licence. Outside Nigeria, use your government-issued ID.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Upload</label>
+                <input
+                  key={idUploadInputKey}
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    setSetupForm((prev) => ({
+                      ...prev,
+                      governmentIdFile: file?.name || '',
+                    }))
+                    resetIdentityVerificationState()
+                  }}
+                  className="w-full h-11 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
+                />
+                {setupForm.governmentIdFile && (
+                  <p className="text-xs text-success mt-1">Uploaded: {setupForm.governmentIdFile}</p>
+                )}
+              </div>
+
+              <div>
+                <button
+                  type="button"
+                  onClick={handleVerifyIdentity}
+                  disabled={isIdentityVerifying}
+                  className="h-10 px-4 border border-primary text-primary rounded-md text-sm font-semibold hover:bg-primary-tint transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                >
+                  {isIdentityVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {isIdentityVerifying ? 'Identifying...' : 'Submit for Verification'}
+                </button>
+                {identityVerificationState.message && (
+                  <p className={`text-xs mt-2 ${
+                    identityVerificationState.status === 'verified'
+                      ? 'text-success'
+                      : identityVerificationState.status === 'failed'
+                        ? 'text-error'
+                        : 'text-text-muted'
+                  }`}
+                  >
+                    {identityVerificationState.message}
+                  </p>
+                )}
+              </div>
+            </>
+          )}
+          {isOwnerInvite && (
+            <div className="rounded-md border border-border-light bg-[#FAFBFF] px-3 py-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-text-secondary">Owner Verification</p>
+              <p className="text-sm text-text-secondary mt-1">Owner role does not require government ID verification.</p>
             </div>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Type</label>
-              <select
-                value={setupForm.governmentIdType}
-                onChange={(event) => {
-                  setSetupForm((prev) => ({ ...prev, governmentIdType: event.target.value }))
-                  resetIdentityVerificationState()
-                }}
-                className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              >
-                <option value="">Select ID type</option>
-                {govIdTypeOptions.map((option) => (
-                  <option key={option} value={option}>{option}</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          )}
 
           <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Number</label>
-            <input
-              type="text"
-              value={setupForm.governmentIdNumber}
-              onChange={(event) => {
-                setSetupForm((prev) => ({ ...prev, governmentIdNumber: event.target.value }))
-                resetIdentityVerificationState()
-              }}
-              placeholder={normalizedWorkCountry === 'Nigeria' ? 'Enter NIN / Passport / Voter ID number' : 'Enter government-issued ID number'}
-              className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-            />
-            <p className="text-xs text-text-muted mt-1">
-              Nigeria admins can use International Passport, NIN, Voter&apos;s Card, or Driver&apos;s Licence. Outside Nigeria, use your government-issued ID.
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Upload</label>
-            <input
-              key={idUploadInputKey}
-              type="file"
-              accept="image/*"
-              onChange={(event) => {
-                const file = event.target.files?.[0]
-                setSetupForm((prev) => ({
-                  ...prev,
-                  governmentIdFile: file?.name || '',
-                }))
-                resetIdentityVerificationState()
-              }}
-              className="w-full h-11 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
-            />
-            {setupForm.governmentIdFile && (
-              <p className="text-xs text-success mt-1">Uploaded: {setupForm.governmentIdFile}</p>
-            )}
-          </div>
-
-          <div>
-            <button
-              type="button"
-              onClick={handleVerifyIdentity}
-              disabled={isIdentityVerifying}
-              className="h-10 px-4 border border-primary text-primary rounded-md text-sm font-semibold hover:bg-primary-tint transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
-            >
-              {isIdentityVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
-              {isIdentityVerifying ? 'Identifying...' : 'Submit for Verification'}
-            </button>
-            {identityVerificationState.message && (
-              <p className={`text-xs mt-2 ${
-                identityVerificationState.status === 'verified'
-                  ? 'text-success'
-                  : identityVerificationState.status === 'failed'
-                    ? 'text-error'
-                    : 'text-text-muted'
-              }`}
-              >
-                {identityVerificationState.message}
-              </p>
-            )}
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-text-primary mb-1.5">Residential Address (Optional)</label>
+            <label className="block text-sm font-medium text-text-primary mb-1.5">
+              Residential Address {isOwnerInvite ? '(Optional)' : ''}
+            </label>
             <input
               type="text"
               value={setupForm.residentialAddress}
@@ -392,6 +432,29 @@ function AdminAccountSetup({
               className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
           </div>
+          {isOwnerInvite && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Owner Private Key</label>
+                <input
+                  type="password"
+                  value={setupForm.ownerPrivateKey}
+                  onChange={(event) => setSetupForm((prev) => ({ ...prev, ownerPrivateKey: event.target.value }))}
+                  placeholder="Minimum 12 characters"
+                  className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Confirm Private Key</label>
+                <input
+                  type="password"
+                  value={setupForm.confirmOwnerPrivateKey}
+                  onChange={(event) => setSetupForm((prev) => ({ ...prev, confirmOwnerPrivateKey: event.target.value }))}
+                  className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                />
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>

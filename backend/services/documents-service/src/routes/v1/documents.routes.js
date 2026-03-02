@@ -3,6 +3,7 @@ import {
   createOne,
   getDownloadUrl,
   getById,
+  getOwnerSummary,
   listByOwner,
   putById,
   removeById,
@@ -17,6 +18,7 @@ const router = express.Router();
 router.use("/records", accountingRecordsRoutes);
 router.post("/", createOne);
 router.post("/upload", singleDocumentUploadMiddleware, uploadOne);
+router.get("/owner/:ownerUserId/summary", getOwnerSummary);
 router.get("/owner/:ownerUserId", listByOwner);
 router.get("/:id/download-url", getDownloadUrl);
 router.get("/:id", getById);

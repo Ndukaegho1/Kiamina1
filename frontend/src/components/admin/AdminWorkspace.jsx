@@ -18,6 +18,7 @@ import {
 } from './AdminViews'
 import AdminSettingsPage from './settings/AdminSettingsPage'
 import { ADMIN_DEFAULT_PAGE } from './adminConfig'
+import { isOwnerAdminLevel } from './adminIdentity'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import DotLottiePreloader from '../common/DotLottiePreloader'
 import { getSupportCenterSnapshot, subscribeSupportCenter } from '../../utils/supportCenter'
@@ -26,6 +27,7 @@ import {
   primeSupportNotificationSound,
   SUPPORT_NOTIFICATION_INITIAL_DELAY_MS,
 } from '../../utils/supportNotificationSound'
+import { isAdminNotificationSoundEnabled } from '../../utils/adminSecurityPreferences'
 import {
   canAdminAccessClientScope,
   filterClientsForAdminScope,
@@ -139,14 +141,17 @@ const readAdminSearchSnapshot = (currentAdminAccount = null) => {
     }))
 
   const activityLogs = safeParseJson(localStorage.getItem('kiaminaAdminActivityLog'), [])
-  const normalizedActivityLogs = (Array.isArray(activityLogs) ? activityLogs : []).map((row, index) => ({
+  const viewerCanSeeOwnerActivity = isOwnerAdminLevel(currentAdminAccount?.adminLevel)
+  const normalizedActivityLogs = (Array.isArray(activityLogs) ? activityLogs : [])
+    .filter((row) => viewerCanSeeOwnerActivity || !isOwnerAdminLevel(row?.adminLevel))
+    .map((row, index) => ({
     id: `activity-${row.id || index}`,
     action: row.action || 'Admin action',
     adminLevel: row.adminLevel || '',
     affectedUser: row.affectedUser || '',
     details: row.details || '',
     timestamp: row.timestamp || '',
-  }))
+    }))
 
   return { clients, documents, activityLogs: normalizedActivityLogs }
 }
@@ -201,6 +206,7 @@ function AdminWorkspace({
   const slowRuntimeMessageRef = useRef('Please wait...')
   const activePageRef = useRef(activePage)
   const supportUnreadRef = useRef(-1)
+  const currentAdminEmail = String(currentAdminAccount?.email || '').trim().toLowerCase()
   const liveAdminSearchSnapshot = useMemo(
     () => readAdminSearchSnapshot(currentAdminAccount),
     [searchIndexRevision, currentAdminAccount],
@@ -439,6 +445,7 @@ function AdminWorkspace({
 
   useEffect(() => {
     const handlePrimer = () => {
+      if (!isAdminNotificationSoundEnabled(currentAdminEmail)) return
       primeSupportNotificationSound()
     }
     window.addEventListener('pointerdown', handlePrimer, { passive: true })
@@ -449,7 +456,7 @@ function AdminWorkspace({
       window.removeEventListener('keydown', handlePrimer)
       window.removeEventListener('touchstart', handlePrimer)
     }
-  }, [])
+  }, [currentAdminEmail])
 
   useEffect(() => {
     let delayedSoundTimer = null
@@ -467,7 +474,11 @@ function AdminWorkspace({
         const windowActive = typeof document !== 'undefined'
           ? (document.visibilityState === 'visible' && document.hasFocus())
           : true
-        if (nextUnreadCount > 0 && (activePageRef.current !== 'admin-communications' || !windowActive)) {
+        if (
+          nextUnreadCount > 0
+          && (activePageRef.current !== 'admin-communications' || !windowActive)
+          && isAdminNotificationSoundEnabled(currentAdminEmail)
+        ) {
           delayedSoundTimer = window.setTimeout(() => {
             playSupportNotificationSound()
           }, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS)
@@ -479,7 +490,7 @@ function AdminWorkspace({
       const windowActive = typeof document !== 'undefined'
         ? (document.visibilityState === 'visible' && document.hasFocus())
         : true
-      if (activePageRef.current !== 'admin-communications' || !windowActive) {
+      if ((activePageRef.current !== 'admin-communications' || !windowActive) && isAdminNotificationSoundEnabled(currentAdminEmail)) {
         playSupportNotificationSound()
       }
     })
@@ -487,7 +498,7 @@ function AdminWorkspace({
       if (delayedSoundTimer) window.clearTimeout(delayedSoundTimer)
       unsubscribe()
     }
-  }, [])
+  }, [currentAdminEmail])
 
   useEffect(() => {
     slowRuntimeVisibleRef.current = isSlowRuntimeOverlayVisible
@@ -603,7 +614,7 @@ function AdminWorkspace({
       case 'admin-work-hours':
         return <AdminWorkHoursPage currentAdminAccount={currentAdminAccount} />
       case 'admin-activity':
-        return <AdminActivityLogPage />
+        return <AdminActivityLogPage currentAdminAccount={currentAdminAccount} />
       case 'admin-trash':
         return (
           <AdminTrashPage

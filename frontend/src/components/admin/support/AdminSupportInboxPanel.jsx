@@ -22,6 +22,7 @@ import {
   getSupportAttachmentBlob,
 } from '../../../utils/supportAttachments'
 import { playSupportNotificationSound, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS } from '../../../utils/supportNotificationSound'
+import { isAdminNotificationSoundEnabled } from '../../../utils/adminSecurityPreferences'
 
 const buildAdminQuickReplies = (adminFirstName = 'Support') => ([
   `Hi, my name is ${adminFirstName} from Kiamina Accounting Services. We are here to serve you. Please introduce yourself by telling us your name and your email.`,
@@ -143,6 +144,7 @@ function AdminSupportInboxPanel({
   const hasInitializedUnreadRef = useRef(false)
   const fileInputRef = useRef(null)
   const attachmentMenuRef = useRef(null)
+  const currentAdminEmail = toTrimmedValue(currentAdminAccount?.email).toLowerCase()
 
   useEffect(() => {
     const unsubscribe = subscribeSupportCenter((snapshot) => {
@@ -177,7 +179,7 @@ function AdminSupportInboxPanel({
       const windowActive = typeof document !== 'undefined'
         ? (document.visibilityState === 'visible' && document.hasFocus())
         : true
-      if (totalUnreadCount > 0 && (!selectedTicketId || !windowActive)) {
+      if (totalUnreadCount > 0 && (!selectedTicketId || !windowActive) && isAdminNotificationSoundEnabled(currentAdminEmail)) {
         delayedSoundTimer = window.setTimeout(() => {
           playSupportNotificationSound()
         }, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS)
@@ -200,12 +202,12 @@ function AdminSupportInboxPanel({
       }
     })
     unreadByTicketRef.current = nextUnreadMap
-    if (shouldPlaySound) playSupportNotificationSound()
+    if (shouldPlaySound && isAdminNotificationSoundEnabled(currentAdminEmail)) playSupportNotificationSound()
 
     return () => {
       if (delayedSoundTimer) window.clearTimeout(delayedSoundTimer)
     }
-  }, [tickets, selectedTicketId])
+  }, [tickets, selectedTicketId, currentAdminEmail])
 
   const userGroups = useMemo(() => {
     const groupedUsers = new Map()

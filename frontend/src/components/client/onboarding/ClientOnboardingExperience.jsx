@@ -32,46 +32,74 @@ import {
 } from 'lucide-react'
 import { INDUSTRY_OPTIONS } from '../../../data/client/mockData'
 import KiaminaLogo from '../../common/KiaminaLogo'
+
+const TOTAL_ONBOARDING_STEPS = 2
+const COUNTRY_BASE_CURRENCY_MAP = Object.freeze({
+  Nigeria: 'NGN',
+  'United States': 'USD',
+  'United Kingdom': 'GBP',
+  Canada: 'CAD',
+  Australia: 'AUD',
+})
+const BASE_CURRENCY_LABEL_MAP = Object.freeze({
+  NGN: 'NGN - Nigerian Naira',
+  USD: 'USD - US Dollar',
+  GBP: 'GBP - British Pound',
+  CAD: 'CAD - Canadian Dollar',
+  AUD: 'AUD - Australian Dollar',
+})
+
 function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSkip, onComplete, showToast }) {
   const [errors, setErrors] = useState({})
-  const GOVERNMENT_ID_TYPE_OPTIONS = ['NIN', "Voter's Card", 'International Passport', "Driver's Licence"]
-  const MIN_GOV_ID_FILE_SIZE_BYTES = 80 * 1024
-  const MIN_GOV_ID_IMAGE_WIDTH = 600
-  const MIN_GOV_ID_IMAGE_HEIGHT = 400
 
+  const resolvedCurrentStep = Math.min(TOTAL_ONBOARDING_STEPS, Math.max(1, Number(currentStep) || 1))
   const isBusinessEntity = data.businessType === 'Business' || data.businessType === 'Non-Profit'
   const isNigeriaRegistration = (data.country || '').trim().toLowerCase() === 'nigeria'
   const registrationNumberLabel = isNigeriaRegistration || !data.country ? 'CAC Registration Number' : 'Business Registration Number'
   const registrationPlaceholder = isNigeriaRegistration || !data.country ? 'e.g., BN123456, RC123456, or IT123456' : 'e.g., BR123456'
   const stepTitle = [
+    'User profile details',
     'Tell us about your entity',
-    'Set up your tax details',
-    'Configure your financial profile',
-    'Verify your identity',
-    'Customize your experience',
-  ][currentStep - 1]
+  ][resolvedCurrentStep - 1]
+  const resolvedCurrency = BASE_CURRENCY_LABEL_MAP[data.currency] || BASE_CURRENCY_LABEL_MAP.NGN
+  const sanitizeLettersOnly = (value = '') => (
+    String(value || '')
+      .replace(/[^A-Za-z\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trimStart()
+  )
+  const sanitizeAlphaNumeric = (value = '') => String(value || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase()
+  const toTitleCaseValue = (value = '') => (
+    String(value || '')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ')
+  )
 
   const updateField = (field, value) => {
+    const normalizedValue = (() => {
+      if (field === 'cacNumber') return sanitizeAlphaNumeric(value)
+      if (field === 'primaryContact') return sanitizeLettersOnly(value)
+      return value
+    })()
     setData((prev) => {
-      const next = { ...prev, [field]: value }
+      const next = { ...prev, [field]: normalizedValue }
       if (field === 'businessType' && value === 'Individual') {
         next.cacNumber = ''
         next.businessReg = ''
       }
+      if (field === 'primaryContact') {
+        next.primaryContact = toTitleCaseValue(normalizedValue)
+      }
+      if (field === 'country') {
+        const autoCurrency = COUNTRY_BASE_CURRENCY_MAP[String(normalizedValue || '').trim()] || 'NGN'
+        next.currency = autoCurrency
+      }
       return next
     })
     setErrors(prev => ({ ...prev, [field]: '' }))
-  }
-
-  const toggleService = (service) => {
-    setData(prev => {
-      const exists = prev.servicesNeeded.includes(service)
-      return {
-        ...prev,
-        servicesNeeded: exists ? prev.servicesNeeded.filter(item => item !== service) : [...prev.servicesNeeded, service],
-      }
-    })
-    setErrors(prev => ({ ...prev, servicesNeeded: '' }))
   }
 
   const scrollToFirstInvalid = (errorMap) => {
@@ -87,7 +115,27 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
   }
 
   const validateStep = () => {
-    return {}
+    const nextErrors = {}
+    if (resolvedCurrentStep === 1) {
+      if (!String(data.primaryContact || '').trim()) nextErrors.primaryContact = 'This field is required.'
+      if (!String(data.language || '').trim()) nextErrors.language = 'This field is required.'
+    }
+    if (resolvedCurrentStep === 2) {
+      if (!String(data.businessType || '').trim()) nextErrors.businessType = 'This field is required.'
+      if (!String(data.businessName || '').trim()) nextErrors.businessName = 'This field is required.'
+      if (!String(data.country || '').trim()) nextErrors.country = 'This field is required.'
+      if (!String(data.industry || '').trim()) nextErrors.industry = 'This field is required.'
+      if (data.industry === 'Others' && !String(data.industryOther || '').trim()) nextErrors.industryOther = 'This field is required.'
+      if (isBusinessEntity) {
+        const normalizedRegistration = sanitizeAlphaNumeric(data.cacNumber)
+        if (!normalizedRegistration) {
+          nextErrors.cacNumber = 'Registration number is required.'
+        } else if (!/^(RC|BN|IT)/.test(normalizedRegistration)) {
+          nextErrors.cacNumber = 'Registration number must start with RC, BN, or IT.'
+        }
+      }
+    }
+    return nextErrors
   }
 
   const handleNext = () => {
@@ -99,7 +147,7 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
       return
     }
     setErrors({})
-    setCurrentStep(Math.min(5, currentStep + 1))
+    setCurrentStep(Math.min(TOTAL_ONBOARDING_STEPS, resolvedCurrentStep + 1))
   }
 
   const handleFinish = () => {
@@ -113,67 +161,6 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
     onComplete(data)
   }
 
-  const verifyGovernmentIdClarity = (file) => new Promise((resolve) => {
-    if (!file) {
-      resolve({ ok: false, message: 'No file selected.' })
-      return
-    }
-    if (!file.type?.startsWith('image/')) {
-      resolve({ ok: false, message: 'Government ID must be an image file.' })
-      return
-    }
-    if (file.size < MIN_GOV_ID_FILE_SIZE_BYTES) {
-      resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
-      return
-    }
-    const image = new Image()
-    const objectUrl = URL.createObjectURL(file)
-    image.onload = () => {
-      const isClear = image.width >= MIN_GOV_ID_IMAGE_WIDTH && image.height >= MIN_GOV_ID_IMAGE_HEIGHT
-      URL.revokeObjectURL(objectUrl)
-      if (!isClear) {
-        resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
-        return
-      }
-      resolve({ ok: true, message: 'Government ID uploaded successfully.' })
-    }
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      resolve({ ok: false, message: 'Unable to read image. Re-upload a clear government ID.' })
-    }
-    image.src = objectUrl
-  })
-
-  const handleOnboardingGovIdUpload = async (event) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    if (!data.govIdType) {
-      showToast('error', 'Select government ID type before uploading.')
-      event.target.value = ''
-      return
-    }
-    const clarity = await verifyGovernmentIdClarity(file)
-    if (!clarity.ok) {
-      setData((prev) => ({
-        ...prev,
-        govId: '',
-        govIdVerifiedAt: '',
-        govIdClarityStatus: 'not-clear',
-      }))
-      showToast('error', clarity.message)
-      event.target.value = ''
-      return
-    }
-    setData((prev) => ({
-      ...prev,
-      govId: file.name,
-      govIdVerifiedAt: new Date().toISOString(),
-      govIdClarityStatus: 'clear',
-    }))
-    showToast('success', clarity.message)
-    event.target.value = ''
-  }
-
   return (
     <div className="min-h-screen bg-background px-4 py-8" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
       <div className="max-w-4xl mx-auto bg-white border border-border-light rounded-xl shadow-card p-8">
@@ -183,7 +170,7 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
 
         <div className="flex items-center justify-between mb-4">
           <div>
-            <div className="text-xs font-medium text-text-muted uppercase tracking-wide">Step {currentStep} of 5</div>
+            <div className="text-xs font-medium text-text-muted uppercase tracking-wide">Step {resolvedCurrentStep} of {TOTAL_ONBOARDING_STEPS}</div>
             <h1 className="text-2xl font-semibold text-text-primary mt-1">{stepTitle}</h1>
           </div>
           <button type="button" onClick={onSkip} className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-secondary hover:bg-background transition-colors">
@@ -192,10 +179,40 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
         </div>
 
         <div className="w-full h-2 bg-border-light rounded-full mb-8">
-          <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${(currentStep / 5) * 100}%` }}></div>
+          <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${(resolvedCurrentStep / TOTAL_ONBOARDING_STEPS) * 100}%` }}></div>
         </div>
 
-        {currentStep === 1 && (
+        {resolvedCurrentStep === 1 && (
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Primary Contact Person</label>
+              <input
+                id="onboarding-primaryContact"
+                type="text"
+                value={data.primaryContact}
+                onChange={(e) => updateField('primaryContact', e.target.value)}
+                className={`w-full h-10 px-3 border rounded-md text-sm ${errors.primaryContact ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}
+              />
+              {errors.primaryContact && <p className="text-xs text-error mt-1">{errors.primaryContact}</p>}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">Account Language</label>
+              <select id="onboarding-language" value={data.language} onChange={(e) => updateField('language', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.language ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
+                <option>English</option>
+                <option>French</option>
+                <option>Portuguese</option>
+              </select>
+              {errors.language && <p className="text-xs text-error mt-1">{errors.language}</p>}
+            </div>
+            <div className="col-span-2 rounded-md border border-border-light bg-background/50 px-3 py-2.5">
+              <p className="text-xs uppercase tracking-wide text-text-muted">Base Currency</p>
+              <p className="text-sm font-medium text-text-primary mt-1">{resolvedCurrency}</p>
+              <p className="text-xs text-text-secondary mt-1">Currency is set automatically from your business country.</p>
+            </div>
+          </div>
+        )}
+
+        {resolvedCurrentStep === 2 && (
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-text-primary mb-1.5">Business Type</label>
@@ -220,6 +237,7 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
                 <option>United States</option>
                 <option>United Kingdom</option>
                 <option>Canada</option>
+                <option>Australia</option>
               </select>
               {errors.country && <p className="text-xs text-error mt-1">{errors.country}</p>}
             </div>
@@ -230,6 +248,11 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
                 {INDUSTRY_OPTIONS.map(industry => <option key={industry} value={industry}>{industry}</option>)}
               </select>
               {errors.industry && <p className="text-xs text-error mt-1">{errors.industry}</p>}
+            </div>
+            <div className="col-span-2 rounded-md border border-border-light bg-background/50 px-3 py-2.5">
+              <p className="text-xs uppercase tracking-wide text-text-muted">Base Currency</p>
+              <p className="text-sm font-medium text-text-primary mt-1">{resolvedCurrency}</p>
+              <p className="text-xs text-text-secondary mt-1">Automatically set based on the selected country.</p>
             </div>
             {data.industry === 'Others' && (
               <div className="col-span-2">
@@ -248,179 +271,11 @@ function OnboardingExperience({ currentStep, setCurrentStep, data, setData, onSk
           </div>
         )}
 
-        {currentStep === 2 && (
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">TIN</label>
-              <input id="onboarding-tin" type="text" value={data.tin} onChange={(e) => updateField('tin', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.tin ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`} />
-              {errors.tin && <p className="text-xs text-error mt-1">{errors.tin}</p>}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Reporting Cycle</label>
-              <select id="onboarding-reportingCycle" value={data.reportingCycle} onChange={(e) => updateField('reportingCycle', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.reportingCycle ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
-                <option value="">Select reporting cycle</option>
-                <option>Monthly</option>
-                <option>Quarterly</option>
-                <option>Annually</option>
-              </select>
-              {errors.reportingCycle && <p className="text-xs text-error mt-1">{errors.reportingCycle}</p>}
-            </div>
-            <div className="col-span-2">
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Start Month</label>
-              <select id="onboarding-startMonth" value={data.startMonth} onChange={(e) => updateField('startMonth', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.startMonth ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
-                <option value="">Select start month</option>
-                <option>January</option>
-                <option>February</option>
-                <option>March</option>
-                <option>April</option>
-                <option>May</option>
-                <option>June</option>
-                <option>July</option>
-                <option>August</option>
-                <option>September</option>
-                <option>October</option>
-                <option>November</option>
-                <option>December</option>
-              </select>
-              {errors.startMonth && <p className="text-xs text-error mt-1">{errors.startMonth}</p>}
-              <p className="text-xs text-text-muted mt-1">These details determine your compliance reporting schedule.</p>
-            </div>
-          </div>
-        )}
-
-        {currentStep === 3 && (
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Base Currency</label>
-              <select id="onboarding-currency" value={data.currency} onChange={(e) => updateField('currency', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.currency ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
-                <option value="NGN">NGN - Nigerian Naira</option>
-                <option value="USD">USD - US Dollar</option>
-                <option value="EUR">EUR - Euro</option>
-                <option value="GBP">GBP - British Pound</option>
-              </select>
-              {errors.currency && <p className="text-xs text-error mt-1">{errors.currency}</p>}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Account Language</label>
-              <select id="onboarding-language" value={data.language} onChange={(e) => updateField('language', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.language ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
-                <option>English</option>
-                <option>French</option>
-                <option>Portuguese</option>
-              </select>
-              {errors.language && <p className="text-xs text-error mt-1">{errors.language}</p>}
-            </div>
-            <div className="col-span-2">
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Primary Contact Person</label>
-              <input id="onboarding-primaryContact" type="text" value={data.primaryContact} onChange={(e) => updateField('primaryContact', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.primaryContact ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`} />
-              {errors.primaryContact && <p className="text-xs text-error mt-1">{errors.primaryContact}</p>}
-            </div>
-            <div className="col-span-2">
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Select Services Needed</label>
-              <div id="onboarding-servicesNeeded" className="grid grid-cols-2 gap-3">
-                {['Expenses', 'Sales', 'Bank Statements', 'Payroll', 'Tax Support'].map((service) => (
-                  <label key={service} className="inline-flex items-center gap-2 text-sm text-text-secondary border border-border rounded-md px-3 py-2">
-                    <input type="checkbox" checked={data.servicesNeeded.includes(service)} onChange={() => toggleService(service)} className="w-4 h-4 accent-primary" />
-                    {service}
-                  </label>
-                ))}
-              </div>
-              {errors.servicesNeeded && <p className="text-xs text-error mt-1">{errors.servicesNeeded}</p>}
-            </div>
-          </div>
-        )}
-
-        {currentStep === 4 && (
-          <div className="space-y-4">
-            <p className="text-sm text-text-muted">Verification helps us maintain compliance and security.</p>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Type</label>
-              <select
-                id="onboarding-govIdType"
-                value={data.govIdType || ''}
-                onChange={(event) => updateField('govIdType', event.target.value)}
-                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              >
-                <option value="">Select ID type</option>
-                {GOVERNMENT_ID_TYPE_OPTIONS.map((option) => (
-                  <option key={option} value={option}>{option}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID</label>
-              <input
-                id="onboarding-govId"
-                type="file"
-                accept="image/*"
-                onChange={handleOnboardingGovIdUpload}
-                className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
-              />
-              {data.govId && <p className="text-xs text-success mt-1">Attached: {data.govId}</p>}
-              {data.govIdClarityStatus === 'not-clear' && <p className="text-xs text-error mt-1">Government ID is not clear, re-upload.</p>}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">ID Card Number</label>
-              <input
-                id="onboarding-govIdNumber"
-                type="text"
-                value={data.govIdNumber || ''}
-                onChange={(event) => updateField('govIdNumber', event.target.value)}
-                className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-              />
-            </div>
-            {isBusinessEntity && (
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Business Registration Document (if applicable)</label>
-                <input
-                  id="onboarding-businessReg"
-                  type="file"
-                  onChange={(event) => updateField('businessReg', event.target.files?.[0]?.name || '')}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm file:mr-3 file:border-0 file:bg-background file:px-2 file:py-1"
-                />
-                {data.businessReg && <p className="text-xs text-success mt-1">Attached: {data.businessReg}</p>}
-              </div>
-            )}
-          </div>
-        )}
-
-        {currentStep === 5 && (
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Default landing page</label>
-              <select id="onboarding-defaultLandingPage" value={data.defaultLandingPage} onChange={(e) => updateField('defaultLandingPage', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.defaultLandingPage ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
-                <option value="dashboard">Dashboard Overview</option>
-                <option value="expenses">Expenses</option>
-                <option value="sales">Sales</option>
-                <option value="bank-statements">Bank Statements</option>
-              </select>
-              {errors.defaultLandingPage && <p className="text-xs text-error mt-1">{errors.defaultLandingPage}</p>}
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Upload preferences</label>
-              <select id="onboarding-uploadPreference" value={data.uploadPreference} onChange={(e) => updateField('uploadPreference', e.target.value)} className={`w-full h-10 px-3 border rounded-md text-sm ${errors.uploadPreference ? 'border-error' : 'border-border'} focus:outline-none focus:border-primary`}>
-                <option value="standard">Standard review workflow</option>
-                <option value="strict">Strict compliance review</option>
-              </select>
-              {errors.uploadPreference && <p className="text-xs text-error mt-1">{errors.uploadPreference}</p>}
-            </div>
-            <div className="col-span-2 space-y-3">
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={data.notifyEmail} onChange={(e) => updateField('notifyEmail', e.target.checked)} className="w-4 h-4 accent-primary" />
-                Email notifications for account activity
-              </label>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={data.notifyCompliance} onChange={(e) => updateField('notifyCompliance', e.target.checked)} className="w-4 h-4 accent-primary" />
-                Compliance deadline reminders
-              </label>
-            </div>
-          </div>
-        )}
-
         <div className="flex items-center justify-between mt-8 pt-6 border-t border-border-light">
-          <button type="button" onClick={() => setCurrentStep(Math.max(1, currentStep - 1))} disabled={currentStep === 1} className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+          <button type="button" onClick={() => setCurrentStep(Math.max(1, resolvedCurrentStep - 1))} disabled={resolvedCurrentStep === 1} className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
             Back
           </button>
-          {currentStep < 5 ? (
+          {resolvedCurrentStep < TOTAL_ONBOARDING_STEPS ? (
             <button type="button" onClick={handleNext} className="h-9 px-5 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors">
               Next
             </button>

@@ -3,6 +3,7 @@ import {
   deleteDocumentById,
   findDocumentById,
   listDocumentsByOwner,
+  summarizeDocumentsByOwner,
   updateDocumentById,
   updateDocumentStatus
 } from "../repositories/documents.repository.js";
@@ -11,6 +12,9 @@ export const createDocument = async (payload) => createDocumentRecord(payload);
 
 export const getDocumentsByOwner = async (ownerUserId) =>
   listDocumentsByOwner(ownerUserId);
+
+export const getDocumentSummaryByOwner = async (ownerUserId) =>
+  summarizeDocumentsByOwner(ownerUserId);
 
 export const getDocumentById = async (id) => findDocumentById(id);
 

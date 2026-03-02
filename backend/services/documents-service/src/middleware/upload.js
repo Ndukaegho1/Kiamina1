@@ -11,3 +11,4 @@ const upload = multer({
 });
 
 export const singleDocumentUploadMiddleware = upload.single("file");
+export const singleRecordsImportUploadMiddleware = upload.single("file");

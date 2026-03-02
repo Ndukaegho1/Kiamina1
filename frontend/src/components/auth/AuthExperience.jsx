@@ -32,13 +32,6 @@ import {
   Lock
 } from 'lucide-react'
 import KiaminaLogo from '../common/KiaminaLogo'
-function AppleBrandIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="w-5 h-5" aria-hidden="true">
-      <path fill="currentColor" d="M16.36 12.38c.03 3.06 2.68 4.08 2.71 4.09-.02.07-.42 1.43-1.39 2.83-.84 1.21-1.71 2.42-3.08 2.45-1.34.02-1.77-.79-3.3-.79-1.53 0-2.01.77-3.27.81-1.31.05-2.31-1.31-3.15-2.52-1.71-2.46-3.02-6.96-1.26-10.02.87-1.52 2.44-2.47 4.14-2.49 1.29-.03 2.5.87 3.3.87.8 0 2.3-1.08 3.88-.92.66.03 2.52.27 3.72 2.02-.1.06-2.22 1.3-2.2 3.87zm-2.62-6.63c.7-.84 1.17-2 1.04-3.16-1 .04-2.2.67-2.92 1.51-.64.74-1.2 1.92-1.05 3.05 1.11.09 2.24-.56 2.93-1.4z"/>
-    </svg>
-  )
-}
 
 function GoogleBrandIcon() {
   return (
@@ -47,17 +40,6 @@ function GoogleBrandIcon() {
       <path fill="#34A853" d="M12 22c2.75 0 5.07-.9 6.76-2.29l-3.31-2.57c-.92.62-2.09.98-3.45.98-2.66 0-4.9-1.8-5.7-4.21l-3.42 2.64C4.55 19.84 8.01 22 12 22z"/>
       <path fill="#4A90E2" d="M6.3 13.91A5.95 5.95 0 0 1 6 12c0-.66.11-1.3.3-1.91L2.88 7.45A9.97 9.97 0 0 0 2 12c0 1.6.38 3.11 1.05 4.45l3.25-2.54z"/>
       <path fill="#FBBC05" d="M12 5.88c1.49 0 2.82.51 3.87 1.5l2.9-2.9C17.06 2.88 14.75 2 12 2 8.01 2 4.55 4.16 2.88 7.45l3.42 2.64c.8-2.41 3.04-4.21 5.7-4.21z"/>
-    </svg>
-  )
-}
-
-function LinkedInBrandIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="w-5 h-5" aria-hidden="true">
-      <rect x="2" y="2" width="20" height="20" rx="3" fill="#0A66C2" />
-      <circle cx="8" cy="8" r="1.5" fill="white" />
-      <rect x="6.5" y="10" width="3" height="8" fill="white" />
-      <path fill="white" d="M12 10h2.88v1.1h.04c.4-.75 1.38-1.54 2.84-1.54C20.8 9.56 22 11.43 22 14.33V18h-3.02v-3.24c0-.77-.01-1.77-1.08-1.77-1.08 0-1.24.84-1.24 1.71V18H13.64v-8z"/>
     </svg>
   )
 }
@@ -76,9 +58,7 @@ function LegacyAuthExperience({ mode, setMode, onLogin, onSignup, onSocialLogin,
   const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
 
   const socialButtons = [
-    { id: 'apple', label: 'Continue with Apple', icon: AppleBrandIcon },
     { id: 'google', label: 'Continue with Google', icon: GoogleBrandIcon },
-    { id: 'linkedin', label: 'Continue with LinkedIn', icon: LinkedInBrandIcon },
   ]
 
   return (
@@ -560,9 +540,7 @@ function AuthExperience({
   const busy = Boolean(socialLoadingProvider) || isLoginLoading || isSignupLoading || isSendingResetLink || isUpdatingPassword || isSubmittingSocialName
 
   const socialButtons = [
-    { id: 'apple', label: 'Continue with Apple', icon: AppleBrandIcon },
     { id: 'google', label: 'Continue with Google', icon: GoogleBrandIcon },
-    { id: 'linkedin', label: 'Continue with LinkedIn', icon: LinkedInBrandIcon },
   ]
 
   const submitSocial = async (provider) => {
