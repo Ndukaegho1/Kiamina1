@@ -1,6 +1,7 @@
 const API_ACCESS_TOKEN_STORAGE_KEY = 'kiaminaFirebaseIdToken'
 const API_AUTH_USER_STORAGE_KEY = 'kiaminaAuthUser'
 const API_SESSION_ID_STORAGE_KEY = 'kiaminaAuthSessionId'
+let refreshAccessTokenPromise = null
 
 const safeParseJson = (rawValue, fallback = null) => {
   try {
@@ -113,22 +114,102 @@ export const clearApiSessionId = () => {
   window.sessionStorage.removeItem(API_SESSION_ID_STORAGE_KEY)
 }
 
-export const apiFetch = async (path, options = {}) => {
-  const url = buildApiUrl(path)
-  const headers = new Headers(options.headers || {})
-  const token = getApiAccessToken()
+const isAuthRoutePath = (path = '') => {
+  const normalized = String(normalizeApiPath(path) || '').toLowerCase()
+  return normalized.endsWith('/auth/refresh-token')
+}
+
+const resolveSessionRememberPreference = () => {
+  if (typeof window === 'undefined') return true
+  if (window.localStorage.getItem(API_SESSION_ID_STORAGE_KEY)) return true
+  if (window.sessionStorage.getItem(API_SESSION_ID_STORAGE_KEY)) return false
+  if (window.localStorage.getItem(API_AUTH_USER_STORAGE_KEY)) return true
+  if (window.sessionStorage.getItem(API_AUTH_USER_STORAGE_KEY)) return false
+  if (window.localStorage.getItem(API_ACCESS_TOKEN_STORAGE_KEY)) return true
+  if (window.sessionStorage.getItem(API_ACCESS_TOKEN_STORAGE_KEY)) return false
+  return true
+}
+
+const refreshAccessTokenSession = async () => {
+  if (typeof window === 'undefined') {
+    return { ok: false, status: 0, data: null }
+  }
+
   const sessionId = getApiSessionId()
-  if (token && !headers.has('Authorization')) {
-    headers.set('Authorization', `Bearer ${token}`)
+  const payload = sessionId ? { sessionId } : {}
+
+  try {
+    const response = await fetch(buildApiUrl('/auth/refresh-token'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      return { ok: false, status: response.status, data }
+    }
+
+    const nextSessionId = String(data?.session?.sessionId || sessionId).trim()
+    if (nextSessionId) {
+      setApiSessionId(nextSessionId, { remember: resolveSessionRememberPreference() })
+    }
+
+    return { ok: true, status: response.status, data }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      data: { message: String(error?.message || 'Network request failed.') },
+    }
   }
-  if (sessionId && !headers.has('x-session-id')) {
-    headers.set('x-session-id', sessionId)
+}
+
+const ensureAccessTokenRefreshed = async () => {
+  if (refreshAccessTokenPromise) return refreshAccessTokenPromise
+
+  refreshAccessTokenPromise = refreshAccessTokenSession()
+    .finally(() => {
+      refreshAccessTokenPromise = null
+    })
+
+  return refreshAccessTokenPromise
+}
+
+export const apiFetch = async (path, options = {}) => {
+  const requestOptions = { ...options }
+  delete requestOptions.skipAuthRefreshRetry
+
+  const executeRequest = async () => {
+    const url = buildApiUrl(path)
+    const headers = new Headers(requestOptions.headers || {})
+    const token = getApiAccessToken()
+    const sessionId = getApiSessionId()
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`)
+    }
+    if (sessionId && !headers.has('x-session-id')) {
+      headers.set('x-session-id', sessionId)
+    }
+    return fetch(url, {
+      ...requestOptions,
+      credentials: requestOptions.credentials || 'include',
+      headers,
+    })
   }
-  return fetch(url, {
-    ...options,
-    credentials: options.credentials || 'include',
-    headers,
-  })
+
+  const shouldSkipRefreshRetry = Boolean(options.skipAuthRefreshRetry) || isAuthRoutePath(path)
+  const initialResponse = await executeRequest()
+  if (initialResponse.status !== 401 || shouldSkipRefreshRetry) {
+    return initialResponse
+  }
+
+  const refreshResult = await ensureAccessTokenRefreshed()
+  if (!refreshResult.ok) {
+    return initialResponse
+  }
+
+  return executeRequest()
 }
 
 export const API_ACCESS_TOKEN_KEY = API_ACCESS_TOKEN_STORAGE_KEY

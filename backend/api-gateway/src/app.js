@@ -13,16 +13,29 @@ const app = express();
 
 morgan.token("id", (req) => req.id || "-");
 
+const isAllowedOrigin = (origin = "") => {
+  if (!origin) return true;
+  if (env.corsOrigins.length === 0 || env.corsOrigins.includes(origin)) {
+    return true;
+  }
+
+  // Keep production strict. In local development, allow dynamic ports/LAN origins.
+  if (env.nodeEnv === "development") return true;
+  return false;
+};
+
 app.use(requestIdMiddleware);
 app.use(helmet());
 app.use(
   cors({
     credentials: true,
     origin(origin, callback) {
-      if (!origin || env.corsOrigins.length === 0 || env.corsOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Origin not allowed by CORS policy"));
+      const corsError = new Error("Origin not allowed by CORS policy");
+      corsError.status = 403;
+      return callback(corsError);
     }
   })
 );

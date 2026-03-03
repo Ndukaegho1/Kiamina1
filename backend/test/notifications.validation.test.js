@@ -18,6 +18,10 @@ import {
   buildKnowledgeBaseArticleUpdatePayload,
   validateCreateKnowledgeBaseArticlePayload
 } from "../services/notifications-service/src/validation/knowledge-base.validation.js";
+import {
+  validateRealtimePublishPayload,
+  validateRealtimeStreamQuery
+} from "../services/notifications-service/src/validation/realtime-events.validation.js";
 
 test("notifications: send-email validator normalizes recipient list", () => {
   const { errors, payload } = validateSendEmailPayload({
@@ -95,4 +99,26 @@ test("knowledge-base: update payload rejects invalid category", () => {
   assert.ok(
     errors.includes("category must be one of [faq, billing, technical, security, getting-started, other]")
   );
+});
+
+test("realtime events: publish payload accepts scoped audience", () => {
+  const { errors, payload } = validateRealtimePublishPayload({
+    eventType: "client.workspace.updated",
+    topic: "users",
+    audience: {
+      userIds: ["uid_1"],
+      roles: ["admin"]
+    },
+    payload: { updatedAt: "2026-03-03T00:00:00.000Z" }
+  });
+
+  assert.deepEqual(errors, []);
+  assert.equal(payload.eventType, "client.workspace.updated");
+  assert.equal(payload.topic, "users");
+  assert.deepEqual(payload.audience.userIds, ["uid_1"]);
+});
+
+test("realtime events: stream query validator rejects invalid scope", () => {
+  const { errors } = validateRealtimeStreamQuery({ scope: "team" });
+  assert.ok(errors.includes("scope must be one of: me, all"));
 });

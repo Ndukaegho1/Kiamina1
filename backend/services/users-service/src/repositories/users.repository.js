@@ -34,6 +34,19 @@ export const findUserByEmail = async (email) =>
 
 export const findUserById = async (id) => User.findById(id);
 
+export const listUsers = async ({
+  filter = {},
+  sort = { updatedAt: -1 },
+  skip = 0,
+  limit = 50
+} = {}) =>
+  User.find(filter)
+    .sort(sort)
+    .skip(Math.max(0, Number(skip) || 0))
+    .limit(Math.max(1, Number(limit) || 50));
+
+export const countUsers = async (filter = {}) => User.countDocuments(filter);
+
 export const updateUserById = async (id, payload) =>
   User.findByIdAndUpdate(id, payload, {
     new: true,

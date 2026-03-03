@@ -23,6 +23,9 @@ const isRequestCacheable = (req) => {
   if (normalizedPath.startsWith("/auth")) {
     return false;
   }
+  if (normalizedPath.startsWith("/notifications/events/stream")) {
+    return false;
+  }
 
   const cacheControlHeader = String(req.headers["cache-control"] || "").toLowerCase();
   if (cacheControlHeader.includes("no-cache") || cacheControlHeader.includes("no-store")) {

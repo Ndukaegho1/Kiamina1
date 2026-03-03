@@ -5,6 +5,7 @@ import {
   replaceNotificationLog,
   updateNotificationStatus
 } from "../services/notifications.service.js";
+import { publishRealtimeEvent } from "../services/realtime-events.service.js";
 import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
 import {
   buildNotificationLogUpdatePayload,
@@ -38,6 +39,14 @@ const requireAdminActor = (req, res) => {
   return actor;
 };
 
+const emitNotificationEvent = (eventPayload = {}) => {
+  try {
+    publishRealtimeEvent(eventPayload);
+  } catch (error) {
+    console.error("notifications realtime emit warning:", error.message);
+  }
+};
+
 export const sendEmail = async (req, res, next) => {
   try {
     const actor = requireAdminActor(req, res);
@@ -51,6 +60,27 @@ export const sendEmail = async (req, res, next) => {
     }
 
     const log = await queueEmailNotification(payload);
+    emitNotificationEvent({
+      eventType: "notifications.email.queued",
+      topic: "notifications",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        logId: log.id,
+        status: log.status,
+        recipients: String(log.to || "")
+          .split(",")
+          .map((entry) => entry.trim())
+          .filter(Boolean)
+          .length
+      }
+    });
     return res.status(202).json({
       message: "Notification queued.",
       log
@@ -97,6 +127,23 @@ export const patchLogStatus = async (req, res, next) => {
       return res.status(404).json({ message: "Notification log not found" });
     }
 
+    emitNotificationEvent({
+      eventType: "notifications.log.status-updated",
+      topic: "notifications",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        logId: updated.id,
+        status: updated.status
+      }
+    });
+
     return res.status(200).json(updated);
   } catch (error) {
     return next(error);
@@ -131,6 +178,23 @@ export const putLog = async (req, res, next) => {
       return res.status(404).json({ message: "Notification log not found" });
     }
 
+    emitNotificationEvent({
+      eventType: "notifications.log.updated",
+      topic: "notifications",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        logId: updated.id,
+        status: updated.status
+      }
+    });
+
     return res.status(200).json(updated);
   } catch (error) {
     return next(error);
@@ -148,6 +212,22 @@ export const deleteLog = async (req, res, next) => {
     if (!deleted) {
       return res.status(404).json({ message: "Notification log not found" });
     }
+
+    emitNotificationEvent({
+      eventType: "notifications.log.deleted",
+      topic: "notifications",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        logId: deleted.id
+      }
+    });
 
     return res.status(200).json({
       message: "Notification log deleted successfully.",

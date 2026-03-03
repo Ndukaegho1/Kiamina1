@@ -1,23 +1,31 @@
 import {
   deleteUser,
   ensureUserFromActor,
+  getClientManagementClientByUidForAdmin,
+  listClientManagementClientsForAdmin,
   getAdminDashboardByUid,
   getClientDashboardByUid,
   getClientDashboardOverviewByUid,
+  getClientWorkspaceByUid,
   getMeByUid,
   getUserById,
   updateAdminDashboardByUid,
+  updateClientManagementClientByUidForAdmin,
   updateClientDashboardByUid,
   updateClientProfileByUid,
+  updateClientWorkspaceByUid,
   syncUserFromAuth,
   updateUser
 } from "../services/users.service.js";
 import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
 import {
+  buildAdminClientManagementUpdatePayload,
   buildAdminDashboardUpdatePayload,
   buildClientDashboardUpdatePayload,
   buildClientProfileUpdatePayload,
+  buildClientWorkspaceUpdatePayload,
   buildUserUpdatePayload,
+  validateAdminClientManagementListQuery,
   validateSyncFromAuthPayload
 } from "../validation/users.validation.js";
 
@@ -108,6 +116,7 @@ export const patchMeProfile = async (req, res, next) => {
 
     const updated = await updateClientProfileByUid({
       uid: actor.uid,
+      actorUid: actor.uid,
       actorEmail: actor.email,
       actorRoles: actor.roles,
       payload
@@ -170,6 +179,7 @@ export const patchMeClientDashboard = async (req, res, next) => {
 
     const dashboard = await updateClientDashboardByUid({
       uid: actor.uid,
+      actorUid: actor.uid,
       actorEmail: actor.email,
       actorRoles: actor.roles,
       payload
@@ -205,6 +215,168 @@ export const getMeClientDashboardOverview = async (req, res, next) => {
     }
 
     return res.status(200).json(overview);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getMeClientWorkspace = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const workspace = await getClientWorkspaceByUid({
+      uid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles
+    });
+
+    if (!workspace) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(workspace);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const patchMeClientWorkspace = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const { payload, errors } = buildClientWorkspaceUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message:
+          "Provide at least one workspace field: documents, activityLog, onboardingState, settingsProfile, verificationDocs, statusControl, notificationSettings, profilePhoto, companyLogo"
+      });
+    }
+
+    const workspace = await updateClientWorkspaceByUid({
+      uid: actor.uid,
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      payload
+    });
+
+    if (!workspace) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(workspace);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getAdminClientManagement = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can access client management." });
+    }
+
+    const { errors, payload } = validateAdminClientManagementListQuery(req.query);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const result = await listClientManagementClientsForAdmin({
+      query: payload
+    });
+
+    return res.status(200).json(result);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getAdminClientManagementClient = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can access client management." });
+    }
+
+    const client = await getClientManagementClientByUidForAdmin({
+      uid: String(req.params.uid || "").trim()
+    });
+
+    if (!client) {
+      return res.status(404).json({ message: "Client account not found" });
+    }
+
+    return res.status(200).json(client);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const patchAdminClientManagementClient = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can update client management." });
+    }
+
+    const { payload, errors } = buildAdminClientManagementUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message:
+          "Provide at least one field to update: status, roles, verificationStatus, verificationPending, businessType, businessName, country, currency, assignedToUid, assignmentNotes, statusReason, tags"
+      });
+    }
+
+    const updated = await updateClientManagementClientByUidForAdmin({
+      uid: String(req.params.uid || "").trim(),
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      payload
+    });
+
+    if (!updated) {
+      return res.status(404).json({ message: "Client account not found" });
+    }
+
+    return res.status(200).json(updated);
   } catch (error) {
     return next(error);
   }
@@ -266,6 +438,7 @@ export const patchMeAdminDashboard = async (req, res, next) => {
 
     const dashboard = await updateAdminDashboardByUid({
       uid: actor.uid,
+      actorUid: actor.uid,
       actorEmail: actor.email,
       actorRoles: actor.roles,
       payload

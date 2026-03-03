@@ -7,6 +7,7 @@ import {
   listChatSessionsForActor,
   postChatMessageForSession
 } from "../services/chatbot.service.js";
+import { publishRealtimeEvent } from "../services/realtime-events.service.js";
 import {
   validateChatMessagesListQuery,
   validateChatSessionsListQuery,
@@ -27,6 +28,14 @@ const requireActor = (req, res) => {
   return actor;
 };
 
+const emitChatbotEvent = (eventPayload = {}) => {
+  try {
+    publishRealtimeEvent(eventPayload);
+  } catch (error) {
+    console.error("chatbot realtime emit warning:", error.message);
+  }
+};
+
 export const createSession = async (req, res, next) => {
   try {
     const actor = requireActor(req, res);
@@ -38,6 +47,23 @@ export const createSession = async (req, res, next) => {
     }
 
     const result = await createChatSessionForActor({ actor, payload });
+    emitChatbotEvent({
+      eventType: result.created ? "chatbot.session.created" : "chatbot.session.reused",
+      topic: "chatbot",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        userIds: [result.session.ownerUserId],
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        sessionId: result.session.sessionId,
+        status: result.session.status
+      }
+    });
     return res.status(result.created ? 201 : 200).json({
       message: result.created ? "Chat session created." : "Active chat session reused.",
       session: result.session
@@ -125,6 +151,24 @@ export const postSessionMessage = async (req, res, next) => {
       isAdmin: isAdminActor(actor),
       payload
     });
+    emitChatbotEvent({
+      eventType: "chatbot.message.created",
+      topic: "chatbot",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        userIds: [result.session.ownerUserId],
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        sessionId: result.session.sessionId,
+        userMessageId: result.userMessage?.id || "",
+        assistantMessageId: result.assistantMessage?.id || ""
+      }
+    });
 
     return res.status(201).json(result);
   } catch (error) {
@@ -147,6 +191,24 @@ export const escalateSession = async (req, res, next) => {
       actor,
       isAdmin: isAdminActor(actor),
       payload
+    });
+    emitChatbotEvent({
+      eventType: result.escalated ? "chatbot.session.escalated" : "chatbot.session.escalation-reused",
+      topic: "chatbot",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        userIds: [result.session.ownerUserId],
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        sessionId: result.session.sessionId,
+        ticketId: result.ticketId,
+        status: result.session.status
+      }
     });
 
     return res.status(200).json({

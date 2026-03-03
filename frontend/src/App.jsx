@@ -36,12 +36,16 @@ import { getScopedStorageKey } from './utils/storage'
 import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
 import DotLottiePreloader from './components/common/DotLottiePreloader'
 import { getNetworkAwareDurationMs, getNetworkConnectionSnapshot, isPageReloadNavigation } from './utils/networkRuntime'
-import { apiFetch, clearApiAccessToken, clearApiSessionId, setApiAccessToken } from './utils/apiClient'
+import { apiFetch, clearApiAccessToken, clearApiSessionId, getApiSessionId, setApiAccessToken } from './utils/apiClient'
 import {
+  fetchAdminClientManagementFromBackend,
   fetchClientDashboardOverviewFromBackend,
+  fetchClientWorkspaceFromBackend,
+  patchClientWorkspaceToBackend,
   persistClientOnboardingToBackend,
   recordAuthLoginSession,
   registerAuthAccountRecord,
+  subscribeToRealtimeEvents,
 } from './utils/clientBackendBridge'
 import {
   isClientNotificationSoundPrimed,
@@ -74,7 +78,6 @@ const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
 const IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaImpersonationSession'
 const ADMIN_IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaAdminImpersonationSession'
-const OTP_PREVIEW_STORAGE_KEY = 'kiaminaOtpPreview'
 const CLIENT_DOCUMENTS_STORAGE_KEY = 'kiaminaClientDocuments'
 const CLIENT_ACTIVITY_STORAGE_KEY = 'kiaminaClientActivityLog'
 const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
@@ -176,42 +179,174 @@ const normalizeUser = (user) => {
   })
 }
 
+const readErrorMessageFromResponse = async (response) => {
+  try {
+    const payload = await response.json()
+    return String(payload?.message || payload?.error || '').trim()
+  } catch {
+    return ''
+  }
+}
+
+const requestFirebaseIdentityToolkit = async ({
+  endpoint = '',
+  payload = {},
+} = {}) => {
+  if (!FIREBASE_WEB_API_KEY || !endpoint) {
+    return { ok: false, status: 0, data: null }
+  }
+
+  const abortController = typeof AbortController === 'function' ? new AbortController() : null
+  const timeoutId = abortController
+    ? setTimeout(() => abortController.abort(), 10000)
+    : null
+
+  try {
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/${endpoint}?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: abortController?.signal,
+      },
+    )
+    const data = await response.json().catch(() => ({}))
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+    }
+  } catch {
+    return { ok: false, status: 0, data: null }
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
+}
+
 const issueFirebaseIdTokenForCredentials = async ({
   email = '',
   password = '',
 } = {}) => {
   const normalizedEmail = String(email || '').trim().toLowerCase()
   const normalizedPassword = String(password || '')
-  if (!FIREBASE_WEB_API_KEY || !normalizedEmail || !normalizedPassword) {
-    return ''
+  if (!normalizedEmail || !normalizedPassword) {
+    return { ok: false, idToken: '', uid: '', email: '', message: 'Email and password are required.' }
   }
 
-  const abortController = typeof AbortController === 'function' ? new AbortController() : null
-  const timeoutId = abortController
-    ? setTimeout(() => abortController.abort(), 8000)
-    : null
+  const response = await requestFirebaseIdentityToolkit({
+    endpoint: 'accounts:signInWithPassword',
+    payload: {
+      email: normalizedEmail,
+      password: normalizedPassword,
+      returnSecureToken: true,
+    },
+  })
+  if (!response.ok) {
+    return {
+      ok: false,
+      idToken: '',
+      uid: '',
+      email: '',
+      message: 'Invalid credentials. Please try again.',
+    }
+  }
+
+  return {
+    ok: true,
+    idToken: String(response.data?.idToken || '').trim(),
+    uid: String(response.data?.localId || '').trim(),
+    email: String(response.data?.email || normalizedEmail).trim().toLowerCase(),
+    message: '',
+  }
+}
+
+const createFirebaseAccountWithCredentials = async ({
+  email = '',
+  password = '',
+  fullName = '',
+} = {}) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const normalizedPassword = String(password || '')
+  const normalizedFullName = String(fullName || '').trim()
+  if (!normalizedEmail || !normalizedPassword) {
+    return { ok: false, idToken: '', uid: '', email: '', message: 'Email and password are required.' }
+  }
+
+  const signupResponse = await requestFirebaseIdentityToolkit({
+    endpoint: 'accounts:signUp',
+    payload: {
+      email: normalizedEmail,
+      password: normalizedPassword,
+      returnSecureToken: true,
+    },
+  })
+  if (!signupResponse.ok) {
+    const firebaseCode = String(signupResponse.data?.error?.message || '').trim().toUpperCase()
+    if (firebaseCode.includes('EMAIL_EXISTS')) {
+      return { ok: false, idToken: '', uid: '', email: '', message: 'An account with this email already exists.' }
+    }
+    return { ok: false, idToken: '', uid: '', email: '', message: 'Unable to create account right now.' }
+  }
+
+  const idToken = String(signupResponse.data?.idToken || '').trim()
+  if (idToken && normalizedFullName) {
+    await requestFirebaseIdentityToolkit({
+      endpoint: 'accounts:update',
+      payload: {
+        idToken,
+        displayName: normalizedFullName,
+        returnSecureToken: false,
+      },
+    })
+  }
+
+  return {
+    ok: true,
+    idToken,
+    uid: String(signupResponse.data?.localId || '').trim(),
+    email: String(signupResponse.data?.email || normalizedEmail).trim().toLowerCase(),
+    message: '',
+  }
+}
+
+const resolveIdentityFromAuthTokens = async ({
+  idToken = '',
+  accessToken = '',
+  sessionId = '',
+} = {}) => {
+  const normalizedIdToken = String(idToken || '').trim()
+  const normalizedAccessToken = String(accessToken || '').trim()
+  const normalizedSessionId = String(sessionId || '').trim()
+  if (!normalizedIdToken && !normalizedAccessToken) {
+    return { ok: false, uid: '', email: '', roles: [], message: 'Missing authentication token.' }
+  }
 
   try {
-    const response = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: normalizedEmail,
-          password: normalizedPassword,
-          returnSecureToken: true,
-        }),
-        signal: abortController?.signal,
-      },
-    )
-    if (!response.ok) return ''
+    const response = await apiFetch('/api/auth/verify-token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        idToken: normalizedIdToken,
+        accessToken: normalizedAccessToken,
+        sessionId: normalizedSessionId,
+      }),
+    })
+    if (!response.ok) {
+      const message = await readErrorMessageFromResponse(response)
+      return { ok: false, uid: '', email: '', roles: [], message: message || 'Unable to verify token.' }
+    }
     const payload = await response.json().catch(() => ({}))
-    return String(payload?.idToken || '').trim()
+    const roles = Array.isArray(payload?.roles) ? payload.roles : []
+    return {
+      ok: true,
+      uid: String(payload?.uid || '').trim(),
+      email: String(payload?.email || '').trim().toLowerCase(),
+      roles: roles.map((role) => String(role || '').trim().toLowerCase()).filter(Boolean),
+      message: '',
+    }
   } catch {
-    return ''
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId)
+    return { ok: false, uid: '', email: '', roles: [], message: 'Unable to verify token.' }
   }
 }
 
@@ -895,6 +1030,24 @@ const createDefaultClientDocuments = () => {
   }
 }
 
+const CLIENT_WORKSPACE_MEMORY_CACHE = new Map()
+
+const getClientWorkspaceCache = (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return null
+  return CLIENT_WORKSPACE_MEMORY_CACHE.get(normalizedEmail) || null
+}
+
+const setClientWorkspaceCache = (email = '', workspace = {}) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return
+  const existing = getClientWorkspaceCache(normalizedEmail) || {}
+  CLIENT_WORKSPACE_MEMORY_CACHE.set(normalizedEmail, {
+    ...existing,
+    ...(workspace && typeof workspace === 'object' ? workspace : {}),
+  })
+}
+
 const normalizeUploadHistoryRows = (rows = [], ownerEmail = '') => (
   (Array.isArray(rows) ? rows : [])
     .filter((row) => row && typeof row === 'object' && !row.isFolder)
@@ -910,29 +1063,19 @@ const normalizeUploadHistoryRows = (rows = [], ownerEmail = '') => (
 const readClientDocuments = (email, ownerName = '') => {
   const fallback = createDefaultClientDocuments(ownerName)
   if (!email) return fallback
-
-  const scopedKey = getScopedStorageKey(CLIENT_DOCUMENTS_STORAGE_KEY, email)
-  const rawScopedValue = localStorage.getItem(scopedKey)
-  const rawFallbackValue = localStorage.getItem(CLIENT_DOCUMENTS_STORAGE_KEY)
-  const source = rawScopedValue || rawFallbackValue
-  if (!source) return fallback
-
-  try {
-    const parsed = JSON.parse(source)
-    if (!parsed || typeof parsed !== 'object') return fallback
-    return {
-      expenses: Array.isArray(parsed.expenses) ? cloneDocumentRows(parsed.expenses) : fallback.expenses,
-      sales: Array.isArray(parsed.sales) ? cloneDocumentRows(parsed.sales) : fallback.sales,
-      bankStatements: Array.isArray(parsed.bankStatements) ? cloneDocumentRows(parsed.bankStatements) : fallback.bankStatements,
-      uploadHistory: normalizeUploadHistoryRows(
-        Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
-        email,
-      ),
-      expenseClassOptions: normalizeClassOptions(parsed.expenseClassOptions || fallback.expenseClassOptions),
-      salesClassOptions: normalizeClassOptions(parsed.salesClassOptions || fallback.salesClassOptions),
-    }
-  } catch {
-    return fallback
+  const workspaceCache = getClientWorkspaceCache(email)
+  const parsed = workspaceCache?.documents
+  if (!parsed || typeof parsed !== 'object') return fallback
+  return {
+    expenses: Array.isArray(parsed.expenses) ? cloneDocumentRows(parsed.expenses) : fallback.expenses,
+    sales: Array.isArray(parsed.sales) ? cloneDocumentRows(parsed.sales) : fallback.sales,
+    bankStatements: Array.isArray(parsed.bankStatements) ? cloneDocumentRows(parsed.bankStatements) : fallback.bankStatements,
+    uploadHistory: normalizeUploadHistoryRows(
+      Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
+      email,
+    ),
+    expenseClassOptions: normalizeClassOptions(parsed.expenseClassOptions || fallback.expenseClassOptions),
+    salesClassOptions: normalizeClassOptions(parsed.salesClassOptions || fallback.salesClassOptions),
   }
 }
 
@@ -979,7 +1122,6 @@ const persistClientDocuments = (email, documents) => {
       }
     })
   )
-  const scopedKey = getScopedStorageKey(CLIENT_DOCUMENTS_STORAGE_KEY, email)
   const payload = {
     ...documents,
     expenses: sanitizeCategoryRows(documents.expenses),
@@ -989,25 +1131,16 @@ const persistClientDocuments = (email, documents) => {
     expenseClassOptions: normalizeClassOptions(documents.expenseClassOptions),
     salesClassOptions: normalizeClassOptions(documents.salesClassOptions),
   }
-  try {
-    localStorage.setItem(scopedKey, JSON.stringify(payload))
-  } catch {
-    // Ignore storage quota failures so the UI remains usable for uploaded-file actions.
-  }
+  setClientWorkspaceCache(email, {
+    documents: payload,
+  })
 }
 
 const appendClientActivityLog = (email, entry = {}) => {
   const normalizedEmail = email?.trim()?.toLowerCase()
   if (!normalizedEmail) return null
-
-  const key = getScopedStorageKey(CLIENT_ACTIVITY_STORAGE_KEY, normalizedEmail)
-  let existing = []
-  try {
-    const parsed = JSON.parse(localStorage.getItem(key) || '[]')
-    existing = Array.isArray(parsed) ? parsed : []
-  } catch {
-    existing = []
-  }
+  const workspaceCache = getClientWorkspaceCache(normalizedEmail) || {}
+  const existing = Array.isArray(workspaceCache.activityLog) ? workspaceCache.activityLog : []
 
   const timestampIso = new Date().toISOString()
   const logEntry = {
@@ -1018,20 +1151,17 @@ const appendClientActivityLog = (email, entry = {}) => {
     details: entry.details || '--',
     timestamp: timestampIso,
   }
-  localStorage.setItem(key, JSON.stringify([logEntry, ...existing]))
+  setClientWorkspaceCache(normalizedEmail, {
+    activityLog: [logEntry, ...existing],
+  })
   return logEntry
 }
 
 const readClientActivityLogEntries = (email) => {
   const normalizedEmail = email?.trim()?.toLowerCase()
   if (!normalizedEmail) return []
-  const key = getScopedStorageKey(CLIENT_ACTIVITY_STORAGE_KEY, normalizedEmail)
-  try {
-    const parsed = JSON.parse(localStorage.getItem(key) || '[]')
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
+  const workspaceCache = getClientWorkspaceCache(normalizedEmail)
+  return Array.isArray(workspaceCache?.activityLog) ? workspaceCache.activityLog : []
 }
 
 const normalizeVerificationDocs = (payload = {}) => ({
@@ -1078,47 +1208,20 @@ const normalizeSettingsProfile = (payload = {}) => {
 }
 
 const readScopedSettingsProfile = (email = '') => {
-  const normalizedEmail = String(email || '').trim().toLowerCase()
-  const scopedKey = getScopedStorageKey('settingsFormData', normalizedEmail)
-  const keysToCheck = scopedKey === 'settingsFormData'
-    ? ['settingsFormData']
-    : [scopedKey, 'settingsFormData']
-  for (const key of keysToCheck) {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(key) || 'null')
-      if (!parsed || typeof parsed !== 'object') continue
-      return normalizeSettingsProfile(parsed)
-    } catch {
-      // continue fallback keys
-    }
-  }
-  return normalizeSettingsProfile({})
+  const workspaceCache = getClientWorkspaceCache(email)
+  return normalizeSettingsProfile(workspaceCache?.settingsProfile || {})
 }
 
 const readScopedVerificationDocs = (email = '') => {
-  const normalizedEmail = String(email || '').trim().toLowerCase()
-  const scopedKey = getScopedStorageKey('verificationDocs', normalizedEmail)
-  const keysToCheck = scopedKey === 'verificationDocs'
-    ? ['verificationDocs']
-    : [scopedKey, 'verificationDocs']
-  for (const key of keysToCheck) {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(key) || 'null')
-      if (!parsed || typeof parsed !== 'object') continue
-      return normalizeVerificationDocs(parsed)
-    } catch {
-      // continue fallback keys
-    }
-  }
-  return normalizeVerificationDocs({})
+  const workspaceCache = getClientWorkspaceCache(email)
+  return normalizeVerificationDocs(workspaceCache?.verificationDocs || {})
 }
 
 const persistScopedVerificationDocs = (email = '', docs = {}) => {
-  const normalizedEmail = String(email || '').trim().toLowerCase()
-  if (!normalizedEmail) return
-  const key = getScopedStorageKey('verificationDocs', normalizedEmail)
   const normalizedDocs = normalizeVerificationDocs(docs)
-  localStorage.setItem(key, JSON.stringify(normalizedDocs))
+  setClientWorkspaceCache(email, {
+    verificationDocs: normalizedDocs,
+  })
 }
 
 const removeScopedClientArtifacts = (email = '') => {
@@ -1259,17 +1362,9 @@ function App() {
   }
 
   const getSavedScopedJson = (baseKey, email) => {
-    const scopedKey = getScopedStorageKey(baseKey, email)
-    const keysToCheck = scopedKey === baseKey ? [baseKey] : [scopedKey, baseKey]
-    for (const key of keysToCheck) {
-      try {
-        const saved = localStorage.getItem(key)
-        if (!saved) continue
-        return JSON.parse(saved)
-      } catch {
-        // Keep checking fallback keys when one entry is malformed.
-      }
-    }
+    const workspaceCache = getClientWorkspaceCache(email) || {}
+    if (baseKey === 'settingsFormData') return workspaceCache.settingsProfile || null
+    if (baseKey === 'kiaminaOnboardingState') return workspaceCache.onboardingState || null
     return null
   }
   const getSavedCompanyName = (email, fallback = '') => {
@@ -1283,12 +1378,9 @@ function App() {
     return normalizedProfile.firstName || normalizedProfile.fullName?.trim()?.split(/\s+/)?.[0] || fallback
   }
   const getSavedScopedString = (baseKey, email) => {
-    const scopedKey = getScopedStorageKey(baseKey, email)
-    const keysToCheck = scopedKey === baseKey ? [baseKey] : [scopedKey, baseKey]
-    for (const key of keysToCheck) {
-      const saved = localStorage.getItem(key)
-      if (saved) return saved
-    }
+    const workspaceCache = getClientWorkspaceCache(email) || {}
+    if (baseKey === 'profilePhoto') return workspaceCache.profilePhoto || ''
+    if (baseKey === 'companyLogo') return workspaceCache.companyLogo || ''
     return null
   }
   const getSavedProfilePhoto = (email) => getSavedScopedString('profilePhoto', email)
@@ -1382,14 +1474,6 @@ function App() {
       skipped: Boolean(parsed.skipped),
       verificationPending: parsed.verificationPending !== undefined ? Boolean(parsed.verificationPending) : true,
       data: { ...defaultOnboardingData, ...(parsed.data || {}) },
-    }
-  }
-  const getOtpStore = () => {
-    try {
-      const saved = sessionStorage.getItem('kiaminaOtpStore')
-      return saved ? JSON.parse(saved) : {}
-    } catch {
-      return {}
     }
   }
   const getStoredImpersonationSession = () => {
@@ -1490,7 +1574,6 @@ function App() {
     })
     return onboardingProgress.docs
   })
-  const [otpStore, setOtpStore] = useState(getOtpStore)
   const [otpChallenge, setOtpChallenge] = useState(null)
   const [passwordResetEmail, setPasswordResetEmail] = useState('')
   const [activePage, setActivePage] = useState(() => getDefaultPageForRole(initialAuthUser?.role))
@@ -2428,35 +2511,96 @@ function App() {
       setVerificationDocsSnapshot(normalizeVerificationDocs({}))
       return
     }
-    const savedOnboardingState = getSavedOnboardingState(scopedClientEmail)
-    setOnboardingState(savedOnboardingState)
-    const savedSettingsProfile = readScopedSettingsProfile(scopedClientEmail)
-    const savedVerificationProgress = resolveVerificationProgress({
-      onboardingData: savedOnboardingState.data,
-      settingsDocs: readScopedVerificationDocs(scopedClientEmail),
-      settingsProfile: savedSettingsProfile,
-    })
-    setSettingsProfileSnapshot(savedVerificationProgress.profile)
-    setVerificationDocsSnapshot(savedVerificationProgress.docs)
-    persistScopedVerificationDocs(scopedClientEmail, savedVerificationProgress.docs)
-    const fallbackCompanyName = impersonationSession?.businessName || ''
-    const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
-      || authUser?.fullName?.trim()?.split(/\s+/)?.[0]
-      || 'Client'
-    setCompanyName(getSavedCompanyName(scopedClientEmail, fallbackCompanyName))
-    setClientFirstName(getSavedClientFirstName(scopedClientEmail, fallbackFirstName))
-    setProfilePhoto(getSavedProfilePhoto(scopedClientEmail))
-    setCompanyLogo(getSavedCompanyLogo(scopedClientEmail))
-    const fallbackOwnerName = impersonationSession?.clientName || authUser?.fullName || fallbackFirstName
-    const scopedDocuments = readClientDocuments(scopedClientEmail, fallbackOwnerName)
-    setExpenseDocuments(ensureFolderStructuredRecords(scopedDocuments.expenses, 'expenses'))
-    setSalesDocuments(ensureFolderStructuredRecords(scopedDocuments.sales, 'sales'))
-    setBankStatementDocuments(ensureFolderStructuredRecords(scopedDocuments.bankStatements, 'bankStatements'))
-    setExpenseClassOptions(normalizeClassOptions(scopedDocuments.expenseClassOptions))
-    setSalesClassOptions(normalizeClassOptions(scopedDocuments.salesClassOptions))
-    setUploadHistoryRecords(scopedDocuments.uploadHistory)
-    setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
-  }, [scopedClientEmail, impersonationSession?.businessName, impersonationSession?.clientName, authUser?.fullName])
+
+    const token = String(authUser?.firebaseIdToken || '').trim()
+    if (!token || isImpersonatingClient) {
+      const savedOnboardingState = getSavedOnboardingState(scopedClientEmail)
+      setOnboardingState(savedOnboardingState)
+      const savedSettingsProfile = readScopedSettingsProfile(scopedClientEmail)
+      const savedVerificationProgress = resolveVerificationProgress({
+        onboardingData: savedOnboardingState.data,
+        settingsDocs: readScopedVerificationDocs(scopedClientEmail),
+        settingsProfile: savedSettingsProfile,
+      })
+      setSettingsProfileSnapshot(savedVerificationProgress.profile)
+      setVerificationDocsSnapshot(savedVerificationProgress.docs)
+      const fallbackCompanyName = impersonationSession?.businessName || ''
+      const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
+        || authUser?.fullName?.trim()?.split(/\s+/)?.[0]
+        || 'Client'
+      setCompanyName(getSavedCompanyName(scopedClientEmail, fallbackCompanyName))
+      setClientFirstName(getSavedClientFirstName(scopedClientEmail, fallbackFirstName))
+      setProfilePhoto(getSavedProfilePhoto(scopedClientEmail))
+      setCompanyLogo(getSavedCompanyLogo(scopedClientEmail))
+      const fallbackOwnerName = impersonationSession?.clientName || authUser?.fullName || fallbackFirstName
+      const scopedDocuments = readClientDocuments(scopedClientEmail, fallbackOwnerName)
+      setExpenseDocuments(ensureFolderStructuredRecords(scopedDocuments.expenses, 'expenses'))
+      setSalesDocuments(ensureFolderStructuredRecords(scopedDocuments.sales, 'sales'))
+      setBankStatementDocuments(ensureFolderStructuredRecords(scopedDocuments.bankStatements, 'bankStatements'))
+      setExpenseClassOptions(normalizeClassOptions(scopedDocuments.expenseClassOptions))
+      setSalesClassOptions(normalizeClassOptions(scopedDocuments.salesClassOptions))
+      setUploadHistoryRecords(scopedDocuments.uploadHistory)
+      setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
+      return
+    }
+
+    let isCancelled = false
+    ;(async () => {
+      const response = await fetchClientWorkspaceFromBackend({
+        authorizationToken: token,
+      })
+      if (!response.ok || !response.data || typeof response.data !== 'object' || isCancelled) {
+        return
+      }
+
+      const workspace = response.data.workspace && typeof response.data.workspace === 'object'
+        ? response.data.workspace
+        : {}
+      setClientWorkspaceCache(scopedClientEmail, workspace)
+
+      const fallbackFirstName = authUser?.fullName?.trim()?.split(/\s+/)?.[0] || 'Client'
+      const onboardingCandidate = workspace.onboardingState && typeof workspace.onboardingState === 'object'
+        ? workspace.onboardingState
+        : {}
+      const nextOnboardingState = {
+        currentStep: Math.min(CLIENT_ONBOARDING_TOTAL_STEPS, Math.max(1, Number(onboardingCandidate.currentStep) || 1)),
+        completed: Boolean(onboardingCandidate.completed),
+        skipped: Boolean(onboardingCandidate.skipped),
+        verificationPending: onboardingCandidate.verificationPending !== undefined
+          ? Boolean(onboardingCandidate.verificationPending)
+          : true,
+        data: { ...defaultOnboardingData, ...(onboardingCandidate.data || {}) },
+      }
+
+      const settingsProfile = normalizeSettingsProfile(workspace.settingsProfile || {})
+      const verificationDocs = normalizeVerificationDocs(workspace.verificationDocs || {})
+      const verificationProgress = resolveVerificationProgress({
+        onboardingData: nextOnboardingState.data,
+        settingsDocs: verificationDocs,
+        settingsProfile,
+      })
+      const docs = readClientDocuments(scopedClientEmail, authUser?.fullName || fallbackFirstName)
+
+      setOnboardingState(nextOnboardingState)
+      setSettingsProfileSnapshot(verificationProgress.profile)
+      setVerificationDocsSnapshot(verificationProgress.docs)
+      setCompanyName(settingsProfile.businessName?.trim() || '')
+      setClientFirstName(settingsProfile.firstName || fallbackFirstName)
+      setProfilePhoto(String(workspace.profilePhoto || '').trim())
+      setCompanyLogo(String(workspace.companyLogo || '').trim())
+      setExpenseDocuments(ensureFolderStructuredRecords(docs.expenses, 'expenses'))
+      setSalesDocuments(ensureFolderStructuredRecords(docs.sales, 'sales'))
+      setBankStatementDocuments(ensureFolderStructuredRecords(docs.bankStatements, 'bankStatements'))
+      setExpenseClassOptions(normalizeClassOptions(docs.expenseClassOptions))
+      setSalesClassOptions(normalizeClassOptions(docs.salesClassOptions))
+      setUploadHistoryRecords(docs.uploadHistory)
+      setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
+    })()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [scopedClientEmail, impersonationSession?.businessName, impersonationSession?.clientName, authUser?.fullName, authUser?.firebaseIdToken, isImpersonatingClient])
 
   useEffect(() => {
     if (!isImpersonatingClient || !impersonationSession) return
@@ -2543,12 +2687,9 @@ function App() {
   const persistOnboardingState = (nextState, emailOverride) => {
     const targetEmail = emailOverride ?? scopedClientEmail
     setOnboardingState(nextState)
-    localStorage.setItem(getScopedStorageKey('kiaminaOnboardingState', targetEmail), JSON.stringify(nextState))
-  }
-
-  const persistOtpStore = (nextStore) => {
-    setOtpStore(nextStore)
-    sessionStorage.setItem('kiaminaOtpStore', JSON.stringify(nextStore))
+    setClientWorkspaceCache(targetEmail, {
+      onboardingState: nextState,
+    })
   }
 
   const setOnboardingData = (updater) => {
@@ -2563,56 +2704,54 @@ function App() {
     setSettingsProfileSnapshot(nextVerificationProgress.profile)
     setVerificationDocsSnapshot(nextVerificationProgress.docs)
     persistScopedVerificationDocs(targetEmail, nextVerificationProgress.docs)
-    try {
-      const settingsKey = getScopedStorageKey('settingsFormData', targetEmail)
-      const saved = localStorage.getItem(settingsKey) || (targetEmail ? localStorage.getItem('settingsFormData') : null)
-      const existing = saved ? JSON.parse(saved) : {}
-      const effectiveFullName = isImpersonatingClient
-        ? (impersonationSession?.clientName || existing.fullName || '')
-        : (authUser?.fullName || existing.fullName || '')
-      const existingNameParts = resolveSettingsProfileNameParts(existing)
-      const merged = {
-        ...existing,
-        fullName: effectiveFullName,
-        firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
-        lastName: existingNameParts.lastName || (
-          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
-            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
-            : ''
-        ),
-        otherNames: existingNameParts.otherNames || (
-          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
-            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
-            : ''
-        ),
-        email: targetEmail || existing.email || '',
-        businessType: nextData.businessType ?? existing.businessType ?? '',
-        businessName: nextData.businessName ?? existing.businessName ?? '',
-        country: nextData.country ?? existing.country ?? '',
-        industry: nextData.industry ?? existing.industry ?? '',
-        industryOther: nextData.industryOther ?? existing.industryOther ?? '',
-        cacNumber: nextData.cacNumber ?? existing.cacNumber ?? '',
-        tin: nextData.tin ?? existing.tin ?? '',
-        reportingCycle: nextData.reportingCycle ?? existing.reportingCycle ?? '',
-        startMonth: nextData.startMonth ?? existing.startMonth ?? '',
-        currency: nextData.currency ?? existing.currency ?? '',
-        language: nextData.language ?? existing.language ?? '',
-      }
-      localStorage.setItem(settingsKey, JSON.stringify(merged))
-      const normalizedProfile = normalizeSettingsProfile(merged)
-      setSettingsProfileSnapshot(normalizedProfile)
-      setCompanyName(merged.businessName?.trim() || '')
-      setClientFirstName(normalizedProfile.firstName || 'Client')
-      if (isImpersonatingClient) {
-        logAdminActivity({
-          adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
-          action: 'Updated client onboarding data in impersonation mode',
-          affectedUser: impersonationSession?.businessName || targetEmail,
-          details: 'Admin updated onboarding and profile data while in impersonation mode.',
-        })
-      }
-    } catch {
-      // no-op
+    const existing = settingsProfileSnapshot && typeof settingsProfileSnapshot === 'object'
+      ? settingsProfileSnapshot
+      : {}
+    const effectiveFullName = isImpersonatingClient
+      ? (impersonationSession?.clientName || existing.fullName || '')
+      : (authUser?.fullName || existing.fullName || '')
+    const existingNameParts = resolveSettingsProfileNameParts(existing)
+    const merged = {
+      ...existing,
+      fullName: effectiveFullName,
+      firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
+      lastName: existingNameParts.lastName || (
+        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
+          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
+          : ''
+      ),
+      otherNames: existingNameParts.otherNames || (
+        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
+          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
+          : ''
+      ),
+      email: targetEmail || existing.email || '',
+      businessType: nextData.businessType ?? existing.businessType ?? '',
+      businessName: nextData.businessName ?? existing.businessName ?? '',
+      country: nextData.country ?? existing.country ?? '',
+      industry: nextData.industry ?? existing.industry ?? '',
+      industryOther: nextData.industryOther ?? existing.industryOther ?? '',
+      cacNumber: nextData.cacNumber ?? existing.cacNumber ?? '',
+      tin: nextData.tin ?? existing.tin ?? '',
+      reportingCycle: nextData.reportingCycle ?? existing.reportingCycle ?? '',
+      startMonth: nextData.startMonth ?? existing.startMonth ?? '',
+      currency: nextData.currency ?? existing.currency ?? '',
+      language: nextData.language ?? existing.language ?? '',
+    }
+    setClientWorkspaceCache(targetEmail, {
+      settingsProfile: merged,
+    })
+    const normalizedProfile = normalizeSettingsProfile(merged)
+    setSettingsProfileSnapshot(normalizedProfile)
+    setCompanyName(merged.businessName?.trim() || '')
+    setClientFirstName(normalizedProfile.firstName || 'Client')
+    if (isImpersonatingClient) {
+      logAdminActivity({
+        adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
+        action: 'Updated client onboarding data in impersonation mode',
+        affectedUser: impersonationSession?.businessName || targetEmail,
+        details: 'Admin updated onboarding and profile data while in impersonation mode.',
+      })
     }
   }
 
@@ -2624,25 +2763,23 @@ function App() {
   }
 
   const syncProfileToSettings = (fullName, email) => {
-    try {
-      const settingsKey = getScopedStorageKey('settingsFormData', email)
-      const saved = localStorage.getItem(settingsKey) || (email ? localStorage.getItem('settingsFormData') : null)
-      const existing = saved ? JSON.parse(saved) : {}
-      const fullNameParts = resolveSettingsProfileNameParts({ ...existing, fullName: fullName || existing.fullName || '' })
-      const next = {
-        ...existing,
-        fullName: fullName || existing.fullName || '',
-        firstName: fullNameParts.firstName || existing.firstName || '',
-        lastName: fullNameParts.lastName || existing.lastName || '',
-        otherNames: fullNameParts.otherNames || existing.otherNames || '',
-        email: email || existing.email || '',
-      }
-      localStorage.setItem(settingsKey, JSON.stringify(next))
-      if (String(scopedClientEmail || '').trim().toLowerCase() === String(email || '').trim().toLowerCase()) {
-        setSettingsProfileSnapshot(normalizeSettingsProfile(next))
-      }
-    } catch {
-      // no-op
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    if (!normalizedEmail) return
+    const existing = readScopedSettingsProfile(normalizedEmail)
+    const fullNameParts = resolveSettingsProfileNameParts({ ...existing, fullName: fullName || existing.fullName || '' })
+    const next = {
+      ...existing,
+      fullName: fullName || existing.fullName || '',
+      firstName: fullNameParts.firstName || existing.firstName || '',
+      lastName: fullNameParts.lastName || existing.lastName || '',
+      otherNames: fullNameParts.otherNames || existing.otherNames || '',
+      email: normalizedEmail,
+    }
+    setClientWorkspaceCache(normalizedEmail, {
+      settingsProfile: next,
+    })
+    if (String(scopedClientEmail || '').trim().toLowerCase() === normalizedEmail) {
+      setSettingsProfileSnapshot(normalizeSettingsProfile(next))
     }
   }
 
@@ -2684,6 +2821,88 @@ function App() {
 
     setClientDashboardOverview(response.data)
     return { ok: true, data: response.data }
+  }
+
+  const hydrateAuthenticatedUserFromBackend = async ({
+    fallbackEmail = '',
+    fallbackFullName = '',
+    fallbackRole = 'client',
+    authorizationToken = '',
+  } = {}) => {
+    const normalizedFallbackEmail = String(fallbackEmail || '').trim().toLowerCase()
+    const normalizedFallbackFullName = String(fallbackFullName || '').trim()
+    const normalizedFallbackRole = normalizeRole(fallbackRole, normalizedFallbackEmail)
+    const token = String(authorizationToken || '').trim()
+    if (!token) {
+      return {
+        ok: true,
+        user: normalizeUser({
+          fullName: normalizedFallbackFullName || 'User',
+          email: normalizedFallbackEmail,
+          role: normalizedFallbackRole,
+          status: 'active',
+          firebaseIdToken: '',
+        }),
+      }
+    }
+
+    try {
+      const response = await apiFetch('/api/users/me', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+      if (!response.ok) {
+        return {
+          ok: true,
+          user: normalizeUser({
+            fullName: normalizedFallbackFullName || 'User',
+            email: normalizedFallbackEmail,
+            role: normalizedFallbackRole,
+            status: 'active',
+            firebaseIdToken: token,
+          }),
+        }
+      }
+      const payload = await response.json().catch(() => ({}))
+      const roles = Array.isArray(payload?.roles)
+        ? payload.roles.map((role) => String(role || '').trim().toLowerCase()).filter(Boolean)
+        : []
+      const resolvedRole = roles.includes('admin')
+        ? 'admin'
+        : (roles[0] || normalizedFallbackRole || 'client')
+      const resolvedEmail = String(payload?.email || normalizedFallbackEmail).trim().toLowerCase()
+      const resolvedFullName = String(
+        payload?.displayName
+        || payload?.clientProfile?.fullName
+        || normalizedFallbackFullName
+        || resolvedEmail.split('@')[0]
+        || 'User',
+      ).trim()
+
+      return {
+        ok: true,
+        user: normalizeUser({
+          fullName: resolvedFullName,
+          email: resolvedEmail,
+          role: resolvedRole,
+          status: String(payload?.status || 'active').trim().toLowerCase() || 'active',
+          firebaseIdToken: token,
+        }),
+      }
+    } catch {
+      return {
+        ok: true,
+        user: normalizeUser({
+          fullName: normalizedFallbackFullName || 'User',
+          email: normalizedFallbackEmail,
+          role: normalizedFallbackRole,
+          status: 'active',
+          firebaseIdToken: token,
+        }),
+      }
+    }
   }
 
   const persistAuthenticatedUserRecord = (user, storageType = 'local') => {
@@ -2732,43 +2951,28 @@ function App() {
 
   const issueEmailOtp = async (email, purpose = 'login') => {
     const normalizedEmail = email?.trim()?.toLowerCase()
-    if (!normalizedEmail) return false
+    if (!normalizedEmail) {
+      return { ok: false, message: 'Email is required.' }
+    }
     const startedAt = Date.now()
 
-    const otp = `${Math.floor(100000 + Math.random() * 900000)}`
-    const nextStore = {
-      ...otpStore,
-      [normalizedEmail]: {
-        code: otp,
-        expiresAt: Date.now() + (5 * 60 * 1000),
-      },
-    }
-    persistOtpStore(nextStore)
-    try {
-      const storedPreview = sessionStorage.getItem(OTP_PREVIEW_STORAGE_KEY)
-      const parsedPreview = storedPreview ? JSON.parse(storedPreview) : {}
-      const nextPreview = {
-        ...(parsedPreview && typeof parsedPreview === 'object' ? parsedPreview : {}),
-        [normalizedEmail]: {
-          code: otp,
-          purpose,
-          createdAt: Date.now(),
-        },
-      }
-      sessionStorage.setItem(OTP_PREVIEW_STORAGE_KEY, JSON.stringify(nextPreview))
-    } catch {
-      // no-op
-    }
-
+    let result = { ok: false, message: 'Unable to send OTP right now.' }
     try {
       const response = await apiFetch('/api/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: normalizedEmail, otp, purpose }),
+        body: JSON.stringify({ email: normalizedEmail, purpose }),
       })
-      if (!response.ok) throw new Error('OTP service unavailable')
+      if (!response.ok) {
+        const errorMessage = await readErrorMessageFromResponse(response)
+        result = { ok: false, message: errorMessage || 'Unable to send OTP right now.' }
+      } else {
+        const payload = await response.json().catch(() => ({}))
+        const successMessage = String(payload?.message || '').trim()
+        result = { ok: true, message: successMessage || 'OTP sent successfully.' }
+      }
     } catch {
-      // Fallback to local demo flow when backend endpoint is unavailable.
+      result = { ok: false, message: 'Unable to send OTP right now.' }
     }
 
     const minimumDelayMs = getNetworkAwareDurationMs('search')
@@ -2778,17 +2982,17 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, remainingMs))
     }
 
-    return true
+    return result
   }
 
   const issuePasswordResetLink = async (email) => {
     const normalizedEmail = email?.trim()?.toLowerCase()
-    if (!normalizedEmail) return false
+    if (!normalizedEmail) return { ok: false, message: 'Email is required.' }
     const startedAt = Date.now()
 
-    const resetToken = `${Date.now()}-${Math.floor(100000 + Math.random() * 900000)}`
-    const resetLink = `${window.location.origin}/reset-password?email=${encodeURIComponent(normalizedEmail)}&token=${encodeURIComponent(resetToken)}`
+    const resetLink = `${window.location.origin}/login?reset=1&email=${encodeURIComponent(normalizedEmail)}`
 
+    let result = { ok: false, message: 'Unable to send password reset link.' }
     try {
       const response = await apiFetch('/api/auth/send-password-reset-link', {
         method: 'POST',
@@ -2798,9 +3002,16 @@ function App() {
           resetLink,
         }),
       })
-      if (!response.ok) throw new Error('Password reset email service unavailable')
+      if (!response.ok) {
+        const errorMessage = await readErrorMessageFromResponse(response)
+        result = { ok: false, message: errorMessage || 'Unable to send password reset link.' }
+      } else {
+        const payload = await response.json().catch(() => ({}))
+        const successMessage = String(payload?.message || '').trim()
+        result = { ok: true, message: successMessage || 'Password reset link sent. Please check your email.' }
+      }
     } catch {
-      // Fallback to local demo flow when backend endpoint is unavailable.
+      result = { ok: false, message: 'Unable to send password reset link.' }
     }
 
     const minimumDelayMs = getNetworkAwareDurationMs('search')
@@ -2810,118 +3021,55 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, remainingMs))
     }
 
-    return true
+    return result
   }
 
   const handleSocialLogin = async (provider, providedFullName = '') => {
-    const providerMap = {
-      google: { name: 'Google', email: 'google.user@oauth.kiamina.local' },
-    }
-    const selected = providerMap[provider]
-    if (!selected) {
+    const normalizedProvider = String(provider || '').trim().toLowerCase()
+    const normalizedProvidedFullName = providedFullName.trim()
+    if (normalizedProvider !== 'google') {
       showToast('error', 'Authentication failed. Please try again.')
       return { ok: false, message: 'Authentication failed. Please try again.' }
     }
-
-    const accounts = getSavedAccounts()
-    const existing = accounts.find((account) => account.email.toLowerCase() === selected.email.toLowerCase())
-    const normalizedProvidedFullName = providedFullName.trim()
-    const existingName = existing?.fullName?.trim() || ''
-    const needsFullNameCapture = !normalizedProvidedFullName && (!existingName || existingName.endsWith(' User'))
-    if (needsFullNameCapture) {
-      return { ok: false, requiresFullName: true, provider }
+    if (!normalizedProvidedFullName) {
+      return { ok: false, requiresFullName: true, provider: normalizedProvider }
     }
 
-    const fullName = normalizedProvidedFullName || existingName || `${selected.name} User`
-    const socialRole = existing?.role || 'client'
-    if (!existing) {
-      const nextAccounts = [...accounts, {
-        fullName,
-        email: selected.email,
-        password: `oauth-${provider}`,
-        role: socialRole,
-        createdAt: new Date().toISOString(),
-      }]
-      localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
-      persistOnboardingState({
-        currentStep: 1,
-        completed: false,
-        skipped: false,
-        verificationPending: true,
-        data: {
-          ...defaultOnboardingData,
-          primaryContact: fullName,
-        },
-      }, selected.email)
-    } else if (normalizedProvidedFullName && normalizedProvidedFullName !== existingName) {
-      const nextAccounts = accounts.map((account) => (
-        account.email.toLowerCase() === selected.email.toLowerCase()
-          ? { ...account, fullName: normalizedProvidedFullName, role: account.role || socialRole }
-          : account
-      ))
-      localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
-    }
-
-    const user = { fullName, email: selected.email, role: socialRole }
-    persistAuthUser(user, true)
-    clearApiAccessToken()
-    clearApiSessionId()
-    await registerAuthAccountRecord({
-      email: selected.email,
-      fullName,
-      role: socialRole,
-      provider: provider,
-      status: existing?.status || 'active',
-      emailVerified: true,
-    })
-    await recordAuthLoginSession({
-      email: selected.email,
-      role: socialRole,
-      loginMethod: 'google',
-      remember: true,
-      mfaCompleted: true,
-    })
-    syncProfileToSettings(user.fullName, user.email)
-    setOtpChallenge(null)
-    showToast('success', `${selected.name} authentication successful.`)
-    return { ok: true }
+    showToast('error', 'Google login is not configured yet. Use email and password for now.')
+    return { ok: false, message: 'Google login is not configured yet. Use email and password for now.' }
   }
 
   const handleLogin = async ({ email, password, remember, agree }) => {
-    const loginFailureMessage = 'Email or password incorrect.'
+    const loginFailureMessage = 'Invalid credentials. Please try again.'
     if (!agree) {
       return { ok: false, message: loginFailureMessage }
     }
-
-    const accounts = getSavedAccounts()
-    const normalizedEmail = email.trim().toLowerCase()
-    const match = accounts.find((account) => account.email.toLowerCase() === normalizedEmail)
-    if (!match) {
-      return { ok: false, message: loginFailureMessage }
-    }
-    if (normalizeRole(match.role, match.email) === 'admin') {
-      return { ok: false, message: 'Use /admin/login to access the Admin Portal.' }
-    }
-    if (match.status === 'suspended') {
-      return { ok: false, message: 'This account is suspended. Please contact support.' }
-    }
-    if (match.password !== password) {
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    const normalizedPassword = String(password || '')
+    if (!normalizedEmail || !normalizedPassword) {
       return { ok: false, message: loginFailureMessage }
     }
 
-    const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
+    const firebaseAuthResult = await issueFirebaseIdTokenForCredentials({
       email: normalizedEmail,
-      password,
+      password: normalizedPassword,
     })
+    if (!firebaseAuthResult.ok || !firebaseAuthResult.idToken) {
+      return { ok: false, message: firebaseAuthResult.message || loginFailureMessage }
+    }
 
-    await issueEmailOtp(normalizedEmail, 'client-login')
+    const otpResult = await issueEmailOtp(normalizedEmail, 'client-login')
+    if (!otpResult.ok) {
+      return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
+    }
     setOtpChallenge({
       requestId: Date.now(),
       purpose: 'client-login',
-      email: match.email,
+      email: firebaseAuthResult.email || normalizedEmail,
       remember: Boolean(remember),
-      role: match.role,
-      firebaseIdToken,
+      role: 'client',
+      firebaseIdToken: firebaseAuthResult.idToken,
+      uid: firebaseAuthResult.uid,
     })
     return { ok: true, requiresOtp: true }
   }
@@ -2933,46 +3081,27 @@ function App() {
       return { ok: false, message: loginFailureMessage }
     }
 
-    ensureDefaultDevAdminAccount()
-    const accounts = getSavedAccounts()
-    const match = accounts.find((account) => account.email.toLowerCase() === normalizedEmail)
-    if (!match) {
-      return { ok: false, message: loginFailureMessage }
-    }
-    if (normalizeRole(match.role, match.email) !== 'admin') {
-      return { ok: false, message: loginFailureMessage }
-    }
-    if (match.status === 'suspended') {
-      return { ok: false, message: 'This admin account is suspended.' }
-    }
-    if (match.password !== password) {
-      return { ok: false, message: loginFailureMessage }
-    }
-    const normalizedAdminLevel = normalizeAdminLevel(match.adminLevel)
-    if (normalizedAdminLevel === ADMIN_LEVELS.OWNER) {
-      const providedOwnerPrivateKey = String(ownerPrivateKey || '').trim()
-      const expectedOwnerPrivateKey = String(match.ownerPrivateKey || DEFAULT_OWNER_PRIVATE_KEY).trim()
-      if (!providedOwnerPrivateKey) {
-        return { ok: false, message: 'Owner private key is required.' }
-      }
-      if (providedOwnerPrivateKey !== expectedOwnerPrivateKey) {
-        return { ok: false, message: 'Invalid owner private key.' }
-      }
-    }
-
-    const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
+    const firebaseAuthResult = await issueFirebaseIdTokenForCredentials({
       email: normalizedEmail,
       password,
     })
+    if (!firebaseAuthResult.ok || !firebaseAuthResult.idToken) {
+      return { ok: false, message: firebaseAuthResult.message || loginFailureMessage }
+    }
 
-    await issueEmailOtp(normalizedEmail, 'admin-login')
+    const otpResult = await issueEmailOtp(normalizedEmail, 'admin-login')
+    if (!otpResult.ok) {
+      return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
+    }
     setOtpChallenge({
       requestId: Date.now(),
       purpose: 'admin-login',
-      email: match.email,
+      email: firebaseAuthResult.email || normalizedEmail,
       remember: Boolean(remember),
       role: 'admin',
-      firebaseIdToken,
+      firebaseIdToken: firebaseAuthResult.idToken,
+      uid: firebaseAuthResult.uid,
+      ownerPrivateKey: String(ownerPrivateKey || '').trim(),
     })
     return { ok: true, requiresOtp: true }
   }
@@ -2992,10 +3121,14 @@ function App() {
     setIsLoggingOut(true)
     await new Promise((resolve) => setTimeout(resolve, getNetworkAwareDurationMs('search')))
     try {
+      const activeSessionId = String(getApiSessionId() || '').trim()
       await apiFetch('/api/auth/logout-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: 'logout' }),
+        body: JSON.stringify({
+          reason: 'logout',
+          ...(activeSessionId ? { sessionId: activeSessionId } : {}),
+        }),
       })
     } catch {
       // Best-effort remote logout; local cleanup continues.
@@ -3307,14 +3440,11 @@ function App() {
       return { ok: false, message: 'Please complete all required fields.' }
     }
 
-    const accounts = getSavedAccounts()
-    const exists = accounts.some((account) => account.email.toLowerCase() === email.trim().toLowerCase())
-    if (exists) {
-      return { ok: false, message: 'Invalid credentials. Please try again.' }
-    }
-
     const normalizedEmail = email.trim().toLowerCase()
-    await issueEmailOtp(normalizedEmail, 'signup')
+    const otpResult = await issueEmailOtp(normalizedEmail, 'signup')
+    if (!otpResult.ok) {
+      return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
+    }
     setOtpChallenge({
       requestId: Date.now(),
       purpose: 'signup',
@@ -3413,13 +3543,10 @@ function App() {
       return { ok: false, message: 'Please complete all required fields.' }
     }
 
-    const accounts = getSavedAccounts()
-    const exists = accounts.some((account) => account.email.toLowerCase() === normalizedEmail)
-    if (exists) {
-      return { ok: false, message: 'An account with this email already exists.' }
+    const otpResult = await issueEmailOtp(normalizedEmail, 'admin-setup')
+    if (!otpResult.ok) {
+      return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
     }
-
-    await issueEmailOtp(normalizedEmail, 'admin-setup')
     setOtpChallenge({
       requestId: Date.now(),
       purpose: 'admin-setup',
@@ -3453,34 +3580,37 @@ function App() {
     if (!otpChallenge?.email) return { ok: false, message: 'Incorrect verification code.' }
     await new Promise((resolve) => window.setTimeout(resolve, getNetworkAwareDurationMs('search')))
 
-    const normalizedEmail = otpChallenge.email.trim().toLowerCase()
-    const otpEntry = otpStore[normalizedEmail]
-    const isExpired = !otpEntry || Date.now() > otpEntry.expiresAt
-    if (isExpired || otpEntry.code !== code.trim()) {
+    const normalizedEmail = String(otpChallenge.email || '').trim().toLowerCase()
+    const normalizedPurpose = String(otpChallenge.purpose || 'login').trim().toLowerCase()
+    const normalizedCode = String(code || '').trim()
+    if (!normalizedEmail || !normalizedCode) {
       return { ok: false, message: 'Incorrect verification code.' }
     }
 
-    const { [normalizedEmail]: _removed, ...restOtpStore } = otpStore
-    persistOtpStore(restOtpStore)
     try {
-      const storedPreview = sessionStorage.getItem(OTP_PREVIEW_STORAGE_KEY)
-      if (storedPreview) {
-        const parsedPreview = JSON.parse(storedPreview)
-        if (parsedPreview && typeof parsedPreview === 'object' && parsedPreview[normalizedEmail]) {
-          delete parsedPreview[normalizedEmail]
-          sessionStorage.setItem(OTP_PREVIEW_STORAGE_KEY, JSON.stringify(parsedPreview))
-        }
+      const verifyResponse = await apiFetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          purpose: normalizedPurpose,
+          otp: normalizedCode,
+        }),
+      })
+      if (!verifyResponse.ok) {
+        const verifyErrorMessage = await readErrorMessageFromResponse(verifyResponse)
+        return { ok: false, message: verifyErrorMessage || 'Incorrect verification code.' }
       }
     } catch {
-      // no-op
+      return { ok: false, message: 'Unable to verify OTP right now.' }
     }
 
-    if (otpChallenge.purpose === 'signup' || otpChallenge.purpose === 'admin-setup') {
+    if (normalizedPurpose === 'signup' || normalizedPurpose === 'admin-setup') {
       const pendingSignup = otpChallenge.pendingSignup
       if (!pendingSignup?.email || !pendingSignup?.fullName || !pendingSignup?.password) {
-        return { ok: false, message: 'Incorrect verification code.' }
+        return { ok: false, message: 'Invalid signup challenge payload.' }
       }
-      if (otpChallenge.purpose === 'admin-setup') {
+      if (normalizedPurpose === 'admin-setup') {
         const pendingAdminLevel = normalizeAdminLevel(pendingSignup?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
         const isOwnerSignup = pendingAdminLevel === ADMIN_LEVELS.OWNER
         const hasProfileFields = Boolean(
@@ -3501,15 +3631,56 @@ function App() {
         }
       }
 
-      const accounts = getSavedAccounts()
-      const alreadyExists = accounts.some((account) => account.email.toLowerCase() === pendingSignup.email.toLowerCase())
-      if (alreadyExists) {
-        return { ok: false, message: 'Invalid credentials. Please try again.' }
+      const firebaseSignupResult = await createFirebaseAccountWithCredentials({
+        email: pendingSignup.email,
+        password: pendingSignup.password,
+        fullName: pendingSignup.fullName,
+      })
+      if (!firebaseSignupResult.ok || !firebaseSignupResult.idToken) {
+        return { ok: false, message: firebaseSignupResult.message || 'Unable to create account right now.' }
       }
 
-      const nextAccount = normalizeAccount({
-        fullName: pendingSignup.fullName,
+      const fallbackRole = normalizeRole(pendingSignup.role || 'client', pendingSignup.email)
+      const registerResult = await registerAuthAccountRecord({
+        uid: firebaseSignupResult.uid || '',
         email: pendingSignup.email,
+        fullName: pendingSignup.fullName,
+        role: fallbackRole,
+        provider: 'email-password',
+        status: pendingSignup.status || 'active',
+        emailVerified: true,
+      })
+      if (!registerResult.ok) {
+        return {
+          ok: false,
+          message: String(registerResult?.data?.message || 'Unable to register account right now.').trim(),
+        }
+      }
+
+      const loginSessionResult = await recordAuthLoginSession({
+        uid: firebaseSignupResult.uid || '',
+        email: pendingSignup.email,
+        role: fallbackRole,
+        loginMethod: 'otp',
+        remember: true,
+        mfaCompleted: true,
+      })
+      if (!loginSessionResult.ok) {
+        return {
+          ok: false,
+          message: String(loginSessionResult?.data?.message || 'Unable to start login session.').trim(),
+        }
+      }
+      const issuedSessionId = String(loginSessionResult?.data?.session?.sessionId || '').trim()
+
+      const hydratedProfile = await hydrateAuthenticatedUserFromBackend({
+        fallbackEmail: pendingSignup.email,
+        fallbackFullName: pendingSignup.fullName,
+        fallbackRole,
+        authorizationToken: firebaseSignupResult.idToken,
+      })
+      const user = normalizeUser({
+        ...(hydratedProfile.user || {}),
         roleInCompany: pendingSignup.roleInCompany,
         department: pendingSignup.department,
         phoneNumber: pendingSignup.phoneNumber,
@@ -3518,60 +3689,14 @@ function App() {
         governmentIdNumber: pendingSignup.governmentIdNumber,
         governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || '',
         residentialAddress: pendingSignup.residentialAddress,
-        ownerPrivateKey: pendingSignup.ownerPrivateKey || '',
-        password: pendingSignup.password,
-        role: pendingSignup.role || 'client',
         adminLevel: pendingSignup.adminLevel,
         adminPermissions: pendingSignup.adminPermissions,
-        status: pendingSignup.status,
+        sessionId: issuedSessionId,
+        firebaseIdToken: firebaseSignupResult.idToken,
       })
-      const nextAccounts = [...accounts, nextAccount]
-      localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
 
-      const firebaseIdToken = await issueFirebaseIdTokenForCredentials({
-        email: pendingSignup.email,
-        password: pendingSignup.password,
-      })
-      const user = normalizeUser({
-        fullName: pendingSignup.fullName,
-        email: pendingSignup.email,
-        roleInCompany: pendingSignup.roleInCompany,
-        department: pendingSignup.department,
-        phoneNumber: pendingSignup.phoneNumber,
-        workCountry: pendingSignup.workCountry,
-        governmentIdType: pendingSignup.governmentIdType,
-        governmentIdNumber: pendingSignup.governmentIdNumber,
-        governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || new Date().toISOString(),
-        residentialAddress: pendingSignup.residentialAddress,
-        role: nextAccount.role || pendingSignup.role || 'client',
-        adminLevel: nextAccount.adminLevel,
-        adminPermissions: nextAccount.adminPermissions,
-        status: nextAccount.status,
-        firebaseIdToken,
-      })
       persistAuthUser(user, true)
-      if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: true })
-      else {
-        clearApiAccessToken()
-        clearApiSessionId()
-      }
-      await registerAuthAccountRecord({
-        uid: pendingSignup.uid || user?.uid || '',
-        email: pendingSignup.email,
-        fullName: pendingSignup.fullName,
-        role: nextAccount.role || pendingSignup.role || 'client',
-        provider: 'email-password',
-        status: nextAccount.status || 'active',
-        emailVerified: true,
-      })
-      await recordAuthLoginSession({
-        uid: pendingSignup.uid || user?.uid || '',
-        email: pendingSignup.email,
-        role: nextAccount.role || pendingSignup.role || 'client',
-        loginMethod: 'otp',
-        remember: true,
-        mfaCompleted: true,
-      })
+      setApiAccessToken(firebaseSignupResult.idToken, { remember: true })
       syncProfileToSettings(user.fullName, user.email)
 
       if (user.role === 'client') {
@@ -3594,7 +3719,7 @@ function App() {
         })
       }
 
-      if (otpChallenge.purpose === 'admin-setup' && otpChallenge.inviteToken) {
+      if (normalizedPurpose === 'admin-setup' && otpChallenge.inviteToken) {
         try {
           const profileStorageKey = `kiaminaAdminProfile:${pendingSignup.email?.trim()?.toLowerCase()}`
           localStorage.setItem(profileStorageKey, JSON.stringify({
@@ -3624,67 +3749,84 @@ function App() {
         }
       }
 
-      if (user.role === 'client' && firebaseIdToken) {
-        await refreshClientDashboardOverview({ authorizationToken: firebaseIdToken })
+      if (user.role === 'client' && firebaseSignupResult.idToken) {
+        await refreshClientDashboardOverview({ authorizationToken: firebaseSignupResult.idToken })
       }
     } else {
-      const accounts = getSavedAccounts()
-      const match = accounts.find((account) => account.email.toLowerCase() === normalizedEmail)
-      if (!match) return { ok: false, message: 'Email or password incorrect.' }
-      if (normalizeRole(match.role, match.email) === 'admin' && match.status === 'suspended') {
-        return { ok: false, message: 'This admin account is suspended.' }
+      const firebaseIdToken = String(otpChallenge?.firebaseIdToken || '').trim()
+      if (!firebaseIdToken) {
+        return { ok: false, message: 'Authentication session expired. Please sign in again.' }
       }
 
-      const firebaseIdToken = String(otpChallenge?.firebaseIdToken || '').trim()
-      const user = normalizeUser({
-        fullName: match.fullName,
-        email: match.email,
-        role: match.role || otpChallenge.role || 'client',
-        adminLevel: match.adminLevel,
-        adminPermissions: match.adminPermissions,
-        status: match.status,
-        firebaseIdToken,
-      })
-      const shouldRememberSession = Boolean(otpChallenge.remember)
-      persistAuthUser(user, shouldRememberSession)
-      if (firebaseIdToken) setApiAccessToken(firebaseIdToken, { remember: shouldRememberSession })
-      else {
-        clearApiAccessToken()
-        clearApiSessionId()
+      const identityResult = await resolveIdentityFromAuthTokens({ idToken: firebaseIdToken })
+      if (!identityResult.ok) {
+        return { ok: false, message: identityResult.message || 'Unable to verify token.' }
       }
-      await recordAuthLoginSession({
-        uid: match.uid || user?.uid || '',
-        email: match.email,
-        role: match.role || otpChallenge.role || 'client',
+
+      const fallbackRole = normalizedPurpose === 'admin-login' ? 'admin' : 'client'
+      const resolvedEmail = identityResult.email || normalizedEmail
+      const registerResult = await registerAuthAccountRecord({
+        uid: identityResult.uid || '',
+        email: resolvedEmail,
+        fullName: '',
+        role: fallbackRole,
+        provider: 'email-password',
+        status: 'active',
+        emailVerified: true,
+      })
+      if (!registerResult.ok) {
+        return {
+          ok: false,
+          message: String(registerResult?.data?.message || 'Unable to register account right now.').trim(),
+        }
+      }
+
+      const shouldRememberSession = Boolean(otpChallenge.remember)
+      const loginSessionResult = await recordAuthLoginSession({
+        uid: identityResult.uid || '',
+        email: resolvedEmail,
+        role: fallbackRole,
         loginMethod: 'otp',
         remember: shouldRememberSession,
         mfaCompleted: true,
       })
-      await registerAuthAccountRecord({
-        uid: match.uid || user?.uid || '',
-        email: match.email,
-        fullName: match.fullName || user?.fullName || '',
-        role: match.role || otpChallenge.role || 'client',
-        provider: 'email-password',
-        status: match.status || 'active',
-        emailVerified: true,
-      })
-      syncProfileToSettings(user.fullName, user.email)
-      if (normalizeRole(match.role, match.email) === 'admin' && match.mustChangePassword) {
-        window.setTimeout(() => {
-          showToast('info', 'Temporary password detected. Open Admin Settings to create a permanent password.')
-        }, 220)
+      if (!loginSessionResult.ok) {
+        return {
+          ok: false,
+          message: String(loginSessionResult?.data?.message || 'Unable to start login session.').trim(),
+        }
       }
-      if (user.role === 'client') {
+      const issuedSessionId = String(loginSessionResult?.data?.session?.sessionId || '').trim()
+
+      const hydratedProfile = await hydrateAuthenticatedUserFromBackend({
+        fallbackEmail: resolvedEmail,
+        fallbackFullName: resolvedEmail.split('@')[0],
+        fallbackRole,
+        authorizationToken: firebaseIdToken,
+      })
+      const user = normalizeUser({
+        ...(hydratedProfile.user || {}),
+        sessionId: issuedSessionId,
+        firebaseIdToken,
+      })
+      if (normalizedPurpose === 'admin-login' && normalizeRole(user.role, user.email) !== 'admin') {
+        return { ok: false, message: 'This account does not have admin access.' }
+      }
+      if (normalizedPurpose === 'client-login' && normalizeRole(user.role, user.email) === 'admin') {
+        return { ok: false, message: 'Use /admin/login to access the Admin Portal.' }
+      }
+
+      persistAuthUser(user, shouldRememberSession)
+      setApiAccessToken(firebaseIdToken, { remember: shouldRememberSession })
+      syncProfileToSettings(user.fullName, user.email)
+      if (normalizeRole(user.role, user.email) === 'client') {
         appendClientActivityLog(user.email, {
           actorName: user.fullName || 'Client User',
           actorRole: 'client',
           action: 'Client login',
           details: 'Client authenticated successfully via OTP.',
         })
-        if (firebaseIdToken) {
-          await refreshClientDashboardOverview({ authorizationToken: firebaseIdToken })
-        }
+        await refreshClientDashboardOverview({ authorizationToken: firebaseIdToken })
       }
     }
 
@@ -3696,8 +3838,11 @@ function App() {
   const handleResendOtp = async () => {
     if (!otpChallenge?.email) return { ok: false }
     await new Promise((resolve) => window.setTimeout(resolve, getNetworkAwareDurationMs('search')))
-    await issueEmailOtp(otpChallenge.email, otpChallenge.purpose || 'login')
-    return { ok: true }
+    const otpResult = await issueEmailOtp(otpChallenge.email, otpChallenge.purpose || 'login')
+    if (!otpResult.ok) {
+      return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
+    }
+    return { ok: true, message: otpResult.message || 'A new OTP has been sent.' }
   }
 
   const handleCancelOtp = () => {
@@ -3710,18 +3855,15 @@ function App() {
       return { ok: false, message: 'Please complete all required fields.' }
     }
 
-    const accounts = getSavedAccounts()
-    const match = accounts.find((account) => account.email.toLowerCase() === normalizedEmail)
-    if (!match) {
-      return { ok: false, message: 'No account found with this email.' }
+    const resetResult = await issuePasswordResetLink(normalizedEmail)
+    if (!resetResult.ok) {
+      return { ok: false, message: resetResult.message || 'Unable to send password reset link.' }
     }
-
-    await issuePasswordResetLink(match.email)
 
     return {
       ok: true,
-      email: match.email,
-      message: 'Password reset link sent. Please check your email.',
+      email: normalizedEmail,
+      message: resetResult.message || 'Password reset link sent. Please check your email.',
     }
   }
 
@@ -3739,21 +3881,10 @@ function App() {
       return { ok: false, message: 'Password must include at least one number and one special character.' }
     }
 
-    const accounts = getSavedAccounts()
-    const matchIndex = accounts.findIndex((account) => account.email.toLowerCase() === normalizedEmail)
-    if (matchIndex === -1) {
-      return { ok: false, message: 'No account found with this email.' }
+    return {
+      ok: false,
+      message: 'Password updates are completed through the reset link sent to your email.',
     }
-
-    const nextAccounts = [...accounts]
-    nextAccounts[matchIndex] = {
-      ...nextAccounts[matchIndex],
-      password,
-      mustChangePassword: false,
-    }
-    localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
-    showToast('success', 'Password updated successfully.')
-    return { ok: true }
   }
 
   const handleAdminActionLog = ({ action, affectedUser, details }) => {

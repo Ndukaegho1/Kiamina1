@@ -148,6 +148,11 @@ Then call:
 - `GET /users/me/client-dashboard`
 - `GET /users/me/client-dashboard/overview`
 - `PATCH /users/me/client-dashboard`
+- `GET /users/me/client-workspace`
+- `PATCH /users/me/client-workspace`
+- `GET /users/admin/client-management` (admin only)
+- `GET /users/admin/client-management/clients/:uid` (admin only)
+- `PATCH /users/admin/client-management/clients/:uid` (admin only)
 - `POST /documents`
 - `POST /documents/upload` (multipart field: `file`)
 - `GET /documents/owner/:ownerUserId`
@@ -179,6 +184,8 @@ Then call:
 - `POST /notifications/knowledge-base/articles` (admin only)
 - `PATCH /notifications/knowledge-base/articles/:articleId` (admin only)
 - `DELETE /notifications/knowledge-base/articles/:articleId` (admin only)
+- `GET /notifications/events/stream` (SSE stream)
+- `POST /notifications/events/publish` (internal service token or admin only)
 
 Postman contract notes:
 
@@ -206,6 +213,13 @@ Notifications service:
 - `SMTP_PASS`
 - `SMTP_FROM_EMAIL`
 - `SMTP_FROM_NAME`
+- `REALTIME_EVENTS_SERVICE_TOKEN` (shared token for trusted service event publishing)
+
+Users service:
+
+- `NOTIFICATIONS_SERVICE_URL`
+- `NOTIFICATIONS_SERVICE_TIMEOUT_MS`
+- `NOTIFICATIONS_SERVICE_EVENT_TOKEN` (must match notifications `REALTIME_EVENTS_SERVICE_TOKEN`)
 
 Auth service:
 

@@ -53,6 +53,13 @@ router.get("/gateway/info", (req, res) => {
 });
 
 router.use(authGuardMiddleware);
+
+// Keep SSE stream outside response cache to avoid buffering long-lived connections.
+router.get(
+  "/notifications/events/stream",
+  createDomainProxy(env.notificationsServiceUrl, "/api/v1")
+);
+
 router.use(responseCacheMiddleware);
 
 router.use("/auth", createDomainProxy(env.authServiceUrl, "/api/v1/auth"));

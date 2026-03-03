@@ -149,6 +149,65 @@ const clientDashboardSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const clientWorkspaceSchema = new mongoose.Schema(
+  {
+    documents: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({
+        expenses: [],
+        sales: [],
+        bankStatements: [],
+        uploadHistory: [],
+        expenseClassOptions: [],
+        salesClassOptions: []
+      })
+    },
+    activityLog: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: []
+    },
+    onboardingState: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({
+        currentStep: 1,
+        completed: false,
+        skipped: false,
+        verificationPending: true,
+        data: {}
+      })
+    },
+    settingsProfile: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({})
+    },
+    verificationDocs: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({})
+    },
+    statusControl: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({})
+    },
+    notificationSettings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({})
+    },
+    profilePhoto: {
+      type: String,
+      default: ""
+    },
+    companyLogo: {
+      type: String,
+      default: ""
+    },
+    updatedAt: {
+      type: Date,
+      default: null
+    }
+  },
+  { _id: false }
+);
+
 const adminProfileSchema = new mongoose.Schema(
   {
     firstName: { type: String, default: "" },
@@ -294,6 +353,10 @@ const userSchema = new mongoose.Schema(
     },
     clientDashboard: {
       type: clientDashboardSchema,
+      default: () => ({})
+    },
+    clientWorkspace: {
+      type: clientWorkspaceSchema,
       default: () => ({})
     }
   },

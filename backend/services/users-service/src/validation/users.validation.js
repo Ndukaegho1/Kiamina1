@@ -10,6 +10,7 @@ const USER_ROLE_VALUES = [
   "superadmin"
 ];
 const BUSINESS_TYPE_VALUES = ["individual", "business", "non-profit"];
+const VERIFICATION_STATUS_VALUES = ["pending", "submitted", "verified", "rejected", "suspended"];
 const DASHBOARD_PAGE_IDS = [
   "dashboard",
   "expenses",
@@ -32,6 +33,15 @@ const ADMIN_DASHBOARD_PAGE_IDS = [
 const SUPPORT_LEAD_STATUSES = ["new", "contacted", "qualified", "converted", "closed"];
 const NEWSLETTER_STATUSES = ["subscribed", "unsubscribed", "bounced"];
 const LANGUAGE_VALUES = ["english", "french"];
+const CLIENT_MANAGEMENT_SORT_FIELDS = [
+  "createdAt",
+  "updatedAt",
+  "email",
+  "displayName",
+  "businessName",
+  "status",
+  "verificationStatus"
+];
 
 const CAC_PREFIX_REGEX = /^(RC|BN|IT|LP|LLP)/i;
 
@@ -70,9 +80,11 @@ const DISPLAY_NAME_SCHEMA = Joi.string().allow("").max(120);
 const USER_STATUS_SCHEMA = Joi.string().valid(...USER_STATUS_VALUES);
 const USER_ROLE_SCHEMA = Joi.string().valid(...USER_ROLE_VALUES);
 const BUSINESS_TYPE_SCHEMA = Joi.string().valid(...BUSINESS_TYPE_VALUES);
+const VERIFICATION_STATUS_SCHEMA = Joi.string().valid(...VERIFICATION_STATUS_VALUES);
 const DASHBOARD_PAGE_SCHEMA = Joi.string().valid(...DASHBOARD_PAGE_IDS);
 const ADMIN_DASHBOARD_PAGE_SCHEMA = Joi.string().valid(...ADMIN_DASHBOARD_PAGE_IDS);
 const LANGUAGE_SCHEMA = Joi.string().valid(...LANGUAGE_VALUES);
+const CLIENT_MANAGEMENT_SORT_FIELD_SCHEMA = Joi.string().valid(...CLIENT_MANAGEMENT_SORT_FIELDS);
 const LETTERS_ONLY_NAME_SCHEMA = Joi.string().pattern(/^[A-Za-z\s]+$/);
 const PHONE_COUNTRY_CODE_SCHEMA = Joi.string().pattern(/^\+\d{1,4}$/);
 const ISO_CURRENCY_SCHEMA = Joi.string().pattern(/^[A-Z]{3}$/);
@@ -80,6 +92,26 @@ const ISO_CURRENCY_SCHEMA = Joi.string().pattern(/^[A-Z]{3}$/);
 const normalizeString = (value) => String(value ?? "").trim();
 const normalizeSource = (body) =>
   body && typeof body === "object" && !Array.isArray(body) ? body : {};
+
+const normalizeOptionalBoolean = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return null;
+};
 
 const normalizeRoles = (roles) => {
   if (!Array.isArray(roles)) {
@@ -98,6 +130,14 @@ const sanitizeDigitsOnly = (value) => normalizeString(value).replace(/\D/g, "");
 
 const sanitizeAlphaNumeric = (value) =>
   normalizeString(value).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+
+const sanitizeStringList = (values = []) => [
+  ...new Set(
+    values
+      .map((item) => normalizeString(item).toLowerCase())
+      .filter(Boolean)
+  )
+];
 
 const toTitleCaseWords = (value = "") =>
   normalizeString(value)
@@ -588,6 +628,239 @@ export const buildClientDashboardUpdatePayload = (body) => {
           payload[`notificationPreferences.${key}`] = Boolean(source.notificationPreferences[key]);
         }
       }
+    }
+  }
+
+  return { payload, errors };
+};
+
+export const buildClientWorkspaceUpdatePayload = (body) => {
+  const source = normalizeSource(body);
+  const payload = {};
+  const errors = [];
+
+  const assignObjectField = (inputKey, targetPath, message) => {
+    if (source[inputKey] === undefined) return;
+    if (!source[inputKey] || typeof source[inputKey] !== "object" || Array.isArray(source[inputKey])) {
+      errors.push(message);
+      return;
+    }
+    payload[targetPath] = source[inputKey];
+  };
+
+  assignObjectField(
+    "documents",
+    "clientWorkspace.documents",
+    "documents must be an object"
+  );
+  assignObjectField(
+    "onboardingState",
+    "clientWorkspace.onboardingState",
+    "onboardingState must be an object"
+  );
+  assignObjectField(
+    "settingsProfile",
+    "clientWorkspace.settingsProfile",
+    "settingsProfile must be an object"
+  );
+  assignObjectField(
+    "verificationDocs",
+    "clientWorkspace.verificationDocs",
+    "verificationDocs must be an object"
+  );
+  assignObjectField(
+    "statusControl",
+    "clientWorkspace.statusControl",
+    "statusControl must be an object"
+  );
+  assignObjectField(
+    "notificationSettings",
+    "clientWorkspace.notificationSettings",
+    "notificationSettings must be an object"
+  );
+
+  if (source.activityLog !== undefined) {
+    if (!Array.isArray(source.activityLog)) {
+      errors.push("activityLog must be an array");
+    } else {
+      payload["clientWorkspace.activityLog"] = source.activityLog;
+    }
+  }
+
+  if (source.profilePhoto !== undefined) {
+    const profilePhoto = normalizeString(source.profilePhoto);
+    if (Joi.string().allow("").max(4000).validate(profilePhoto).error) {
+      errors.push("profilePhoto must be at most 4000 characters");
+    } else {
+      payload["clientWorkspace.profilePhoto"] = profilePhoto;
+    }
+  }
+
+  if (source.companyLogo !== undefined) {
+    const companyLogo = normalizeString(source.companyLogo);
+    if (Joi.string().allow("").max(4000).validate(companyLogo).error) {
+      errors.push("companyLogo must be at most 4000 characters");
+    } else {
+      payload["clientWorkspace.companyLogo"] = companyLogo;
+    }
+  }
+
+  return { payload, errors };
+};
+
+export const validateAdminClientManagementListQuery = (query) => {
+  const source = normalizeSource(query);
+  const errors = [];
+
+  const q = normalizeString(source.q);
+  if (q.length > 120) {
+    errors.push("q must be at most 120 characters");
+  }
+
+  const status = normalizeString(source.status).toLowerCase();
+  if (status && USER_STATUS_SCHEMA.validate(status).error) {
+    errors.push("status must be one of: active, disabled, suspended");
+  }
+
+  const verificationStatus = normalizeString(source.verificationStatus).toLowerCase();
+  if (verificationStatus && VERIFICATION_STATUS_SCHEMA.validate(verificationStatus).error) {
+    errors.push("verificationStatus must be one of: pending, submitted, verified, rejected, suspended");
+  }
+
+  const onboardingCompleted = normalizeOptionalBoolean(source.onboardingCompleted);
+  if (onboardingCompleted === null) {
+    errors.push("onboardingCompleted must be a boolean");
+  }
+
+  const limit = Number(source.limit);
+  const page = Number(source.page);
+  const normalizedLimit =
+    Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 200) : 50;
+  const normalizedPage =
+    Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
+
+  const sortBy = normalizeString(source.sortBy) || "updatedAt";
+  if (CLIENT_MANAGEMENT_SORT_FIELD_SCHEMA.validate(sortBy).error) {
+    errors.push(
+      "sortBy must be one of: createdAt, updatedAt, email, displayName, businessName, status, verificationStatus"
+    );
+  }
+
+  const sortOrder = normalizeString(source.sortOrder).toLowerCase() || "desc";
+  if (!["asc", "desc"].includes(sortOrder)) {
+    errors.push("sortOrder must be one of: asc, desc");
+  }
+
+  return {
+    errors,
+    payload: {
+      q,
+      status,
+      verificationStatus,
+      onboardingCompleted: onboardingCompleted === undefined ? undefined : onboardingCompleted,
+      limit: normalizedLimit,
+      page: normalizedPage,
+      sortBy,
+      sortOrder: ["asc", "desc"].includes(sortOrder) ? sortOrder : "desc"
+    }
+  };
+};
+
+export const buildAdminClientManagementUpdatePayload = (body) => {
+  const source = normalizeSource(body);
+  const payload = {};
+  const errors = [];
+
+  if (source.status !== undefined) {
+    const status = normalizeString(source.status).toLowerCase();
+    if (USER_STATUS_SCHEMA.validate(status).error) {
+      errors.push("status must be one of: active, disabled, suspended");
+    } else {
+      payload.status = status;
+    }
+  }
+
+  if (source.roles !== undefined) {
+    if (!Array.isArray(source.roles)) {
+      errors.push("roles must be an array of strings");
+    } else {
+      const roles = normalizeRoles(source.roles);
+      if (!roles || roles.length === 0) {
+        errors.push("roles cannot be empty");
+      } else if (roles.some((role) => USER_ROLE_SCHEMA.validate(role).error)) {
+        errors.push("roles contain unsupported values");
+      } else {
+        payload.roles = roles;
+      }
+    }
+  }
+
+  if (source.verificationStatus !== undefined) {
+    const status = normalizeString(source.verificationStatus).toLowerCase();
+    if (VERIFICATION_STATUS_SCHEMA.validate(status).error) {
+      errors.push("verificationStatus must be one of: pending, submitted, verified, rejected, suspended");
+    } else {
+      payload["verification.status"] = status;
+    }
+  }
+
+  if (source.verificationPending !== undefined) {
+    payload["onboarding.verificationPending"] = Boolean(source.verificationPending);
+  }
+
+  if (source.businessType !== undefined) {
+    const businessType = normalizeBusinessType(source.businessType);
+    if (businessType === null) {
+      errors.push("businessType must be one of: individual, business, non-profit");
+    } else {
+      payload["entityProfile.businessType"] = businessType;
+    }
+  }
+
+  if (source.businessName !== undefined) {
+    payload["entityProfile.businessName"] = normalizeString(source.businessName);
+  }
+
+  if (source.country !== undefined) {
+    payload["entityProfile.country"] = normalizeString(source.country);
+  }
+
+  if (source.currency !== undefined) {
+    const currency = normalizeString(source.currency).toUpperCase();
+    if (currency && ISO_CURRENCY_SCHEMA.validate(currency).error) {
+      errors.push("currency must be a 3-letter ISO code");
+    } else {
+      payload["entityProfile.currency"] = currency;
+    }
+  }
+
+  if (source.assignedToUid !== undefined) {
+    payload["clientWorkspace.statusControl.assignedToUid"] = normalizeString(source.assignedToUid);
+  }
+
+  if (source.assignmentNotes !== undefined) {
+    const notes = normalizeString(source.assignmentNotes);
+    if (Joi.string().allow("").max(2000).validate(notes).error) {
+      errors.push("assignmentNotes must be at most 2000 characters");
+    } else {
+      payload["clientWorkspace.statusControl.assignmentNotes"] = notes;
+    }
+  }
+
+  if (source.statusReason !== undefined) {
+    const statusReason = normalizeString(source.statusReason);
+    if (Joi.string().allow("").max(500).validate(statusReason).error) {
+      errors.push("statusReason must be at most 500 characters");
+    } else {
+      payload["clientWorkspace.statusControl.statusReason"] = statusReason;
+    }
+  }
+
+  if (source.tags !== undefined) {
+    if (!Array.isArray(source.tags)) {
+      errors.push("tags must be an array of strings");
+    } else {
+      payload["clientWorkspace.statusControl.tags"] = sanitizeStringList(source.tags);
     }
   }
 

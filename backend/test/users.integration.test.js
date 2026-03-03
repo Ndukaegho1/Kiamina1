@@ -139,3 +139,121 @@ test("users integration: non-admin actor cannot access admin dashboard endpoint"
   assert.equal(response.status, 403);
   assert.match(response.body?.message || "", /only admin users/i);
 });
+
+test("users integration: client workspace patch and get endpoints persist workspace payload", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const uid = "client_workspace_uid";
+  const email = "workspace-client@example.com";
+
+  await User.create({
+    uid,
+    email,
+    roles: ["client"],
+    displayName: "Workspace Client"
+  });
+
+  const patchResponse = await request(app)
+    .patch("/api/v1/users/me/client-workspace")
+    .set("x-user-id", uid)
+    .set("x-user-email", email)
+    .set("x-user-roles", "client")
+    .send({
+      documents: {
+        expenses: [{ id: "exp_1", fileName: "receipt.pdf" }]
+      },
+      activityLog: [{ id: "act_1", action: "uploaded-document" }],
+      notificationSettings: { inAppEnabled: true },
+      profilePhoto: "https://cdn.example.com/profile.png"
+    });
+
+  assert.equal(patchResponse.status, 200);
+  assert.equal(patchResponse.body?.uid, uid);
+  assert.equal(
+    patchResponse.body?.workspace?.documents?.expenses?.[0]?.fileName,
+    "receipt.pdf"
+  );
+  assert.equal(
+    patchResponse.body?.workspace?.profilePhoto,
+    "https://cdn.example.com/profile.png"
+  );
+
+  const getResponse = await request(app)
+    .get("/api/v1/users/me/client-workspace")
+    .set("x-user-id", uid)
+    .set("x-user-email", email)
+    .set("x-user-roles", "client");
+
+  assert.equal(getResponse.status, 200);
+  assert.equal(getResponse.body?.uid, uid);
+  assert.equal(
+    getResponse.body?.workspace?.activityLog?.[0]?.action,
+    "uploaded-document"
+  );
+});
+
+test("users integration: admin client-management list and patch update client account", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const adminUid = "admin_uid_management";
+  const adminEmail = "admin-management@example.com";
+  const clientUid = "client_uid_management";
+  const clientEmail = "client-management@example.com";
+
+  await User.create({
+    uid: adminUid,
+    email: adminEmail,
+    roles: ["admin"],
+    displayName: "Admin Management"
+  });
+
+  await User.create({
+    uid: clientUid,
+    email: clientEmail,
+    roles: ["client"],
+    displayName: "Client Management",
+    status: "active",
+    entityProfile: {
+      businessName: "Acme Logistics",
+      country: "Nigeria",
+      currency: "NGN",
+      businessType: "business"
+    }
+  });
+
+  const listResponse = await request(app)
+    .get("/api/v1/users/admin/client-management")
+    .set("x-user-id", adminUid)
+    .set("x-user-email", adminEmail)
+    .set("x-user-roles", "admin")
+    .query({ q: "Acme", limit: 10, page: 1 });
+
+  assert.equal(listResponse.status, 200);
+  assert.ok(Array.isArray(listResponse.body?.clients));
+  assert.equal(listResponse.body?.clients?.length, 1);
+  assert.equal(listResponse.body?.clients?.[0]?.uid, clientUid);
+
+  const patchResponse = await request(app)
+    .patch(`/api/v1/users/admin/client-management/clients/${clientUid}`)
+    .set("x-user-id", adminUid)
+    .set("x-user-email", adminEmail)
+    .set("x-user-roles", "admin")
+    .send({
+      status: "suspended",
+      verificationStatus: "submitted",
+      assignedToUid: "area_admin_11",
+      tags: ["Priority", "Escalated"]
+    });
+
+  assert.equal(patchResponse.status, 200);
+  assert.equal(patchResponse.body?.status, "suspended");
+  assert.equal(patchResponse.body?.verification?.status, "submitted");
+  assert.equal(
+    patchResponse.body?.clientWorkspace?.statusControl?.assignedToUid,
+    "area_admin_11"
+  );
+  assert.deepEqual(
+    patchResponse.body?.clientWorkspace?.statusControl?.tags,
+    ["priority", "escalated"]
+  );
+});

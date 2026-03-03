@@ -56,5 +56,6 @@ export const env = {
   smtpUser: process.env.SMTP_USER || "",
   smtpPass: process.env.SMTP_PASS || "",
   smtpFromEmail: process.env.SMTP_FROM_EMAIL || "",
-  smtpFromName: process.env.SMTP_FROM_NAME || "Kiamina"
+  smtpFromName: process.env.SMTP_FROM_NAME || "Kiamina",
+  realtimeEventsServiceToken: process.env.REALTIME_EVENTS_SERVICE_TOKEN || ""
 };

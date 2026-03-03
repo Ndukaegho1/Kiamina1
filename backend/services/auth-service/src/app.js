@@ -9,15 +9,26 @@ import authRoutes from "./routes/v1/auth.routes.js";
 
 const app = express();
 
+const isAllowedOrigin = (origin = "") => {
+  if (!origin) return true;
+  if (env.corsOrigins.length === 0 || env.corsOrigins.includes(origin)) {
+    return true;
+  }
+  if (env.nodeEnv === "development") return true;
+  return false;
+};
+
 app.use(helmet());
 app.use(
   cors({
     credentials: true,
     origin(origin, callback) {
-      if (!origin || env.corsOrigins.length === 0 || env.corsOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Origin not allowed by CORS policy"));
+      const corsError = new Error("Origin not allowed by CORS policy");
+      corsError.status = 403;
+      return callback(corsError);
     }
   })
 );

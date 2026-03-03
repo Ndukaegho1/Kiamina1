@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildAdminClientManagementUpdatePayload,
   buildAdminDashboardUpdatePayload,
   buildClientDashboardUpdatePayload,
   buildClientProfileUpdatePayload,
+  buildClientWorkspaceUpdatePayload,
+  validateAdminClientManagementListQuery,
   validateSyncFromAuthPayload
 } from "../services/users-service/src/validation/users.validation.js";
 
@@ -60,4 +63,49 @@ test("users: admin dashboard payload builds support leads and newsletters", () =
   assert.equal(payload["adminDashboard.newsletters"].length, 1);
   assert.equal(payload["adminDashboard.stats.openSupportLeads"], 1);
   assert.equal(payload["adminDashboard.stats.newsletterSubscribers"], 1);
+});
+
+test("users: client workspace payload accepts mixed workspace sections", () => {
+  const { errors, payload } = buildClientWorkspaceUpdatePayload({
+    documents: { expenses: [{ id: "doc_1" }] },
+    activityLog: [{ type: "upload" }],
+    profilePhoto: "https://cdn.example.com/profile.png"
+  });
+
+  assert.deepEqual(errors, []);
+  assert.deepEqual(payload["clientWorkspace.documents"], { expenses: [{ id: "doc_1" }] });
+  assert.deepEqual(payload["clientWorkspace.activityLog"], [{ type: "upload" }]);
+  assert.equal(payload["clientWorkspace.profilePhoto"], "https://cdn.example.com/profile.png");
+});
+
+test("users: admin client management list query parser normalizes values", () => {
+  const { errors, payload } = validateAdminClientManagementListQuery({
+    q: " Acme ",
+    page: "2",
+    limit: "25",
+    sortBy: "businessName",
+    sortOrder: "asc",
+    onboardingCompleted: "true"
+  });
+
+  assert.deepEqual(errors, []);
+  assert.equal(payload.q, "Acme");
+  assert.equal(payload.page, 2);
+  assert.equal(payload.limit, 25);
+  assert.equal(payload.sortBy, "businessName");
+  assert.equal(payload.sortOrder, "asc");
+  assert.equal(payload.onboardingCompleted, true);
+});
+
+test("users: admin client management payload normalizes verification and tags", () => {
+  const { errors, payload } = buildAdminClientManagementUpdatePayload({
+    verificationStatus: "verified",
+    assignedToUid: " area_admin_1 ",
+    tags: ["Priority", "priority", "VAT"]
+  });
+
+  assert.deepEqual(errors, []);
+  assert.equal(payload["verification.status"], "verified");
+  assert.equal(payload["clientWorkspace.statusControl.assignedToUid"], "area_admin_1");
+  assert.deepEqual(payload["clientWorkspace.statusControl.tags"], ["priority", "vat"]);
 });

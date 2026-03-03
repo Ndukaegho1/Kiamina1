@@ -32,5 +32,8 @@ export const env = {
   mongoUri: process.env.MONGO_URI || "mongodb://localhost:27017",
   mongoDbName: process.env.MONGO_DB_NAME || "kiamina_users",
   documentsServiceUrl: process.env.DOCUMENTS_SERVICE_URL || "http://localhost:4103",
-  documentsServiceTimeoutMs: toNumber(process.env.DOCUMENTS_SERVICE_TIMEOUT_MS, 6000)
+  documentsServiceTimeoutMs: toNumber(process.env.DOCUMENTS_SERVICE_TIMEOUT_MS, 6000),
+  notificationsServiceUrl: process.env.NOTIFICATIONS_SERVICE_URL || "http://localhost:4104",
+  notificationsServiceTimeoutMs: toNumber(process.env.NOTIFICATIONS_SERVICE_TIMEOUT_MS, 3000),
+  notificationsServiceEventToken: process.env.NOTIFICATIONS_SERVICE_EVENT_TOKEN || ""
 };

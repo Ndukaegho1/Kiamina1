@@ -71,6 +71,23 @@ const patchJson = async (path, payload, { authorizationToken = '' } = {}) => {
   }
 }
 
+const getJson = async (path, { authorizationToken = '' } = {}) => {
+  try {
+    const response = await apiFetch(path, {
+      method: 'GET',
+      headers: buildJsonHeaders(authorizationToken),
+    })
+    const data = await response.json().catch(() => ({}))
+    return { ok: response.ok, status: response.status, data }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      data: { message: String(error?.message || 'Network request failed.') },
+    }
+  }
+}
+
 export const registerAuthAccountRecord = async ({
   uid = '',
   email = '',
@@ -185,5 +202,120 @@ export const fetchClientDashboardOverviewFromBackend = async ({
     return { ok: response.ok, status: response.status, data }
   } catch (error) {
     return { ok: false, status: 0, data: { message: String(error?.message || 'Network request failed.') } }
+  }
+}
+
+export const fetchClientWorkspaceFromBackend = async ({
+  authorizationToken = '',
+} = {}) => {
+  const token = String(authorizationToken || '').trim()
+  if (!token) {
+    return { ok: false, status: 0, data: null }
+  }
+  return getJson('/api/users/me/client-workspace', {
+    authorizationToken: token,
+  })
+}
+
+export const patchClientWorkspaceToBackend = async ({
+  authorizationToken = '',
+  workspacePayload = {},
+} = {}) => {
+  const token = String(authorizationToken || '').trim()
+  if (!token) {
+    return { ok: false, status: 0, data: null }
+  }
+  return patchJson('/api/users/me/client-workspace', workspacePayload, {
+    authorizationToken: token,
+  })
+}
+
+export const fetchAdminClientManagementFromBackend = async ({
+  authorizationToken = '',
+  query = {},
+} = {}) => {
+  const token = String(authorizationToken || '').trim()
+  if (!token) {
+    return { ok: false, status: 0, data: null }
+  }
+
+  const searchParams = new URLSearchParams()
+  Object.entries(query || {}).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    searchParams.set(key, String(value))
+  })
+  const suffix = searchParams.toString() ? `?${searchParams.toString()}` : ''
+  return getJson(`/api/users/admin/client-management${suffix}`, {
+    authorizationToken: token,
+  })
+}
+
+export const patchAdminClientFromBackend = async ({
+  authorizationToken = '',
+  uid = '',
+  payload = {},
+} = {}) => {
+  const token = String(authorizationToken || '').trim()
+  const normalizedUid = String(uid || '').trim()
+  if (!token || !normalizedUid) {
+    return { ok: false, status: 0, data: null }
+  }
+  return patchJson(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedUid)}`, payload, {
+    authorizationToken: token,
+  })
+}
+
+const normalizeApiBaseUrl = (value = '') => {
+  const raw = String(value || '').trim()
+  if (!raw) return '/api/v1'
+  return raw.endsWith('/') ? raw.slice(0, -1) : raw
+}
+
+export const subscribeToRealtimeEvents = ({
+  scope = 'me',
+  types = [],
+  topics = [],
+  onEvent = () => {},
+  onError = () => {},
+} = {}) => {
+  if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+    return { close: () => {} }
+  }
+
+  const params = new URLSearchParams()
+  params.set('scope', scope === 'all' ? 'all' : 'me')
+  if (Array.isArray(types) && types.length > 0) {
+    params.set('types', [...new Set(types.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))].join(','))
+  }
+  if (Array.isArray(topics) && topics.length > 0) {
+    params.set('topics', [...new Set(topics.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean))].join(','))
+  }
+
+  const baseUrl = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL || '/api/v1')
+  const streamUrl = `${baseUrl}/notifications/events/stream?${params.toString()}`
+  const eventSource = new EventSource(streamUrl, { withCredentials: true })
+
+  const handleEvent = (rawEvent) => {
+    try {
+      const payload = JSON.parse(String(rawEvent?.data || '{}'))
+      onEvent(payload)
+    } catch {
+      // ignore malformed payloads
+    }
+  }
+
+  eventSource.addEventListener('event', handleEvent)
+  eventSource.addEventListener('ready', handleEvent)
+  eventSource.addEventListener('heartbeat', () => {})
+  eventSource.onerror = (error) => {
+    onError(error)
+  }
+
+  return {
+    close: () => {
+      eventSource.removeEventListener('event', handleEvent)
+      eventSource.removeEventListener('ready', handleEvent)
+      eventSource.close()
+    },
   }
 }

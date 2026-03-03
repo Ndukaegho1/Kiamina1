@@ -303,20 +303,6 @@ function maskEmailAddress(email) {
   return `${local[0]}${'*'.repeat(Math.max(4, local.length - 1))}${domain}`
 }
 
-function getOtpPreviewCode(email) {
-  if (!import.meta.env.DEV) return ''
-  const normalizedEmail = email?.trim()?.toLowerCase()
-  if (!normalizedEmail) return ''
-  try {
-    const rawPreview = sessionStorage.getItem('kiaminaOtpPreview')
-    if (!rawPreview) return ''
-    const parsedPreview = JSON.parse(rawPreview)
-    return parsedPreview?.[normalizedEmail]?.code || ''
-  } catch {
-    return ''
-  }
-}
-
 function getPasswordStrengthState(password) {
   let score = 0
   if (password.length >= 8) score += 1
@@ -340,7 +326,6 @@ function OtpVerificationModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp
 
   const otpCode = otpDigits.join('')
   const maskedEmail = maskEmailAddress(challenge.email)
-  const devOtpCode = getOtpPreviewCode(challenge?.email)
 
   const triggerShake = () => {
     setIsShaking(true)
@@ -421,7 +406,12 @@ function OtpVerificationModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp
     if (isResending) return
     setIsResending(true)
     setOtpError('')
-    await onResendOtp()
+    const result = await onResendOtp()
+    if (!result?.ok) {
+      setOtpError(result?.message || 'Unable to resend OTP right now.')
+      setIsResending(false)
+      return
+    }
     setOtpDigits(['', '', '', '', '', ''])
     otpInputRefs.current[0]?.focus()
     setIsResending(false)
@@ -434,12 +424,6 @@ function OtpVerificationModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp
         <h3 className="text-xl font-semibold text-text-primary">Verify Your Identity</h3>
         <p className="text-sm text-text-secondary mt-2">We&apos;ve sent a 6-digit code to your registered email.</p>
         <p className="text-xs text-text-muted mt-1">{maskedEmail}</p>
-        {devOtpCode && (
-          <div className="mt-3 rounded-md border border-info/30 bg-info-bg px-3 py-2">
-            <p className="text-[11px] uppercase tracking-wide text-primary font-semibold">Development OTP</p>
-            <p className="text-sm text-primary font-mono mt-0.5">{devOtpCode}</p>
-          </div>
-        )}
 
         <div className="mt-6" style={isShaking ? { animation: 'otp-shake 0.35s ease-in-out' } : undefined}>
           <div className="grid grid-cols-6 gap-2" onPaste={handleOtpPaste}>
@@ -793,11 +777,6 @@ function AuthExperience({
                 {isSendingResetLink ? 'Processing...' : 'Send Reset Link'}
               </button>
             </form>
-            {forgotFeedback?.type === 'success' && (
-              <button type="button" onClick={() => setMode('reset-password')} className="w-full mt-3 h-10 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors">
-                Continue
-              </button>
-            )}
             <p className="text-sm text-text-muted text-center mt-6">
               <button type="button" onClick={() => setMode('login')} className="text-primary font-medium hover:text-primary-light">Back to Sign In</button>
             </p>

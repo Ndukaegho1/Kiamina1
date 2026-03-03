@@ -7,6 +7,7 @@ import {
   postSupportMessageForTicket,
   updateSupportTicketForActor
 } from "../services/support.service.js";
+import { publishRealtimeEvent } from "../services/realtime-events.service.js";
 import {
   buildSupportTicketUpdatePayload,
   validateCreateSupportMessagePayload,
@@ -27,6 +28,14 @@ const requireActor = (req, res) => {
   return actor;
 };
 
+const emitSupportEvent = (eventPayload = {}) => {
+  try {
+    publishRealtimeEvent(eventPayload);
+  } catch (error) {
+    console.error("support realtime emit warning:", error.message);
+  }
+};
+
 export const createTicket = async (req, res, next) => {
   try {
     const actor = requireActor(req, res);
@@ -38,6 +47,24 @@ export const createTicket = async (req, res, next) => {
     }
 
     const result = await createSupportTicketForActor({ actor, payload });
+    emitSupportEvent({
+      eventType: "support.ticket.created",
+      topic: "support",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        userIds: [result.ticket.ownerUserId],
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        ticketId: result.ticket.ticketId,
+        status: result.ticket.status,
+        priority: result.ticket.priority
+      }
+    });
     return res.status(201).json({
       message: "Support ticket created.",
       ticket: result.ticket,
@@ -109,6 +136,25 @@ export const patchTicket = async (req, res, next) => {
       isAdmin: isAdminActor(actor),
       payload
     });
+    emitSupportEvent({
+      eventType: "support.ticket.updated",
+      topic: "support",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        userIds: [updated.ownerUserId],
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        ticketId: updated.ticketId,
+        status: updated.status,
+        priority: updated.priority,
+        assignedToUid: updated.assignedToUid || ""
+      }
+    });
 
     return res.status(200).json(updated);
   } catch (error) {
@@ -131,6 +177,31 @@ export const postTicketMessage = async (req, res, next) => {
       actor,
       isAdmin: isAdminActor(actor),
       payload
+    });
+    const ticket = await getSupportTicketByTicketIdForActor({
+      ticketId: req.params.ticketId,
+      actor,
+      isAdmin: isAdminActor(actor)
+    });
+
+    emitSupportEvent({
+      eventType: "support.message.created",
+      topic: "support",
+      actor: {
+        uid: actor.uid,
+        email: actor.email,
+        roles: actor.roles
+      },
+      audience: {
+        userIds: [ticket.ownerUserId],
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        ticketId: ticket.ticketId,
+        messageId: message.id,
+        senderType: message.senderType,
+        visibility: message.visibility
+      }
     });
 
     return res.status(201).json({

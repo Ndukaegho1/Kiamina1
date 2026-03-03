@@ -10,20 +10,6 @@ function maskEmailAddress(email) {
   return `${localPart[0]}${'*'.repeat(Math.max(4, localPart.length - 1))}${domainPart}`
 }
 
-function getOtpPreviewCode(email) {
-  if (!import.meta.env.DEV) return ''
-  const normalizedEmail = email?.trim()?.toLowerCase()
-  if (!normalizedEmail) return ''
-  try {
-    const rawPreview = sessionStorage.getItem('kiaminaOtpPreview')
-    if (!rawPreview) return ''
-    const parsedPreview = JSON.parse(rawPreview)
-    return parsedPreview?.[normalizedEmail]?.code || ''
-  } catch {
-    return ''
-  }
-}
-
 function AdminOtpModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
   const [otpDigits, setOtpDigits] = useState(['', '', '', '', '', ''])
   const [otpError, setOtpError] = useState('')
@@ -32,7 +18,6 @@ function AdminOtpModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
   const inputRefs = useRef([])
 
   const otpCode = otpDigits.join('')
-  const devOtpCode = getOtpPreviewCode(challenge?.email)
 
   const handleOtpChange = (index, rawValue) => {
     const numericValue = rawValue.replace(/\D/g, '')
@@ -111,7 +96,12 @@ function AdminOtpModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
     if (isResending) return
     setIsResending(true)
     setOtpError('')
-    await onResendOtp()
+    const result = await onResendOtp()
+    if (!result?.ok) {
+      setOtpError(result?.message || 'Unable to resend OTP right now.')
+      setIsResending(false)
+      return
+    }
     setOtpDigits(['', '', '', '', '', ''])
     inputRefs.current[0]?.focus()
     setIsResending(false)
@@ -123,12 +113,6 @@ function AdminOtpModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
         <h3 className="text-xl font-semibold text-text-primary">Admin Verification</h3>
         <p className="text-sm text-text-secondary mt-2">Enter the 6-digit verification code sent to your email.</p>
         <p className="text-xs text-text-muted mt-1">{maskEmailAddress(challenge?.email)}</p>
-        {devOtpCode && (
-          <div className="mt-3 rounded-md border border-info/30 bg-info-bg px-3 py-2">
-            <p className="text-[11px] uppercase tracking-wide text-primary font-semibold">Development OTP</p>
-            <p className="text-sm text-primary font-mono mt-0.5">{devOtpCode}</p>
-          </div>
-        )}
 
         <div className="mt-6" onPaste={handleOtpPaste}>
           <div className="grid grid-cols-6 gap-2">

@@ -1,13 +1,28 @@
 import {
+  countUsers,
   deleteUserById,
   findUserByEmail,
   findUserById,
   findUserByUid,
+  listUsers,
   updateUserByUid,
   updateUserById,
   upsertUserFromAuth
 } from "../repositories/users.repository.js";
 import { env } from "../config/env.js";
+import { publishUsersRealtimeEvent } from "./realtime-events.service.js";
+
+const ADMIN_EVENT_ROLES = ["admin", "owner", "superadmin"];
+const CLIENT_ROLE = "client";
+const CLIENT_MANAGEMENT_SORT_FIELDS = Object.freeze({
+  createdAt: "createdAt",
+  updatedAt: "updatedAt",
+  email: "email",
+  displayName: "displayName",
+  businessName: "entityProfile.businessName",
+  status: "status",
+  verificationStatus: "verification.status"
+});
 
 export const syncUserFromAuth = async ({ uid, email, displayName, roles }) =>
   upsertUserFromAuth({ uid, email, displayName, roles });
@@ -64,6 +79,160 @@ const deriveVerificationSnapshot = ({ currentVerification = {}, profileStepCompl
   };
 };
 
+const toLowerRoles = (roles = []) =>
+  (Array.isArray(roles) ? roles : [])
+    .map((role) => String(role || "").trim().toLowerCase())
+    .filter(Boolean);
+
+const isClientUser = (user = {}) =>
+  toLowerRoles(user.roles).includes(CLIENT_ROLE);
+
+const normalizeSearchTerm = (value = "") => String(value || "").trim();
+const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const toPlainObject = (value, fallback = {}) => {
+  if (!value) return fallback;
+  if (typeof value.toObject === "function") {
+    return value.toObject();
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return { ...value };
+  }
+  return fallback;
+};
+
+const buildClientWorkspacePayload = ({ user }) => ({
+  uid: user.uid,
+  email: user.email,
+  displayName: user.displayName || "",
+  workspace: toPlainObject(user.clientWorkspace, {})
+});
+
+const buildClientManagementRow = ({ user }) => ({
+  uid: user.uid,
+  email: user.email,
+  displayName: user.displayName || "",
+  status: user.status || "active",
+  roles: Array.isArray(user.roles) ? user.roles : [],
+  businessName: user.entityProfile?.businessName || "",
+  country: user.entityProfile?.country || "",
+  currency: user.entityProfile?.currency || "NGN",
+  businessType: user.entityProfile?.businessType || "",
+  verificationStatus: user.verification?.status || "pending",
+  verificationStepsCompleted: Number(user.verification?.stepsCompleted || 0),
+  onboardingCompleted: Boolean(user.onboarding?.completed),
+  assignedToUid: String(user.clientWorkspace?.statusControl?.assignedToUid || "").trim(),
+  createdAt: user.createdAt || null,
+  updatedAt: user.updatedAt || null
+});
+
+const buildClientManagementDetail = ({ user }) => ({
+  uid: user.uid,
+  email: user.email,
+  displayName: user.displayName || "",
+  status: user.status || "active",
+  roles: Array.isArray(user.roles) ? user.roles : [],
+  clientProfile: toPlainObject(user.clientProfile, {}),
+  entityProfile: toPlainObject(user.entityProfile, {}),
+  onboarding: toPlainObject(user.onboarding, {}),
+  verification: toPlainObject(user.verification, {}),
+  notificationPreferences: toPlainObject(user.notificationPreferences, {}),
+  clientDashboard: toPlainObject(user.clientDashboard, {}),
+  clientWorkspace: toPlainObject(user.clientWorkspace, {}),
+  createdAt: user.createdAt || null,
+  updatedAt: user.updatedAt || null
+});
+
+const buildClientManagementFilter = ({
+  q = "",
+  status = "",
+  verificationStatus = "",
+  onboardingCompleted
+} = {}) => {
+  const filter = {
+    roles: { $in: [CLIENT_ROLE] }
+  };
+
+  if (status) {
+    filter.status = status;
+  }
+
+  if (verificationStatus) {
+    filter["verification.status"] = verificationStatus;
+  }
+
+  if (typeof onboardingCompleted === "boolean") {
+    filter["onboarding.completed"] = onboardingCompleted;
+  }
+
+  const term = normalizeSearchTerm(q);
+  if (term) {
+    const regex = new RegExp(escapeRegex(term), "i");
+    filter.$or = [
+      { email: regex },
+      { displayName: regex },
+      { "clientProfile.fullName": regex },
+      { "entityProfile.businessName": regex }
+    ];
+  }
+
+  return filter;
+};
+
+const buildClientManagementSort = ({ sortBy = "updatedAt", sortOrder = "desc" } = {}) => {
+  const resolvedSortField = CLIENT_MANAGEMENT_SORT_FIELDS[sortBy] || "updatedAt";
+  const direction = sortOrder === "asc" ? 1 : -1;
+  return { [resolvedSortField]: direction };
+};
+
+const buildClientManagementSummary = async () => {
+  const baseFilter = { roles: { $in: [CLIENT_ROLE] } };
+  const [totalClients, activeClients, disabledClients, suspendedClients, verifiedClients, onboardingCompleted] =
+    await Promise.all([
+      countUsers(baseFilter),
+      countUsers({ ...baseFilter, status: "active" }),
+      countUsers({ ...baseFilter, status: "disabled" }),
+      countUsers({ ...baseFilter, status: "suspended" }),
+      countUsers({ ...baseFilter, "verification.status": "verified" }),
+      countUsers({ ...baseFilter, "onboarding.completed": true })
+    ]);
+
+  return {
+    totalClients,
+    activeClients,
+    disabledClients,
+    suspendedClients,
+    verifiedClients,
+    pendingVerificationClients: Math.max(0, totalClients - verifiedClients),
+    onboardingCompletedClients: onboardingCompleted,
+    onboardingPendingClients: Math.max(0, totalClients - onboardingCompleted)
+  };
+};
+
+const emitUsersRealtimeEvent = async ({
+  eventType,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = [],
+  audienceUserIds = [],
+  audienceRoles = [],
+  payload = {}
+}) => {
+  try {
+    await publishUsersRealtimeEvent({
+      eventType,
+      actorUid,
+      actorEmail,
+      actorRoles,
+      audienceUserIds,
+      audienceRoles,
+      payload
+    });
+  } catch (error) {
+    console.error("users-service realtime emit warning:", error.message);
+  }
+};
+
 const fetchDocumentSummaryByOwner = async ({ ownerUserId, actorEmail = "", actorRoles = [] }) => {
   if (!ownerUserId || !env.documentsServiceUrl) {
     return null;
@@ -115,10 +284,10 @@ const buildDashboardOverviewPayload = ({ user, documentSummary = null }) => ({
   companyName: user.entityProfile?.businessName || "",
   businessCountry: user.entityProfile?.country || "",
   baseCurrency: user.entityProfile?.currency || "NGN",
-  onboarding: user.onboarding || {},
-  verification: user.verification || {},
-  notificationPreferences: user.notificationPreferences || {},
-  dashboard: user.clientDashboard || {},
+  onboarding: toPlainObject(user.onboarding, {}),
+  verification: toPlainObject(user.verification, {}),
+  notificationPreferences: toPlainObject(user.notificationPreferences, {}),
+  dashboard: toPlainObject(user.clientDashboard, {}),
   documentSummary: documentSummary
     ? {
         ownerUserId: String(documentSummary.ownerUserId || user.uid),
@@ -171,11 +340,12 @@ const buildDashboardOverviewPayload = ({ user, documentSummary = null }) => ({
 });
 
 const buildAdminDashboardPayload = ({ user }) => {
-  const supportLeads = Array.isArray(user.adminDashboard?.supportLeads)
-    ? user.adminDashboard.supportLeads
+  const adminDashboard = toPlainObject(user.adminDashboard, {});
+  const supportLeads = Array.isArray(adminDashboard.supportLeads)
+    ? adminDashboard.supportLeads
     : [];
-  const newsletters = Array.isArray(user.adminDashboard?.newsletters)
-    ? user.adminDashboard.newsletters
+  const newsletters = Array.isArray(adminDashboard.newsletters)
+    ? adminDashboard.newsletters
     : [];
 
   const openSupportLeads = supportLeads.filter(
@@ -193,9 +363,9 @@ const buildAdminDashboardPayload = ({ user }) => {
     email: user.email,
     displayName: user.displayName || "",
     roles: Array.isArray(user.roles) ? user.roles : [],
-    adminProfile: user.adminProfile || {},
+    adminProfile: toPlainObject(user.adminProfile, {}),
     dashboard: {
-      ...(user.adminDashboard || {}),
+      ...adminDashboard,
       supportLeads,
       newsletters,
       stats: {
@@ -227,7 +397,13 @@ export const ensureUserFromActor = async ({ uid, email, roles = [], displayName 
   });
 };
 
-export const updateClientProfileByUid = async ({ uid, actorEmail, actorRoles = [], payload }) => {
+export const updateClientProfileByUid = async ({
+  uid,
+  actorUid = "",
+  actorEmail,
+  actorRoles = [],
+  payload
+}) => {
   const existingUser = await ensureUserFromActor({
     uid,
     email: actorEmail,
@@ -322,7 +498,24 @@ export const updateClientProfileByUid = async ({ uid, actorEmail, actorRoles = [
   nextPayload["verification.fullyVerifiedAt"] = verificationSnapshot.fullyVerifiedAt;
   nextPayload["onboarding.verificationPending"] = verificationSnapshot.stepsCompleted < 3;
 
-  return updateUserByUid(uid, { $set: nextPayload });
+  const updatedUser = await updateUserByUid(uid, { $set: nextPayload });
+  if (!updatedUser) return null;
+
+  void emitUsersRealtimeEvent({
+    eventType: "client.profile.updated",
+    actorUid: actorUid || uid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid,
+      displayName: updatedUser.displayName || "",
+      verificationStatus: updatedUser.verification?.status || "pending"
+    }
+  });
+
+  return updatedUser;
 };
 
 export const getClientDashboardByUid = async ({ uid, actorEmail, actorRoles = [] }) => {
@@ -343,7 +536,13 @@ export const getClientDashboardByUid = async ({ uid, actorEmail, actorRoles = []
   return buildDashboardOverviewPayload({ user, documentSummary });
 };
 
-export const updateClientDashboardByUid = async ({ uid, actorEmail, actorRoles = [], payload }) => {
+export const updateClientDashboardByUid = async ({
+  uid,
+  actorUid = "",
+  actorEmail,
+  actorRoles = [],
+  payload
+}) => {
   const existingUser = await ensureUserFromActor({
     uid,
     email: actorEmail,
@@ -366,10 +565,26 @@ export const updateClientDashboardByUid = async ({ uid, actorEmail, actorRoles =
     actorRoles
   });
 
-  return buildDashboardOverviewPayload({
+  const response = buildDashboardOverviewPayload({
     user: updatedUser,
     documentSummary
   });
+
+  void emitUsersRealtimeEvent({
+    eventType: "client.dashboard.updated",
+    actorUid: actorUid || uid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid,
+      dashboard: response.dashboard || {},
+      onboarding: response.onboarding || {}
+    }
+  });
+
+  return response;
 };
 
 export const getClientDashboardOverviewByUid = async ({
@@ -390,7 +605,13 @@ export const getAdminDashboardByUid = async ({ uid, actorEmail, actorRoles = [] 
   return buildAdminDashboardPayload({ user });
 };
 
-export const updateAdminDashboardByUid = async ({ uid, actorEmail, actorRoles = [], payload }) => {
+export const updateAdminDashboardByUid = async ({
+  uid,
+  actorUid = "",
+  actorEmail,
+  actorRoles = [],
+  payload
+}) => {
   const existingUser = await ensureUserFromActor({
     uid,
     email: actorEmail,
@@ -426,5 +647,158 @@ export const updateAdminDashboardByUid = async ({ uid, actorEmail, actorRoles = 
   const updatedUser = await updateUserByUid(uid, { $set: nextPayload });
   if (!updatedUser) return null;
 
-  return buildAdminDashboardPayload({ user: updatedUser });
+  const response = buildAdminDashboardPayload({ user: updatedUser });
+
+  void emitUsersRealtimeEvent({
+    eventType: "admin.dashboard.updated",
+    actorUid: actorUid || uid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid,
+      dashboard: response.dashboard || {}
+    }
+  });
+
+  return response;
+};
+
+export const getClientWorkspaceByUid = async ({ uid, actorEmail, actorRoles = [] }) => {
+  const user = await ensureUserFromActor({
+    uid,
+    email: actorEmail,
+    roles: actorRoles,
+    displayName: ""
+  });
+  if (!user) return null;
+
+  return buildClientWorkspacePayload({ user });
+};
+
+export const updateClientWorkspaceByUid = async ({
+  uid,
+  actorUid = "",
+  actorEmail,
+  actorRoles = [],
+  payload
+}) => {
+  const existingUser = await ensureUserFromActor({
+    uid,
+    email: actorEmail,
+    roles: actorRoles,
+    displayName: ""
+  });
+  if (!existingUser) return null;
+
+  const nextPayload = {
+    ...payload,
+    "clientWorkspace.updatedAt": new Date(),
+    "clientDashboard.lastVisitedAt": new Date()
+  };
+
+  const updatedUser = await updateUserByUid(uid, { $set: nextPayload });
+  if (!updatedUser) return null;
+
+  const response = buildClientWorkspacePayload({ user: updatedUser });
+  void emitUsersRealtimeEvent({
+    eventType: "client.workspace.updated",
+    actorUid: actorUid || uid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid,
+      workspaceUpdatedAt: updatedUser.clientWorkspace?.updatedAt || null
+    }
+  });
+
+  return response;
+};
+
+export const listClientManagementClientsForAdmin = async ({ query = {} }) => {
+  const filter = buildClientManagementFilter(query);
+  const sort = buildClientManagementSort(query);
+  const page = Math.max(1, Number(query.page) || 1);
+  const limit = Math.max(1, Number(query.limit) || 50);
+  const skip = (page - 1) * limit;
+
+  const [summary, total, users] = await Promise.all([
+    buildClientManagementSummary(),
+    countUsers(filter),
+    listUsers({ filter, sort, skip, limit })
+  ]);
+
+  return {
+    summary,
+    pagination: {
+      total,
+      page,
+      limit,
+      pages: Math.max(1, Math.ceil(total / limit))
+    },
+    clients: users.map((user) => buildClientManagementRow({ user }))
+  };
+};
+
+export const getClientManagementClientByUidForAdmin = async ({ uid }) => {
+  const user = await findUserByUid(uid);
+  if (!user || !isClientUser(user)) return null;
+
+  return buildClientManagementDetail({ user });
+};
+
+export const updateClientManagementClientByUidForAdmin = async ({
+  uid,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = [],
+  payload = {}
+}) => {
+  const existing = await findUserByUid(uid);
+  if (!existing || !isClientUser(existing)) return null;
+
+  const nextPayload = {
+    ...payload,
+    "clientWorkspace.updatedAt": new Date(),
+    "clientWorkspace.statusControl.updatedAt": new Date()
+  };
+
+  const nextVerificationStatus = payload["verification.status"];
+  if (nextVerificationStatus === "verified") {
+    nextPayload["verification.fullyVerifiedAt"] = existing.verification?.fullyVerifiedAt || new Date();
+    nextPayload["verification.stepsCompleted"] = Math.max(
+      3,
+      Number(existing.verification?.stepsCompleted || 0)
+    );
+    nextPayload["onboarding.verificationPending"] = false;
+  } else if (nextVerificationStatus && nextVerificationStatus !== "verified") {
+    nextPayload["verification.fullyVerifiedAt"] = null;
+    if (nextPayload["onboarding.verificationPending"] === undefined) {
+      nextPayload["onboarding.verificationPending"] = true;
+    }
+  }
+
+  const updated = await updateUserByUid(uid, { $set: nextPayload });
+  if (!updated) return null;
+
+  const response = buildClientManagementDetail({ user: updated });
+  void emitUsersRealtimeEvent({
+    eventType: "admin.client-management.updated",
+    actorUid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid,
+      status: response.status,
+      verificationStatus: response.verification?.status || "pending",
+      assignedToUid: response.clientWorkspace?.statusControl?.assignedToUid || ""
+    }
+  });
+
+  return response;
 };
