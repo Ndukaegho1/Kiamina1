@@ -49,6 +49,13 @@ export const env = {
   qstashBaseUrl: process.env.QSTASH_BASE_URL || "",
   qstashToken: process.env.QSTASH_TOKEN || "",
   qstashForwardUrl: process.env.QSTASH_FORWARD_URL || "",
+  brevoApiBaseUrl: process.env.BREVO_API_BASE_URL || "https://api.brevo.com/v3",
+  brevoApiKey: process.env.BREVO_API_KEY || "",
+  brevoApiTimeoutMs: toNumber(process.env.BREVO_API_TIMEOUT_MS, 10000),
+  brevoSenderEmail:
+    process.env.BREVO_SENDER_EMAIL || process.env.SMTP_FROM_EMAIL || "",
+  brevoSenderName:
+    process.env.BREVO_SENDER_NAME || process.env.SMTP_FROM_NAME || "Kiamina",
   smtpHost: process.env.SMTP_HOST || "",
   smtpPort: toNumber(process.env.SMTP_PORT, 587),
   smtpSecure: toBoolean(process.env.SMTP_SECURE, false),

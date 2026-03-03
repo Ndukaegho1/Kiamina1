@@ -4,6 +4,7 @@ import {
   listNotificationLogs,
   updateNotificationLog
 } from "../repositories/notifications.repository.js";
+import { sendEmailViaBrevo } from "./brevo.service.js";
 import { publishToQstash } from "./qstash.service.js";
 import { sendEmailViaSmtp } from "./smtp.service.js";
 import { createServiceUnavailableError } from "../utils/errors.js";
@@ -18,6 +19,22 @@ export const queueEmailNotification = async ({ to, subject, message }) => {
   });
 
   try {
+    const brevoResult = await sendEmailViaBrevo({ to, subject, message });
+    if (brevoResult.sent) {
+      const updated = await updateNotificationLog(log.id, {
+        status: "sent",
+        providerMessageId: brevoResult.messageId || "",
+        sentAt: new Date()
+      });
+      return updated;
+    }
+
+    if (brevoResult.attempted) {
+      throw createServiceUnavailableError(
+        brevoResult.errorMessage || brevoResult.reason || "Brevo API delivery failed"
+      );
+    }
+
     const smtpResult = await sendEmailViaSmtp({ to, subject, message });
     if (smtpResult.sent) {
       const updated = await updateNotificationLog(log.id, {
