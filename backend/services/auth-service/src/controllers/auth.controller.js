@@ -15,7 +15,10 @@ import {
   hashRefreshToken,
   verifyAccessToken
 } from "../services/auth-tokens.service.js";
-import { dispatchPasswordResetLink } from "../services/auth-messaging.service.js";
+import {
+  dispatchOtpEmail,
+  dispatchPasswordResetLink
+} from "../services/auth-messaging.service.js";
 import {
   validateLogoutSessionPayload,
   validateRefreshTokenPayload,
@@ -154,6 +157,33 @@ const clearAuthCookies = (res) => {
   });
 };
 
+const OTP_DELIVERY_ERROR_MESSAGES = {
+  "notifications-service-url-not-configured":
+    "OTP email delivery is not configured on the server.",
+  "notification-request-timeout":
+    "OTP email delivery timed out while contacting the notifications service.",
+  "notification-request-failed":
+    "OTP email delivery failed while contacting the notifications service."
+};
+
+const formatOtpDeliveryErrorMessage = (reason = "") => {
+  const normalizedReason = String(reason || "").trim();
+  if (!normalizedReason) {
+    return "OTP challenge created but we could not deliver the OTP email.";
+  }
+
+  if (OTP_DELIVERY_ERROR_MESSAGES[normalizedReason]) {
+    return OTP_DELIVERY_ERROR_MESSAGES[normalizedReason];
+  }
+
+  if (normalizedReason.startsWith("notification-service-status-")) {
+    const statusCode = normalizedReason.slice("notification-service-status-".length);
+    return `OTP email delivery failed with notifications service status ${statusCode}.`;
+  }
+
+  return "OTP challenge created but OTP email delivery failed.";
+};
+
 export const sendOtp = async (req, res, next) => {
   try {
     const { errors, payload } = validateSendOtpPayload(req.body);
@@ -162,11 +192,41 @@ export const sendOtp = async (req, res, next) => {
     }
 
     const result = await issueOtpChallenge(payload);
+    const dispatchResult = await dispatchOtpEmail({
+      email: payload.email,
+      otp: result.otp,
+      purpose: payload.purpose,
+      expiryMinutes: env.otpExpiryMinutes
+    });
+
+    if (!dispatchResult.queued) {
+      if (env.nodeEnv !== "production") {
+        return res.status(202).json({
+          message:
+            "OTP challenge created (development preview enabled because email delivery failed).",
+          challengeId: result.challengeId,
+          expiresAt: result.expiresAt,
+          dispatchQueued: false,
+          deliveryError: formatOtpDeliveryErrorMessage(dispatchResult.reason),
+          reason: dispatchResult.reason || "notification-request-failed",
+          previewOtp: result.otp
+        });
+      }
+
+      return res.status(502).json({
+        message: formatOtpDeliveryErrorMessage(dispatchResult.reason),
+        reason: dispatchResult.reason || "notification-request-failed",
+        challengeId: result.challengeId,
+        expiresAt: result.expiresAt,
+        previewOtp: env.nodeEnv === "production" ? undefined : result.otp
+      });
+    }
 
     return res.status(202).json({
       message: "OTP challenge created.",
       challengeId: result.challengeId,
       expiresAt: result.expiresAt,
+      dispatchQueued: true,
       previewOtp: env.nodeEnv === "production" ? undefined : result.otp
     });
   } catch (error) {

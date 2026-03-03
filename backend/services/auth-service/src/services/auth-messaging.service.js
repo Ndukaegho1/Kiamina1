@@ -17,7 +17,7 @@ const withTimeout = async (operation) => {
   }
 };
 
-export const dispatchPasswordResetLink = async ({ email, resetLink }) => {
+const dispatchEmailMessage = async ({ email, subject, message }) => {
   if (!env.notificationsServiceUrl) {
     return {
       queued: false,
@@ -35,8 +35,8 @@ export const dispatchPasswordResetLink = async ({ email, resetLink }) => {
         },
         body: JSON.stringify({
           to: [email],
-          subject: "Reset your Kiamina password",
-          message: `Use this secure link to reset your password: ${resetLink}`
+          subject,
+          message
         }),
         signal
       })
@@ -65,4 +65,44 @@ export const dispatchPasswordResetLink = async ({ email, resetLink }) => {
       reason: "notification-request-failed"
     };
   }
+};
+
+const OTP_PURPOSE_LABELS = {
+  login: "Login verification",
+  "client-login": "Client login verification",
+  "admin-login": "Admin login verification",
+  signup: "Account signup verification",
+  "admin-setup": "Admin setup verification",
+  "password-reset": "Password reset verification",
+  "sms-verification": "Phone verification",
+  onboarding: "Onboarding verification"
+};
+
+export const dispatchPasswordResetLink = async ({ email, resetLink }) =>
+  dispatchEmailMessage({
+    email,
+    subject: "Reset your Kiamina password",
+    message: `Use this secure link to reset your password: ${resetLink}`
+  });
+
+export const dispatchOtpEmail = async ({ email, otp, purpose, expiryMinutes }) => {
+  const normalizedPurpose = String(purpose || "").trim().toLowerCase();
+  const purposeLabel =
+    OTP_PURPOSE_LABELS[normalizedPurpose] || OTP_PURPOSE_LABELS.login;
+  const normalizedExpiry = Number.isFinite(Number(expiryMinutes))
+    ? Math.max(1, Number(expiryMinutes))
+    : Math.max(1, Number(env.otpExpiryMinutes || 10));
+
+  return dispatchEmailMessage({
+    email,
+    subject: "Your Kiamina verification code",
+    message: [
+      `Use this one-time code to complete your request (${purposeLabel}).`,
+      "",
+      `OTP: ${otp}`,
+      `Expires in ${normalizedExpiry} minute${normalizedExpiry === 1 ? "" : "s"}.`,
+      "",
+      "If you did not request this code, you can ignore this email."
+    ].join("\n")
+  });
 };
