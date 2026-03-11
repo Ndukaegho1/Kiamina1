@@ -9,6 +9,7 @@ let app;
 let connectToDatabase;
 let AuthAccount;
 let AuthSession;
+let CredentialLoginAttempt;
 let setupError = null;
 
 const ensureSetup = (t) => {
@@ -26,6 +27,7 @@ test.before(async () => {
   process.env.MONGO_DB_NAME = "kiamina_auth_integration";
   process.env.FIREBASE_SERVICE_ACCOUNT_JSON = "";
   process.env.GOOGLE_APPLICATION_CREDENTIALS = "";
+  process.env.FIREBASE_WEB_API_KEY = "test-web-api-key";
   process.env.AUTH_TOKEN_SECRET = "test-auth-token-secret";
   process.env.MONGOMS_RUNTIME_DOWNLOAD = process.env.MONGOMS_RUNTIME_DOWNLOAD || "0";
 
@@ -37,6 +39,7 @@ test.before(async () => {
     ({ connectToDatabase } = await import("../services/auth-service/src/config/db.js"));
     ({ AuthAccount } = await import("../services/auth-service/src/models/AuthAccount.model.js"));
     ({ AuthSession } = await import("../services/auth-service/src/models/AuthSession.model.js"));
+    ({ CredentialLoginAttempt } = await import("../services/auth-service/src/models/CredentialLoginAttempt.model.js"));
 
     await connectToDatabase();
   } catch (error) {
@@ -51,6 +54,7 @@ test.beforeEach(async () => {
 
   await AuthAccount.deleteMany({});
   await AuthSession.deleteMany({});
+  await CredentialLoginAttempt.deleteMany({});
 });
 
 test.after(async () => {
@@ -169,4 +173,146 @@ test("auth integration: logout-session blocks revoking another user's session", 
 
   assert.equal(forbiddenResponse.status, 403);
   assert.match(forbiddenResponse.body?.message || "", /cannot revoke another user's session/i);
+});
+
+test("auth integration: owner/superadmin can delete another auth account by uid", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const loginResponse = await request(app).post("/api/v1/auth/login-session").send({
+    email: "target-delete@example.com",
+    role: "client",
+    loginMethod: "password",
+    sessionTtlMinutes: 30
+  });
+
+  assert.equal(loginResponse.status, 201);
+  const targetUid = String(loginResponse.body?.account?.uid || "");
+  assert.ok(targetUid);
+
+  const deleteResponse = await request(app)
+    .delete(`/api/v1/auth/account/${encodeURIComponent(targetUid)}`)
+    .set("x-user-id", "owner_uid_1")
+    .set("x-user-roles", "superadmin")
+    .send({
+      reason: "admin-account-deleted"
+    });
+
+  assert.equal(deleteResponse.status, 200);
+  assert.equal(deleteResponse.body?.uid, targetUid);
+  assert.equal(deleteResponse.body?.deleted, true);
+
+  const authAccount = await AuthAccount.findOne({ uid: targetUid }).lean();
+  assert.equal(authAccount, null);
+});
+
+test("auth integration: authenticate-password locks after repeated failures", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const originalFetch = global.fetch;
+  let fetchCallCount = 0;
+  global.fetch = async () => {
+    fetchCallCount += 1;
+    return {
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: {
+          message: "INVALID_LOGIN_CREDENTIALS"
+        }
+      })
+    };
+  };
+
+  try {
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const response = await request(app).post("/api/v1/auth/authenticate-password").send({
+        email: "lockout@example.com",
+        password: "WrongPassword1!"
+      });
+
+      assert.equal(response.status, 401);
+      assert.match(response.body?.message || "", /incorrect email or password/i);
+    }
+
+    const lockedResponse = await request(app).post("/api/v1/auth/authenticate-password").send({
+      email: "lockout@example.com",
+      password: "WrongPassword1!"
+    });
+
+    assert.equal(lockedResponse.status, 423);
+    assert.match(lockedResponse.body?.message || "", /temporarily locked/i);
+
+    const stillLockedResponse = await request(app).post("/api/v1/auth/authenticate-password").send({
+      email: "lockout@example.com",
+      password: "CorrectPassword1!"
+    });
+
+    assert.equal(stillLockedResponse.status, 423);
+    assert.equal(fetchCallCount, 5);
+
+    const attemptRecord = await CredentialLoginAttempt.findOne({
+      email: "lockout@example.com"
+    }).lean();
+    assert.equal(Number(attemptRecord?.failedCount || 0), 5);
+    assert.ok(attemptRecord?.lockUntilAt);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("auth integration: change-password rejects incorrect current password", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 400,
+    json: async () => ({
+      error: {
+        message: "INVALID_LOGIN_CREDENTIALS"
+      }
+    })
+  });
+
+  try {
+    const response = await request(app)
+      .post("/api/v1/auth/change-password")
+      .set("x-user-id", "client_uid_1")
+      .set("x-user-email", "client@example.com")
+      .send({
+        currentPassword: "WrongPassword1!",
+        newPassword: "NewPassword1!"
+      });
+
+    assert.equal(response.status, 401);
+    assert.match(response.body?.message || "", /current password is incorrect/i);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("auth integration: non-elevated admin cannot delete another auth account by uid", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const loginResponse = await request(app).post("/api/v1/auth/login-session").send({
+    email: "target-no-delete@example.com",
+    role: "client",
+    loginMethod: "password",
+    sessionTtlMinutes: 30
+  });
+
+  assert.equal(loginResponse.status, 201);
+  const targetUid = String(loginResponse.body?.account?.uid || "");
+  assert.ok(targetUid);
+
+  const deleteResponse = await request(app)
+    .delete(`/api/v1/auth/account/${encodeURIComponent(targetUid)}`)
+    .set("x-user-id", "admin_uid_1")
+    .set("x-user-roles", "admin")
+    .send({
+      reason: "admin-account-deleted"
+    });
+
+  assert.equal(deleteResponse.status, 403);
+  assert.match(deleteResponse.body?.message || "", /owner or superadmin/i);
 });

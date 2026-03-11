@@ -163,3 +163,63 @@ test("notifications integration: chatbot session message and escalation to suppo
   assert.ok(Array.isArray(adminMessagesResponse.body));
   assert.ok(adminMessagesResponse.body.length >= 1);
 });
+
+test("notifications integration: anonymous support session creates and reads public ticket", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const anonymousSessionId = `anon-session-${Date.now()}`;
+
+  const createResponse = await request(app)
+    .post("/api/v1/notifications/support/public/tickets")
+    .send({
+      sessionId: anonymousSessionId,
+      subject: "Anonymous support request",
+      description: "I need help with onboarding.",
+      leadLabel: "Lead 1",
+      fullName: "Website Visitor",
+      organizationType: "individual",
+      channel: "web"
+    });
+
+  assert.equal(createResponse.status, 201);
+  const ticketId = createResponse.body?.ticket?.ticketId;
+  assert.ok(ticketId);
+
+  const listResponse = await request(app)
+    .get("/api/v1/notifications/support/public/tickets")
+    .query({
+      sessionId: anonymousSessionId,
+      limit: 20
+    });
+  assert.equal(listResponse.status, 200);
+  assert.ok(Array.isArray(listResponse.body));
+  assert.ok(listResponse.body.some((ticket) => ticket.ticketId === ticketId));
+
+  const postMessageResponse = await request(app)
+    .post(`/api/v1/notifications/support/public/tickets/${ticketId}/messages`)
+    .send({
+      sessionId: anonymousSessionId,
+      content: "Can an agent assist me?",
+      senderDisplayName: "Visitor"
+    });
+  assert.equal(postMessageResponse.status, 201);
+  assert.ok(postMessageResponse.body?.data?.id || postMessageResponse.body?.data?._id);
+
+  const listMessagesResponse = await request(app)
+    .get(`/api/v1/notifications/support/public/tickets/${ticketId}/messages`)
+    .query({
+      sessionId: anonymousSessionId,
+      limit: 50
+    });
+  assert.equal(listMessagesResponse.status, 200);
+  assert.ok(Array.isArray(listMessagesResponse.body));
+  assert.ok(listMessagesResponse.body.length >= 2);
+
+  const forbiddenMessagesResponse = await request(app)
+    .get(`/api/v1/notifications/support/public/tickets/${ticketId}/messages`)
+    .query({
+      sessionId: `${anonymousSessionId}-other`,
+      limit: 50
+    });
+  assert.equal(forbiddenMessagesResponse.status, 403);
+});

@@ -41,3 +41,31 @@ export const updateAuthAccountLoginMeta = async ({
       runValidators: true
     }
   );
+
+export const deleteAuthAccountByUid = async (uid) =>
+  AuthAccount.findOneAndDelete({
+    uid
+  });
+
+export const countAuthAccountsByRoles = async (roles = []) => {
+  const normalizedRoles = (Array.isArray(roles) ? roles : [])
+    .map((role) => String(role || "").trim().toLowerCase())
+    .filter(Boolean);
+
+  if (normalizedRoles.length === 0) {
+    return 0;
+  }
+
+  return AuthAccount.countDocuments({
+    role: { $in: normalizedRoles }
+  });
+};
+
+export const listAuthAccounts = async ({
+  filter = {},
+  sort = { updatedAt: -1 },
+  limit = 200
+} = {}) =>
+  AuthAccount.find(filter)
+    .sort(sort)
+    .limit(Math.max(1, Number(limit) || 200));

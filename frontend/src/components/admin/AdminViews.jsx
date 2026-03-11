@@ -62,6 +62,7 @@ import {
   readClientAssignmentsFromStorage,
 } from './adminAssignments'
 import { apiFetch } from '../../utils/apiClient'
+import { buildClientResetPasswordLink } from '../../utils/authLinks'
 import KiaminaLogo from '../common/KiaminaLogo'
 import DotLottiePreloader from '../common/DotLottiePreloader'
 import { downloadObjectRowsAsXlsx } from '../../utils/excelWorkbook'
@@ -69,12 +70,17 @@ import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import { playSupportNotificationSound, SUPPORT_NOTIFICATION_INITIAL_DELAY_MS } from '../../utils/supportNotificationSound'
 import { isAdminNotificationSoundEnabled } from '../../utils/adminSecurityPreferences'
 import { buildClientDownloadFilename } from '../../utils/downloadFilename'
-import { buildFileCacheKey } from '../../utils/fileCache'
+import { buildFileCacheKey, getCachedFileBlob, putCachedFileBlob } from '../../utils/fileCache'
 import {
   buildSupportAttachmentPreview,
   getSupportAttachmentBlob,
   getSupportAttachmentKind,
 } from '../../utils/supportAttachments'
+import {
+  appendResolvedDocumentForClient,
+  readResolvedDocumentsForClient,
+  RESOLVED_DOCUMENTS_SYNC_EVENT,
+} from '../../utils/resolvedDocuments'
 import AdminSupportInboxPanel from './support/AdminSupportInboxPanel'
 import {
   deleteSupportLead,
@@ -113,6 +119,7 @@ const CLIENT_STATUS_CONTROL_STORAGE_KEY = 'kiaminaClientStatusControl'
 const ACCOUNT_CREATED_AT_FALLBACK_STORAGE_KEY = 'kiaminaAccountCreatedAtFallback'
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_NOTIFICATIONS_SYNC_EVENT = 'kiamina:admin-notifications-sync'
+const ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT = 'kiamina:admin-client-management-sync'
 const DASHBOARD_REFRESH_INTERVAL_MS = 15000
 const DASHBOARD_INVITE_EXPIRING_SOON_MS = 12 * 60 * 60 * 1000
 const DASHBOARD_SCHEDULED_SOON_MS = 24 * 60 * 60 * 1000
@@ -144,6 +151,7 @@ const ADMIN_PAGE_PERMISSION_RULES = {
   'admin-client-profile': ['view_businesses', 'view_assigned_clients', 'view_client_settings'],
   'admin-client-documents': ['view_documents'],
   'admin-client-upload-history': ['view_documents', 'view_upload_history'],
+  'admin-client-resolved-documents': ['view_documents'],
 }
 const ADMIN_PAGE_LEVEL_RULES = {
   'admin-work-hours': [
@@ -187,6 +195,150 @@ const safeParseJson = (rawValue, fallback) => {
   } catch {
     return fallback
   }
+}
+
+const BACKEND_CLIENT_ROWS_CACHE = {
+  initialized: false,
+  clients: [],
+  summary: {},
+  fetchedAtIso: '',
+}
+let backendClientRowsRefreshPromise = null
+
+const readStoredAuthUserForAdminData = () => {
+  if (typeof window === 'undefined') return null
+  const sessionUser = safeParseJson(sessionStorage.getItem('kiaminaAuthUser'), null)
+  if (sessionUser && typeof sessionUser === 'object') return sessionUser
+  const localUser = safeParseJson(localStorage.getItem('kiaminaAuthUser'), null)
+  if (localUser && typeof localUser === 'object') return localUser
+  return null
+}
+
+const isBackendAdminClientManagementEnabled = () => {
+  const authUser = readStoredAuthUserForAdminData()
+  if (!authUser) return false
+  const normalizedEmail = toTrimmedValue(authUser.email).toLowerCase()
+  if (!normalizedEmail) return false
+  const normalizedRole = normalizeRoleWithLegacyFallback(authUser.role, normalizedEmail)
+  return normalizedRole === 'admin'
+}
+
+const mapBackendVerificationStatusToCompliance = (value = '') => {
+  const normalized = toTrimmedValue(value).toLowerCase()
+  if (normalized === 'verified') return COMPLIANCE_STATUS.FULL
+  if (normalized === 'rejected' || normalized === 'suspended') return COMPLIANCE_STATUS.ACTION
+  return COMPLIANCE_STATUS.PENDING
+}
+
+const mapBackendClientRowToClientRow = (row = {}, index = 0) => {
+  const normalizedEmail = toTrimmedValue(row.email).toLowerCase()
+  const verificationStatus = mapBackendVerificationStatusToCompliance(row.verificationStatus)
+  const onboardingCompleted = Boolean(row.onboardingCompleted)
+  const displayName = toTrimmedValue(row.displayName) || normalizedEmail || `Client ${index + 1}`
+  const businessName = toTrimmedValue(row.businessName) || displayName || 'Unassigned Business'
+  const fallbackCriToken = toTrimmedValue(row.uid).replace(/[^A-Za-z0-9]/g, '').slice(-6).toUpperCase()
+  const cri = fallbackCriToken ? `CRI-${fallbackCriToken}` : `CRI-${String(index + 1).padStart(4, '0')}`
+  const createdAtIso = toTrimmedValue(row.createdAt)
+  const accountStatus = toTrimmedValue(row.status).toLowerCase()
+  const isSuspended = accountStatus === 'suspended'
+  const settings = {
+    fullName: displayName,
+    businessName,
+    country: toTrimmedValue(row.country),
+    businessType: toTrimmedValue(row.businessType),
+    currency: toTrimmedValue(row.currency) || 'NGN',
+    cri,
+  }
+
+  return {
+    id: toTrimmedValue(row.uid) || `CL-${String(index + 1).padStart(4, '0')}`,
+    uid: toTrimmedValue(row.uid),
+    businessName,
+    cri,
+    primaryContact: displayName,
+    email: normalizedEmail || '--',
+    country: toTrimmedValue(row.country) || '--',
+    verificationStatus,
+    onboardingStatus: onboardingCompleted ? 'Completed' : 'In Progress',
+    subscriptionStatus: isSuspended ? 'Suspended' : 'Active',
+    dateCreated: createdAtIso ? formatTimestamp(createdAtIso) : '--',
+    clientStatus: isSuspended ? 'Suspended' : 'Active',
+    suspensionMessage: '',
+    assignedAreaAccountantEmail: toTrimmedValue(row.assignedToUid),
+    assignedAreaAccountantEmails: toTrimmedValue(row.assignedToUid) ? [toTrimmedValue(row.assignedToUid)] : [],
+    assignedAreaAccountantName: toTrimmedValue(row.assignedToUid),
+    assignedAreaAccountantNames: toTrimmedValue(row.assignedToUid) ? [toTrimmedValue(row.assignedToUid)] : [],
+    assignedAreaAssignedAt: '',
+    assignedAreaAssignedBy: '',
+    rawAccount: {
+      uid: toTrimmedValue(row.uid),
+      email: normalizedEmail,
+      fullName: displayName,
+      businessName,
+      country: toTrimmedValue(row.country),
+      status: accountStatus || 'active',
+      role: 'client',
+      createdAt: createdAtIso,
+    },
+    settings,
+    onboarding: {
+      completed: onboardingCompleted,
+      skipped: false,
+      verificationPending: toTrimmedValue(row.verificationStatus).toLowerCase() !== 'verified',
+      data: {},
+    },
+    verificationDocs: {},
+    notificationSettings: {},
+    profilePhoto: '',
+    companyLogo: '',
+    statusControl: {
+      verificationStatus,
+      assignedToUid: toTrimmedValue(row.assignedToUid),
+      updatedAt: toTrimmedValue(row.updatedAt),
+    },
+  }
+}
+
+const refreshAdminClientRowsFromBackend = async ({ force = false } = {}) => {
+  if (!isBackendAdminClientManagementEnabled()) {
+    return { ok: false, reason: 'not-admin-session' }
+  }
+  if (backendClientRowsRefreshPromise && !force) {
+    return backendClientRowsRefreshPromise
+  }
+
+  backendClientRowsRefreshPromise = (async () => {
+    try {
+      const response = await apiFetch('/api/users/admin/client-management?limit=200&sortBy=updatedAt&sortOrder=desc')
+      const data = await response.json().catch(() => null)
+      if (!response.ok || !data || typeof data !== 'object' || !Array.isArray(data.clients)) {
+        BACKEND_CLIENT_ROWS_CACHE.initialized = true
+        BACKEND_CLIENT_ROWS_CACHE.clients = []
+        BACKEND_CLIENT_ROWS_CACHE.summary = {}
+        BACKEND_CLIENT_ROWS_CACHE.fetchedAtIso = new Date().toISOString()
+        return { ok: false, reason: 'request-failed' }
+      }
+
+      BACKEND_CLIENT_ROWS_CACHE.initialized = true
+      BACKEND_CLIENT_ROWS_CACHE.clients = data.clients.map((entry, index) => mapBackendClientRowToClientRow(entry, index))
+      BACKEND_CLIENT_ROWS_CACHE.summary = data.summary && typeof data.summary === 'object'
+        ? data.summary
+        : {}
+      BACKEND_CLIENT_ROWS_CACHE.fetchedAtIso = new Date().toISOString()
+      return { ok: true, clients: BACKEND_CLIENT_ROWS_CACHE.clients, summary: BACKEND_CLIENT_ROWS_CACHE.summary }
+    } catch {
+      BACKEND_CLIENT_ROWS_CACHE.initialized = true
+      BACKEND_CLIENT_ROWS_CACHE.clients = []
+      BACKEND_CLIENT_ROWS_CACHE.summary = {}
+      BACKEND_CLIENT_ROWS_CACHE.fetchedAtIso = new Date().toISOString()
+      return { ok: false, reason: 'network-error' }
+    }
+  })()
+    .finally(() => {
+      backendClientRowsRefreshPromise = null
+    })
+
+  return backendClientRowsRefreshPromise
 }
 
 const formatTimestamp = (value) => {
@@ -1743,6 +1895,15 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
 }
 
 const readClientRows = () => {
+  if (isBackendAdminClientManagementEnabled()) {
+    if (BACKEND_CLIENT_ROWS_CACHE.initialized) {
+      return Array.isArray(BACKEND_CLIENT_ROWS_CACHE.clients)
+        ? BACKEND_CLIENT_ROWS_CACHE.clients
+        : []
+    }
+    return []
+  }
+
   const rawAccounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
   if (!Array.isArray(rawAccounts)) return []
   const createdAtFallbackMap = readAccountCreatedAtFallbackMap()
@@ -2661,18 +2822,28 @@ function AdminDashboardPage({ setActivePage, currentAdminAccount }) {
 
   useEffect(() => {
     const syncDashboard = () => setDashboard(buildAdminDashboardSnapshot(normalizedAdmin))
-    syncDashboard()
+    const refreshDashboard = async () => {
+      await refreshAdminClientRowsFromBackend()
+      syncDashboard()
+    }
+    void refreshDashboard()
     const supportUnsubscribe = subscribeSupportCenter(() => syncDashboard())
-    const intervalId = window.setInterval(syncDashboard, DASHBOARD_REFRESH_INTERVAL_MS)
+    const intervalId = window.setInterval(() => {
+      void refreshDashboard()
+    }, DASHBOARD_REFRESH_INTERVAL_MS)
     window.addEventListener('storage', syncDashboard)
     window.addEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncDashboard)
     window.addEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, syncDashboard)
+    window.addEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, refreshDashboard)
+    window.addEventListener('kiamina:admin-dashboard-realtime-sync', syncDashboard)
     return () => {
       supportUnsubscribe()
       window.clearInterval(intervalId)
       window.removeEventListener('storage', syncDashboard)
       window.removeEventListener(ADMIN_WORK_SESSIONS_SYNC_EVENT, syncDashboard)
       window.removeEventListener(ADMIN_NOTIFICATIONS_SYNC_EVENT, syncDashboard)
+      window.removeEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, refreshDashboard)
+      window.removeEventListener('kiamina:admin-dashboard-realtime-sync', syncDashboard)
     }
   }, [normalizedAdmin])
 
@@ -2997,6 +3168,7 @@ function AdminClientsPage({
   onOpenClientProfile,
   onOpenClientDocuments,
   onOpenClientUploadHistory,
+  onOpenClientResolvedDocuments,
 }) {
   const [clients, setClients] = useState(() => readClientRows())
   const [clientAssignments, setClientAssignments] = useState(() => readClientAssignmentsFromStorage())
@@ -3014,6 +3186,7 @@ function AdminClientsPage({
 
   const canViewDocuments = hasPermission('view_documents')
   const canViewUploadHistory = hasPermission('view_upload_history')
+  const canViewResolvedDocuments = canViewDocuments
   const canSendNotifications = hasPermission('send_notifications')
   const canManageUsers = hasPermission('manage_users')
   const canImpersonateClients = hasPermission('impersonate_clients')
@@ -3021,18 +3194,35 @@ function AdminClientsPage({
   const canViewClientSettings = canViewBusinesses || hasPermission('view_client_settings') || hasPermission('edit_client_settings')
 
   useEffect(() => {
-    const refreshClients = () => setClients(readClientRows())
-    refreshClients()
+    let isDisposed = false
+    const refreshClients = async () => {
+      await refreshAdminClientRowsFromBackend()
+      if (isDisposed) return
+      setClients(readClientRows())
+    }
+    void refreshClients()
     const handleStorage = (event) => {
-      if (!event.key || event.key === ACCOUNTS_STORAGE_KEY) {
-        refreshClients()
-      }
       if (!event.key || event.key === CLIENT_ASSIGNMENTS_STORAGE_KEY) {
         setClientAssignments(readClientAssignmentsFromStorage())
       }
+      if (!event.key || event.key === ACCOUNTS_STORAGE_KEY || event.key === CLIENT_ASSIGNMENTS_STORAGE_KEY) {
+        void refreshClients()
+      }
+    }
+    const handleClientManagementSync = () => {
+      void refreshClients()
     }
     window.addEventListener('storage', handleStorage)
-    return () => window.removeEventListener('storage', handleStorage)
+    window.addEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, handleClientManagementSync)
+    const intervalId = window.setInterval(() => {
+      void refreshClients()
+    }, 15000)
+    return () => {
+      isDisposed = true
+      window.clearInterval(intervalId)
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, handleClientManagementSync)
+    }
   }, [])
 
   useEffect(() => {
@@ -3045,7 +3235,10 @@ function AdminClientsPage({
     return () => document.removeEventListener('mousedown', closeActionMenu)
   }, [])
 
-  const refreshClientRows = () => setClients(readClientRows())
+  const refreshClientRows = async () => {
+    await refreshAdminClientRowsFromBackend()
+    setClients(readClientRows())
+  }
 
   const getStatusBadge = (status) => {
     const normalizedCompliance = normalizeComplianceStatus(status, '')
@@ -3097,11 +3290,11 @@ function AdminClientsPage({
     const nextAccounts = [...storedAccounts]
     nextAccounts[targetIndex] = updater(nextAccounts[targetIndex])
     localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(nextAccounts))
-    refreshClientRows()
+    void refreshClientRows()
     return true
   }
 
-  const handleClientAction = (actionId, client) => {
+  const handleClientAction = async (actionId, client) => {
     setOpenActionMenuId(null)
     if (!canAdminAccessClientScope(resolvedAdminAccount, client?.email, clientAssignments)) {
       safeToast('error', 'Insufficient Permissions')
@@ -3141,10 +3334,52 @@ function AdminClientsPage({
       appendActionLog('Opened client upload history', client)
       return
     }
+    if (actionId === 'view-resolved-documents') {
+      if (!canViewResolvedDocuments) {
+        safeToast('error', 'Insufficient Permissions')
+        return
+      }
+      onOpenClientResolvedDocuments?.(client)
+      setActivePage?.('admin-client-resolved-documents')
+      safeToast('success', `Opened resolved document delivery for ${client.businessName}.`)
+      appendActionLog('Opened resolved document delivery', client)
+      return
+    }
     if (actionId === 'reset-password') {
       if (!canManageUsers) {
         safeToast('error', 'Insufficient Permissions')
         return
+      }
+      if (client?.uid) {
+        try {
+          const normalizedEmail = toTrimmedValue(client?.email).toLowerCase()
+          if (!normalizedEmail) {
+            safeToast('error', 'Client email is required for password reset.')
+            return
+          }
+          const resetLink = buildClientResetPasswordLink(normalizedEmail)
+          const response = await apiFetch('/api/auth/send-password-reset-link', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: normalizedEmail,
+              resetLink,
+            }),
+          })
+          const payload = await response.json().catch(() => null)
+          const dispatchQueued = payload?.dispatchQueued !== false
+          if (!response.ok || !dispatchQueued) {
+            const message = toTrimmedValue(payload?.message) || 'Unable to queue password reset email.'
+            safeToast('error', message)
+            return
+          }
+          safeToast('success', `Password reset link queued for ${client.businessName}.`)
+          appendActionLog('Password reset link sent', client, `Password reset link queued for ${normalizedEmail}`)
+          return
+        } catch {
+          safeToast('error', 'Unable to queue password reset email.')
+          return
+        }
       }
       const nextPassword = `Temp@${Math.floor(100000 + Math.random() * 900000)}`
       const updated = updateClientAccount(client.email, (account) => ({ ...account, password: nextPassword }))
@@ -3163,10 +3398,34 @@ function AdminClientsPage({
       }
       const isSuspended = client.clientStatus === 'Suspended'
       const nextStatus = isSuspended ? 'active' : 'suspended'
-      const updated = updateClientAccount(client.email, (account) => ({ ...account, status: nextStatus }))
-      if (!updated) {
-        safeToast('error', 'Unable to update client status.')
-        return
+      if (client?.uid) {
+        try {
+          const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(client.uid)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              status: nextStatus,
+            }),
+          })
+          if (!response.ok) {
+            const payload = await response.json().catch(() => null)
+            const message = toTrimmedValue(payload?.message) || 'Unable to update client status.'
+            safeToast('error', message)
+            return
+          }
+          await refreshClientRows()
+          window.dispatchEvent(new Event(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT))
+          window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+        } catch {
+          safeToast('error', 'Unable to update client status.')
+          return
+        }
+      } else {
+        const updated = updateClientAccount(client.email, (account) => ({ ...account, status: nextStatus }))
+        if (!updated) {
+          safeToast('error', 'Unable to update client status.')
+          return
+        }
       }
       safeToast('success', `${client.businessName} has been ${isSuspended ? 'activated' : 'suspended'}.`)
       appendActionLog(isSuspended ? 'Activated client account' : 'Suspended client account', client)
@@ -3199,6 +3458,7 @@ function AdminClientsPage({
     { id: 'view-profile', label: 'View Client Profile', disabled: !canViewClientSettings, disabledMessage: 'Insufficient Permissions' },
     { id: 'view-documents', label: 'View Documents', disabled: !canViewDocuments, disabledMessage: 'Insufficient Permissions' },
     { id: 'view-upload-history', label: 'View Upload History', disabled: !canViewUploadHistory, disabledMessage: 'Insufficient Permissions' },
+    { id: 'view-resolved-documents', label: 'Resolved Documents Delivery', disabled: !canViewResolvedDocuments, disabledMessage: 'Insufficient Permissions' },
     { id: 'reset-password', label: 'Reset Password', disabled: !canManageUsers, disabledMessage: 'Insufficient Permissions' },
     { id: 'toggle-status', label: client.clientStatus === 'Suspended' ? 'Activate Account' : 'Suspend Account', disabled: !canManageUsers, disabledMessage: 'Insufficient Permissions' },
     { id: 'send-notification', label: 'Send Notification', disabled: !canSendNotifications, disabledMessage: 'Insufficient Permissions' },
@@ -3283,7 +3543,7 @@ function AdminClientsPage({
                           safeToast('error', item.disabledMessage || 'Insufficient Permissions')
                           return
                         }
-                        handleClientAction(item.id, client)
+                        void handleClientAction(item.id, client)
                       }}
                       className={`w-full px-3 py-2 rounded-md border border-border-light text-left text-sm transition-colors inline-flex items-center gap-2 ${isImpersonateAction ? 'text-primary font-medium' : 'text-text-primary'} ${isRestricted ? 'opacity-70 cursor-not-allowed' : 'hover:bg-background'}`}
                     >
@@ -3374,7 +3634,7 @@ function AdminClientsPage({
                                   safeToast('error', item.disabledMessage || 'Insufficient Permissions')
                                   return
                                 }
-                                handleClientAction(item.id, client)
+                                void handleClientAction(item.id, client)
                               }}
                               className={`w-full px-3 py-2 text-left text-sm transition-colors inline-flex items-center gap-2 ${isImpersonateAction ? 'text-primary font-medium' : 'text-text-primary'} ${isRestricted ? 'opacity-70 cursor-not-allowed' : 'hover:bg-background'}`}
                             >
@@ -3447,6 +3707,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     || hasAdminPermission(resolvedAdminAccount, 'manage_technical_client_config')
   )
   const normalizedEmail = (safeClient?.email || '').trim().toLowerCase()
+  const normalizedClientUid = toTrimmedValue(safeClient?.uid || safeClient?.rawAccount?.uid)
   const settings = getScopedStorageObject('settingsFormData', normalizedEmail)
   const onboarding = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
   const statusControl = getScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail)
@@ -3468,6 +3729,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   const [isSavingProfile, setIsSavingProfile] = useState(false)
   const [isEditingIdentityAssets, setIsEditingIdentityAssets] = useState(false)
   const [isSavingIdentityAssets, setIsSavingIdentityAssets] = useState(false)
+  const [isOpeningBusinessDocument, setIsOpeningBusinessDocument] = useState(false)
+  const [isDownloadingBusinessDocument, setIsDownloadingBusinessDocument] = useState(false)
   const [identityDraft, setIdentityDraft] = useState(() => ({
     profilePhoto: profilePhoto || '',
     companyLogo: companyLogo || '',
@@ -3524,6 +3787,43 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     normalizeBooleanFlag(statusControl?.businessVerificationApproved)
     || hasIsoTimestamp(statusControl?.businessVerificationApprovedAt),
   )
+  const getPreferredClientValue = (...candidates) => {
+    for (const candidate of candidates) {
+      const normalizedCandidate = toTrimmedValue(candidate)
+      if (normalizedCandidate) return normalizedCandidate
+    }
+    return ''
+  }
+  const businessVerificationDocumentName = getPreferredClientValue(verificationDocs.businessReg)
+  const businessVerificationDocumentCacheKey = getPreferredClientValue(verificationDocs.businessRegFileCacheKey)
+  const businessVerificationDocumentUploadedAt = getPreferredClientValue(verificationDocs.businessRegUploadedAt)
+  const businessVerificationDocumentSize = Math.max(0, Number(verificationDocs.businessRegSize || 0))
+  const businessVerificationDocumentSizeLabel = businessVerificationDocumentSize > 0
+    ? `${Math.max(1, Math.round(businessVerificationDocumentSize / 1024))} KB`
+    : '--'
+  const phoneForVerification = formatPhoneNumber(
+    resolvePhoneParts(settings.phone || '').code,
+    resolvePhoneParts(settings.phone || '').number,
+  )
+  const verificationAddress = [
+    settings.address1,
+    settings.address2,
+    settings.city,
+    settings.postalCode,
+    settings.addressCountry || settings.country || onboardingData.country,
+  ].map((value) => toTrimmedValue(value)).filter(Boolean).join(', ')
+  const businessVerificationDetailRows = [
+    ['Business Name', getPreferredClientValue(settings.businessName, onboardingData.businessName, safeClient?.businessName)],
+    ['Business Type', getPreferredClientValue(settings.businessType, onboardingData.businessType, safeClient?.businessType)],
+    ['Registration Number', getPreferredClientValue(settings.cacNumber, settings.businessReg, onboardingData.cacNumber, onboardingData.businessReg, profileDraft.businessReg)],
+    ['Tax Identification Number', getPreferredClientValue(settings.tin, onboardingData.tin)],
+    ['Industry', getPreferredClientValue(settings.industry, onboardingData.industry)],
+    ['Country', getPreferredClientValue(settings.country, onboardingData.country, safeClient?.country)],
+    ['Primary Contact', getPreferredClientValue(settings.fullName, safeClient?.primaryContact)],
+    ['Contact Phone', getPreferredClientValue(phoneForVerification)],
+    ['Registered Address', getPreferredClientValue(verificationAddress)],
+    ['Account Email', getPreferredClientValue(normalizedEmail, safeClient?.email)],
+  ]
 
   useEffect(() => {
     setIdentityDraft({
@@ -3609,7 +3909,14 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     }])
   }
 
-  const saveVerificationStatus = (forcedStatus) => {
+  const mapComplianceStatusToBackendVerificationStatus = (status = '') => {
+    const normalized = normalizeComplianceStatus(status, COMPLIANCE_STATUS.PENDING)
+    if (normalized === COMPLIANCE_STATUS.FULL) return 'verified'
+    if (normalized === COMPLIANCE_STATUS.ACTION) return 'suspended'
+    return 'pending'
+  }
+
+  const saveVerificationStatus = async (forcedStatus) => {
     if (!canEditClientSettings) {
       showToast?.('error', 'Insufficient Permissions')
       return
@@ -3620,6 +3927,29 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
 
     setIsSavingVerificationStatus(true)
     try {
+      let backendSynchronized = false
+      if (normalizedClientUid) {
+        try {
+          const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedClientUid)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              verificationStatus: mapComplianceStatusToBackendVerificationStatus(nextVerificationStatus),
+              verificationPending: nextVerificationStatus !== COMPLIANCE_STATUS.FULL,
+              statusReason: nextSuspensionMessage,
+            }),
+          })
+          if (response.ok) {
+            backendSynchronized = true
+            await refreshAdminClientRowsFromBackend({ force: true })
+            window.dispatchEvent(new Event(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT))
+            window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+          }
+        } catch {
+          // Fall through to local fallback persistence.
+        }
+      }
+
       const accounts = safeParseJson(localStorage.getItem(ACCOUNTS_STORAGE_KEY), [])
       const nextAccounts = Array.isArray(accounts) ? [...accounts] : []
       const accountIndex = nextAccounts.findIndex((account) => (
@@ -3694,7 +4024,11 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       if (refreshed) setClientSnapshot(refreshed)
       setVerificationStatusDraft(nextVerificationStatus)
       if (!isActionRequiredStatus(nextVerificationStatus)) setSuspensionMessage('')
-      showToast?.('success', 'Client compliance state updated.')
+      if (backendSynchronized) {
+        showToast?.('success', 'Client compliance state updated and synced to backend.')
+      } else {
+        showToast?.('success', 'Client compliance state updated.')
+      }
     } finally {
       setIsSavingVerificationStatus(false)
     }
@@ -3834,7 +4168,80 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     showToast?.('success', approved ? 'Business verification approved.' : 'Business verification approval revoked.')
   }
 
-  const saveProfileChanges = () => {
+  const handleOpenBusinessVerificationDocument = async () => {
+    if (isOpeningBusinessDocument) return
+    if (!businessVerificationDocumentName) {
+      showToast?.('error', 'No business document has been uploaded by this client.')
+      return
+    }
+    if (!businessVerificationDocumentCacheKey) {
+      showToast?.('error', 'Document preview is unavailable for this submission. Ask the client to re-upload.')
+      return
+    }
+    setIsOpeningBusinessDocument(true)
+    try {
+      const blob = await getCachedFileBlob(businessVerificationDocumentCacheKey)
+      if (!(blob instanceof Blob)) {
+        showToast?.('error', 'This uploaded document is no longer available for viewing.')
+        return
+      }
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.target = '_blank'
+      anchor.rel = 'noopener noreferrer'
+      document.body.appendChild(anchor)
+      anchor.click()
+      document.body.removeChild(anchor)
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60000)
+    } finally {
+      setIsOpeningBusinessDocument(false)
+    }
+  }
+
+  const handleDownloadBusinessVerificationDocument = async () => {
+    if (isDownloadingBusinessDocument) return
+    if (!businessVerificationDocumentName) {
+      showToast?.('error', 'No business document has been uploaded by this client.')
+      return
+    }
+    if (!businessVerificationDocumentCacheKey) {
+      showToast?.('error', 'Download is unavailable for this submission. Ask the client to re-upload.')
+      return
+    }
+    setIsDownloadingBusinessDocument(true)
+    try {
+      const blob = await getCachedFileBlob(businessVerificationDocumentCacheKey)
+      if (!(blob instanceof Blob)) {
+        showToast?.('error', 'This uploaded document is no longer available for download.')
+        return
+      }
+      const objectUrl = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = objectUrl
+      anchor.download = buildClientDownloadFilename({
+        businessName: safeClient?.businessName || '',
+        fileName: businessVerificationDocumentName || 'business-registration-document',
+        fallbackFileName: 'business-registration-document',
+      })
+      document.body.appendChild(anchor)
+      anchor.click()
+      document.body.removeChild(anchor)
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+    } finally {
+      setIsDownloadingBusinessDocument(false)
+    }
+  }
+
+  const mapBusinessTypeToBackendValue = (value = '') => {
+    const normalized = toTrimmedValue(value).toLowerCase()
+    if (normalized === 'individual') return 'individual'
+    if (normalized === 'business') return 'business'
+    if (normalized === 'non-profit' || normalized === 'non profit') return 'non-profit'
+    return ''
+  }
+
+  const saveProfileChanges = async () => {
     if (!canEditClientSettings) {
       showToast?.('error', 'Insufficient Permissions')
       return
@@ -3852,6 +4259,31 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
 
     setIsSavingProfile(true)
     try {
+      let backendSynchronized = false
+      if (normalizedClientUid) {
+        try {
+          const backendPayload = {
+            businessName: nextBusinessName,
+            businessType: mapBusinessTypeToBackendValue(nextBusinessType),
+            country: toTrimmedValue(profileDraft.country),
+            currency: toTrimmedValue(profileDraft.currency) || 'NGN',
+          }
+          const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedClientUid)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(backendPayload),
+          })
+          if (response.ok) {
+            backendSynchronized = true
+            await refreshAdminClientRowsFromBackend({ force: true })
+            window.dispatchEvent(new Event(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT))
+            window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+          }
+        } catch {
+          // Fall through to local fallback persistence.
+        }
+      }
+
       const nextSettings = {
         ...getScopedStorageObject('settingsFormData', normalizedEmail),
         fullName: nextPrimaryContact,
@@ -3928,7 +4360,11 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
       if (refreshed) setClientSnapshot(refreshed)
       setIsEditingProfile(false)
-      showToast?.('success', 'Client profile updated.')
+      if (backendSynchronized) {
+        showToast?.('success', 'Client profile updated and synced to backend.')
+      } else {
+        showToast?.('success', 'Client profile updated.')
+      }
     } finally {
       setIsSavingProfile(false)
     }
@@ -4091,6 +4527,44 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 ? 'Business registration document submitted.'
                 : 'Waiting for business registration document.'}
             </p>
+            <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3">
+              <div className="rounded-md border border-border-light bg-white p-3">
+                <p className="text-[11px] uppercase tracking-wide text-text-muted">Uploaded Document</p>
+                <p className="text-sm text-text-primary mt-1 break-all">{businessVerificationDocumentName || '--'}</p>
+                <div className="mt-2 grid grid-cols-1 gap-1 text-[11px] text-text-muted">
+                  <p>Uploaded: {hasIsoTimestamp(businessVerificationDocumentUploadedAt) ? formatTimestamp(businessVerificationDocumentUploadedAt) : '--'}</p>
+                  <p>Size: {businessVerificationDocumentSizeLabel}</p>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { void handleOpenBusinessVerificationDocument() }}
+                    disabled={!hasBusinessDocumentSubmission || isOpeningBusinessDocument}
+                    className="h-8 px-3 border border-border rounded-md text-xs font-medium text-text-primary hover:bg-background disabled:opacity-60"
+                  >
+                    {isOpeningBusinessDocument ? 'Opening...' : 'View Document'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { void handleDownloadBusinessVerificationDocument() }}
+                    disabled={!hasBusinessDocumentSubmission || isDownloadingBusinessDocument}
+                    className="h-8 px-3 border border-border rounded-md text-xs font-medium text-text-primary hover:bg-background disabled:opacity-60"
+                  >
+                    {isDownloadingBusinessDocument ? 'Preparing...' : 'Download'}
+                  </button>
+                </div>
+              </div>
+              <div className="rounded-md border border-border-light bg-white p-3">
+                <p className="text-[11px] uppercase tracking-wide text-text-muted">Business Details (Settings Snapshot)</p>
+                <div className="mt-2 grid grid-cols-1 gap-1.5">
+                  {businessVerificationDetailRows.map(([label, value]) => (
+                    <p key={label} className="text-xs text-text-secondary">
+                      <span className="text-text-muted">{label}:</span> {value || '--'}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -5087,6 +5561,498 @@ function AdminClientUploadHistoryPage({ client, setActivePage, currentAdminAccou
               </tr>
               )
             })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function AdminClientResolvedDocumentsPage({
+  client,
+  setActivePage,
+  showToast,
+  onAdminActionLog,
+  currentAdminAccount,
+}) {
+  const [searchTerm, setSearchTerm] = useState('')
+  const [records, setRecords] = useState(() => readResolvedDocumentsForClient(client?.email || ''))
+  const [title, setTitle] = useState('')
+  const [notes, setNotes] = useState('')
+  const [ticketReference, setTicketReference] = useState('')
+  const [selectedFile, setSelectedFile] = useState(null)
+  const [signatureName, setSignatureName] = useState(String(currentAdminAccount?.fullName || 'Admin User').trim() || 'Admin User')
+  const [signatureAppliedAtIso, setSignatureAppliedAtIso] = useState('')
+  const [isSending, setIsSending] = useState(false)
+  const resolvedAdminAccount = normalizeAdminAccount({
+    role: 'admin',
+    ...currentAdminAccount,
+  })
+  const isSuperAdmin = resolvedAdminAccount.adminLevel === ADMIN_LEVELS.SUPER
+  const canViewDocuments = isSuperAdmin || hasAdminPermission(resolvedAdminAccount, 'view_documents')
+  const canUploadResolvedDocuments = isOperationsAdminLevel(resolvedAdminAccount.adminLevel)
+  const safeClient = client || null
+  const normalizedClientEmail = String(safeClient?.email || '').trim().toLowerCase()
+  const adminDisplayName = String(resolvedAdminAccount.fullName || 'Admin User').trim() || 'Admin User'
+  const adminDisplayEmail = String(resolvedAdminAccount.email || '').trim().toLowerCase()
+
+  useEffect(() => {
+    if (!normalizedClientEmail) {
+      setRecords([])
+      return
+    }
+    setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
+  }, [normalizedClientEmail])
+
+  useEffect(() => {
+    if (!normalizedClientEmail) return
+    const refresh = () => {
+      setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
+    }
+    const handleStorage = (event) => {
+      if (!event.key || event.key === `kiaminaClientResolvedDocuments:${normalizedClientEmail}`) {
+        refresh()
+      }
+    }
+    const handleSyncEvent = (event) => {
+      const syncedEmail = String(event?.detail?.email || '').trim().toLowerCase()
+      if (!syncedEmail || syncedEmail === normalizedClientEmail) {
+        refresh()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
+    }
+  }, [normalizedClientEmail])
+
+  useEffect(() => {
+    if (signatureName) return
+    setSignatureName(adminDisplayName)
+  }, [adminDisplayName, signatureName])
+
+  if (!safeClient) {
+    return (
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
+        <p className="text-sm text-text-secondary">Select a client from Client Management to deliver resolved documents.</p>
+        <button
+          type="button"
+          onClick={() => setActivePage?.('admin-clients')}
+          className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+        >
+          Return to Client Management
+        </button>
+      </div>
+    )
+  }
+  if (!canAdminAccessClientScope(resolvedAdminAccount, safeClient.email)) {
+    return (
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
+        <p className="text-sm text-text-secondary">You do not have access to this client resolved document delivery page.</p>
+        <button
+          type="button"
+          onClick={() => setActivePage?.('admin-clients')}
+          className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+        >
+          Return to Client Management
+        </button>
+      </div>
+    )
+  }
+  if (!canViewDocuments) {
+    return (
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-8">
+        <p className="text-sm text-text-secondary">Insufficient Permissions</p>
+        <button
+          type="button"
+          onClick={() => setActivePage?.('admin-clients')}
+          className="mt-4 h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+        >
+          Return to Client Management
+        </button>
+      </div>
+    )
+  }
+
+  const clearComposer = () => {
+    setTitle('')
+    setNotes('')
+    setTicketReference('')
+    setSelectedFile(null)
+    setSignatureAppliedAtIso('')
+  }
+
+  const handleApplySignature = () => {
+    if (!canUploadResolvedDocuments) {
+      showToast?.('error', 'Only Owner Admin, Super Admin, and Accountant Admin can deliver resolved documents.')
+      return
+    }
+    const normalizedSignature = String(signatureName || '').trim()
+    if (!normalizedSignature) {
+      showToast?.('error', 'Enter signature name before applying e-signature.')
+      return
+    }
+    setSignatureName(normalizedSignature)
+    setSignatureAppliedAtIso(new Date().toISOString())
+    showToast?.('success', 'E-signature applied.')
+  }
+
+  const handleSendResolvedDocument = async () => {
+    if (!canUploadResolvedDocuments) {
+      showToast?.('error', 'Only Owner Admin, Super Admin, and Accountant Admin can deliver resolved documents.')
+      return
+    }
+    if (isSending) return
+    if (!selectedFile) {
+      showToast?.('error', 'Select a file to send.')
+      return
+    }
+    const normalizedTitle = String(title || '').trim()
+    if (!normalizedTitle) {
+      showToast?.('error', 'Document title is required.')
+      return
+    }
+    const normalizedSignature = String(signatureName || '').trim()
+    if (!normalizedSignature || !signatureAppliedAtIso) {
+      showToast?.('error', 'Apply e-signature before sending.')
+      return
+    }
+
+    setIsSending(true)
+    try {
+      const nowIso = new Date().toISOString()
+      const fileId = `RSDOC-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+      const fileCacheKey = buildFileCacheKey({
+        ownerEmail: normalizedClientEmail,
+        fileId,
+      })
+      if (!fileCacheKey) {
+        showToast?.('error', 'Unable to create file cache key for this document.')
+        return
+      }
+      const cached = await putCachedFileBlob(fileCacheKey, selectedFile, {
+        filename: selectedFile.name,
+        mimeType: selectedFile.type,
+        size: selectedFile.size,
+      })
+      if (!cached) {
+        showToast?.('error', 'Unable to cache this document for delivery.')
+        return
+      }
+
+      const extension = normalizeDocumentType({
+        filename: selectedFile.name,
+        extension: selectedFile.name.split('.').pop() || '',
+        type: selectedFile.type || '',
+      })
+      const record = {
+        id: `RSD-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        fileId,
+        clientEmail: normalizedClientEmail,
+        title: normalizedTitle,
+        notes: String(notes || '').trim(),
+        ticketReference: String(ticketReference || '').trim(),
+        filename: selectedFile.name,
+        extension,
+        mimeType: selectedFile.type || 'application/octet-stream',
+        size: Number(selectedFile.size || 0),
+        fileCacheKey,
+        status: 'sent',
+        sentAtIso: nowIso,
+        sentByName: adminDisplayName,
+        sentByEmail: adminDisplayEmail,
+        signatureName: normalizedSignature,
+        signatureAtIso: signatureAppliedAtIso,
+        signatureMode: 'typed',
+      }
+      const nextRows = appendResolvedDocumentForClient(normalizedClientEmail, record)
+      setRecords(nextRows)
+
+      appendScopedClientActivityLog(normalizedClientEmail, {
+        actorName: adminDisplayName,
+        actorRole: 'admin',
+        action: 'Delivered resolved document',
+        details: `${record.filename} was delivered to client with e-signature.`,
+      })
+      appendClientBriefNotificationsToStorage(normalizedClientEmail, [{
+        id: `RSD-NOTIFY-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        type: 'important',
+        title: 'Resolved Document Available',
+        message: `${record.title} is ready for download.`,
+        priority: 'important',
+        sentAtIso: nowIso,
+        linkPage: 'resolved-documents',
+        fileId: record.fileId,
+        documentId: record.id,
+      }])
+      onAdminActionLog?.({
+        action: 'Delivered resolved document',
+        affectedUser: safeClient.businessName || safeClient.email || '--',
+        details: `${record.filename} signed by ${record.signatureName} and sent to ${normalizedClientEmail}.`,
+      })
+
+      clearComposer()
+      showToast?.('success', 'Resolved document sent to client successfully.')
+    } finally {
+      setIsSending(false)
+    }
+  }
+
+  const handleAdminDownload = async (row = {}) => {
+    const cacheKey = String(row.fileCacheKey || '').trim()
+    if (!cacheKey) {
+      showToast?.('error', 'Download is unavailable for this document.')
+      return
+    }
+    const blob = await getCachedFileBlob(cacheKey)
+    if (!(blob instanceof Blob)) {
+      showToast?.('error', 'This file is no longer available for download.')
+      return
+    }
+    const objectUrl = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = objectUrl
+    anchor.download = buildClientDownloadFilename({
+      businessName: safeClient.businessName || '',
+      fileName: row.filename || row.title || 'resolved-document',
+    })
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+  }
+
+  const filteredRows = records
+    .filter((row) => {
+      const query = searchTerm.trim().toLowerCase()
+      if (!query) return true
+      return [
+        row.title,
+        row.filename,
+        row.notes,
+        row.ticketReference,
+        row.sentByName,
+        row.signatureName,
+      ].join(' ').toLowerCase().includes(query)
+    })
+    .sort((left, right) => (
+      (Date.parse(right.sentAtIso || '') || 0) - (Date.parse(left.sentAtIso || '') || 0)
+    ))
+
+  const totalDownloads = records.reduce((total, row) => total + Number(row.downloadCount || 0), 0)
+  const selectedFileLabel = selectedFile
+    ? `${selectedFile.name} (${Math.max(0, Math.round(Number(selectedFile.size || 0) / 1024))} KB)`
+    : 'No file selected'
+
+  return (
+    <div className="animate-fade-in">
+      <AdminClientPageHeader
+        client={safeClient}
+        title="Resolved Document Delivery"
+        subtitle="Upload final resolved files, apply e-signature, and deliver to client."
+        setActivePage={setActivePage}
+      />
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-5 mb-6">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="text-base font-semibold text-text-primary">Compose Delivery</h3>
+            <p className="text-xs text-text-muted mt-1">A signed record will be available in the client&apos;s Resolved Documents section.</p>
+          </div>
+          <div className="rounded-md border border-border-light px-3 py-2 bg-background">
+            <p className="text-[11px] uppercase tracking-wide text-text-muted">Client Downloads</p>
+            <p className="text-sm font-semibold text-text-primary mt-1">{totalDownloads}</p>
+          </div>
+        </div>
+        {!canUploadResolvedDocuments && (
+          <div className="mt-4 rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-2.5 text-sm text-text-secondary">
+            Read-only mode: only Owner Admin, Super Admin, and Accountant Admin can upload resolved documents.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <div>
+            <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1.5">Document Title *</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="Final VAT reconciliation report"
+              disabled={!canUploadResolvedDocuments || isSending}
+              className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1.5">Issue / Ticket Reference</label>
+            <input
+              type="text"
+              value={ticketReference}
+              onChange={(event) => setTicketReference(event.target.value)}
+              placeholder="SUP-2026-0042"
+              disabled={!canUploadResolvedDocuments || isSending}
+              className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1.5">Resolution Notes</label>
+            <textarea
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              placeholder="Summary of the fix or reconciliation done for this client."
+              disabled={!canUploadResolvedDocuments || isSending}
+              className="w-full h-24 px-3 py-2 border border-border rounded-md text-sm focus:outline-none focus:border-primary resize-none"
+            />
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1.5">Upload Final File *</label>
+            <div className="rounded-md border border-border-light bg-background p-3">
+              <input
+                type="file"
+                disabled={!canUploadResolvedDocuments || isSending}
+                onChange={(event) => {
+                  const nextFile = event.target.files?.[0] || null
+                  setSelectedFile(nextFile)
+                  if (nextFile && !String(title || '').trim()) {
+                    setTitle(String(nextFile.name || '').trim())
+                  }
+                }}
+                className="block w-full text-sm text-text-primary file:mr-3 file:py-2 file:px-3 file:border file:border-border file:rounded-md file:text-xs file:font-semibold file:bg-white file:text-text-primary"
+              />
+              <p className="text-xs text-text-muted mt-2">{selectedFileLabel}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-5 rounded-lg border border-border-light bg-[#FCFDFF] p-4">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <h4 className="text-sm font-semibold text-text-primary">Admin E-Signature</h4>
+              <p className="text-xs text-text-muted mt-1">Apply signature before sending this document to the client.</p>
+            </div>
+            {signatureAppliedAtIso && (
+              <span className="inline-flex items-center h-6 px-2.5 rounded text-[11px] font-medium bg-success-bg text-success">
+                Signed {formatTimestamp(signatureAppliedAtIso)}
+              </span>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={signatureName}
+              onChange={(event) => {
+                setSignatureName(event.target.value)
+                setSignatureAppliedAtIso('')
+              }}
+              placeholder="Enter signer name"
+              disabled={!canUploadResolvedDocuments || isSending}
+              className="flex-1 min-w-[220px] h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+            />
+            <button
+              type="button"
+              onClick={handleApplySignature}
+              disabled={!canUploadResolvedDocuments || isSending}
+              className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light"
+            >
+              Apply E-Signature
+            </button>
+          </div>
+          {signatureName && (
+            <div className="mt-3 rounded-md border border-border-light bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-text-muted">Signature Preview</p>
+              <p className="text-lg text-text-primary mt-1" style={{ fontFamily: '"Brush Script MT", "Segoe Script", cursive' }}>
+                {signatureName}
+              </p>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-3">
+          <button
+            type="button"
+            onClick={clearComposer}
+            disabled={isSending || !canUploadResolvedDocuments}
+            className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background disabled:opacity-60"
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleSendResolvedDocument()}
+            disabled={isSending || !canUploadResolvedDocuments}
+            className="h-10 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light disabled:opacity-60 inline-flex items-center gap-2"
+          >
+            <Send className="w-4 h-4" />
+            {isSending ? 'Sending...' : 'Sign & Send to Client'}
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-4 mb-4">
+        <div className="relative max-w-md">
+          <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Search delivered documents..."
+            className="w-full h-10 pl-9 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          />
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light overflow-hidden">
+        <table className="w-full">
+          <thead>
+            <tr className="bg-[#F9FAFB]">
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Document</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Signed By</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Sent At</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Client Downloads</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRows.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-4 py-8 text-center text-sm text-text-muted">
+                  No resolved documents delivered yet.
+                </td>
+              </tr>
+            )}
+            {filteredRows.map((row) => (
+              <tr key={row.id} className="border-t border-border-light hover:bg-[#F9FAFB]">
+                <td className="px-4 py-3.5 text-sm">
+                  <p className="font-medium text-text-primary">{row.title || row.filename || '--'}</p>
+                  <p className="text-xs text-text-secondary mt-1">{row.filename || '--'}{row.ticketReference ? ` / ${row.ticketReference}` : ''}</p>
+                  {row.notes && (
+                    <p className="text-xs text-text-muted mt-1 truncate max-w-[30rem]">{row.notes}</p>
+                  )}
+                </td>
+                <td className="px-4 py-3.5 text-sm text-text-primary">
+                  <p>{row.signatureName || row.sentByName || '--'}</p>
+                  <p className="text-xs text-text-muted mt-1">{formatTimestamp(row.signatureAtIso || row.sentAtIso)}</p>
+                </td>
+                <td className="px-4 py-3.5 text-sm text-text-secondary">{formatTimestamp(row.sentAtIso)}</td>
+                <td className="px-4 py-3.5 text-sm text-text-primary">
+                  {Number(row.downloadCount || 0)}
+                  {row.lastDownloadedAtIso && (
+                    <p className="text-xs text-text-muted mt-1">{formatTimestamp(row.lastDownloadedAtIso)}</p>
+                  )}
+                </td>
+                <td className="px-4 py-3.5 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => void handleAdminDownload(row)}
+                    className="h-8 px-3 border border-border rounded-md text-xs font-medium text-text-primary hover:bg-background inline-flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download
+                  </button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
@@ -6285,7 +7251,7 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
       'All Tickets': Number(lead.ticketCount || 0),
       Updated: formatTimestamp(lead.latestUpdatedAtIso || lead.updatedAtIso),
     }))
-    const exportStamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
+    const exportStamp = new Date().toISOString().slice(0, 19).replaceAll('-', '').replaceAll(':', '').replace('T', '')
     await downloadObjectRowsAsXlsx({
       rows: exportRows,
       sheetName: 'Leads',
@@ -8679,6 +9645,7 @@ export {
   AdminClientProfilePage,
   AdminClientDocumentsPage,
   AdminClientUploadHistoryPage,
+  AdminClientResolvedDocumentsPage,
   AdminDocumentReviewCenter,
   AdminSupportLeadsPage,
   AdminTrashPage,

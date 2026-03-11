@@ -192,6 +192,10 @@ const clientWorkspaceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({})
     },
+    accountSettings: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({})
+    },
     profilePhoto: {
       type: String,
       default: ""

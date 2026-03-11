@@ -1,14 +1,30 @@
 import { env } from "../config/env.js";
 import { issueOtpChallenge, verifyOtpChallenge } from "../services/otp.service.js";
 import { issueSmsOtpChallenge, verifySmsOtpChallenge } from "../services/sms-otp.service.js";
-import { verifyFirebaseIdToken } from "../services/firebase-admin.service.js";
+import {
+  generateFirebaseEmailVerificationLink,
+  generateFirebasePasswordResetLink,
+  updateFirebaseUserPassword,
+  verifyFirebaseIdToken
+} from "../services/firebase-admin.service.js";
+import { signInWithFirebasePassword } from "../services/firebase-identity.service.js";
 import {
   assertActiveSessionForUid,
   createLoginSessionRecord,
+  deleteAuthAccountForUid,
+  getRegisteredAuthAccountByEmail,
+  getOwnerBootstrapEligibility,
+  listRegisteredAuthAccounts,
   refreshSessionTokenHash,
   registerOrUpdateAuthAccount,
   revokeSessionForUid
 } from "../services/auth-accounts.service.js";
+import {
+  assertCredentialLoginAllowed,
+  clearCredentialLoginLockout,
+  LOGIN_LOCKOUT_MESSAGE,
+  registerCredentialLoginFailure
+} from "../services/credential-login-lockout.service.js";
 import {
   createAccessToken,
   generateRefreshToken,
@@ -16,10 +32,14 @@ import {
   verifyAccessToken
 } from "../services/auth-tokens.service.js";
 import {
+  dispatchEmailVerificationLink,
   dispatchOtpEmail,
   dispatchPasswordResetLink
 } from "../services/auth-messaging.service.js";
 import {
+  validateChangePasswordPayload,
+  validateSendEmailVerificationLinkPayload,
+  validatePasswordLoginPayload,
   validateLogoutSessionPayload,
   validateRefreshTokenPayload,
   validateLoginSessionPayload,
@@ -27,6 +47,7 @@ import {
   validateSendPasswordResetLinkPayload,
   validateSendOtpPayload,
   validateSendSmsOtpPayload,
+  validateSocialAuthAccountStatusPayload,
   validateVerifyOtpPayload,
   validateVerifySmsOtpPayload,
   validateVerifyTokenPayload
@@ -35,6 +56,25 @@ import {
 const ACCESS_COOKIE_NAME = "kiamina_access_token";
 const REFRESH_COOKIE_NAME = "kiamina_refresh_token";
 const SESSION_COOKIE_NAME = "kiamina_session_id";
+const ELEVATED_ADMIN_ROLES = new Set(["owner", "superadmin"]);
+
+const buildAppActionLinkFromFirebaseLink = ({
+  appLink,
+  firebaseLink,
+  mode
+}) => {
+  const baseUrl = new URL(String(appLink || "").trim());
+  const generatedUrl = new URL(String(firebaseLink || "").trim());
+  const oobCode = String(generatedUrl.searchParams.get("oobCode") || "").trim();
+
+  if (!oobCode) {
+    throw new Error("Firebase action link is missing oobCode.");
+  }
+
+  baseUrl.searchParams.set("mode", String(mode || "").trim());
+  baseUrl.searchParams.set("oobCode", oobCode);
+  return baseUrl.toString();
+};
 
 const parseCookieHeader = (cookieHeader = "") =>
   String(cookieHeader || "")
@@ -83,6 +123,42 @@ const normalizeRoles = (decodedToken) => {
 const getActorUid = (req) => {
   const actorUid = req.headers["x-user-id"];
   return actorUid ? String(actorUid) : "";
+};
+
+const getActorRoles = (req) => {
+  const raw = req.headers["x-user-roles"];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((role) => String(role || "").trim().toLowerCase())
+      .filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    return raw
+      .split(",")
+      .map((role) => role.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const isElevatedAdminActor = (req) =>
+  getActorRoles(req).some((role) => ELEVATED_ADMIN_ROLES.has(role));
+
+const getActorEmail = (req) =>
+  String(req.headers["x-user-email"] || "").trim().toLowerCase();
+
+const resolveAccountDeletionReason = (payload = {}, fallback = "account-deleted") => {
+  const source = payload && typeof payload === "object" ? payload : {};
+  const rawReason =
+    source.reason ||
+    source.retentionIntent ||
+    source.reasonOther ||
+    fallback;
+  const normalized = String(rawReason || "").trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized.slice(0, 120);
 };
 
 const getRequestIpAddress = (req) =>
@@ -234,6 +310,47 @@ export const sendOtp = async (req, res, next) => {
   }
 };
 
+export const authenticatePassword = async (req, res, next) => {
+  try {
+    const { errors, payload } = validatePasswordLoginPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    await assertCredentialLoginAllowed(payload.email);
+    const result = await signInWithFirebasePassword(payload);
+    if (!result.ok || !result.idToken) {
+      if (result.status >= 500) {
+        return res.status(result.status || 503).json({
+          message: "Unable to verify credentials right now."
+        });
+      }
+
+      const failureState = await registerCredentialLoginFailure(payload.email);
+      if (failureState.locked) {
+        return res.status(423).json({
+          message: LOGIN_LOCKOUT_MESSAGE,
+          remainingMs: failureState.remainingMs
+        });
+      }
+
+      return res.status(401).json({
+        message: "Incorrect email or password"
+      });
+    }
+
+    await clearCredentialLoginLockout(payload.email);
+    return res.status(200).json({
+      message: "Credentials verified.",
+      uid: result.uid,
+      email: result.email,
+      idToken: result.idToken
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const verifyOtp = async (req, res, next) => {
   try {
     const { errors, payload } = validateVerifyOtpPayload(req.body);
@@ -310,6 +427,89 @@ export const verifyToken = async (req, res, next) => {
   }
 };
 
+export const getBootstrapOwnerStatus = async (req, res, next) => {
+  try {
+    const status = await getOwnerBootstrapEligibility();
+    return res.status(200).json({
+      canBootstrapOwner: Boolean(status.canBootstrapOwner),
+      adminAccountCount: Number(status.adminAccountCount || 0),
+      message: status.canBootstrapOwner
+        ? "Owner bootstrap is available."
+        : "Owner bootstrap is disabled because an admin account already exists."
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const listAccounts = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+    if (!isElevatedAdminActor(req)) {
+      return res.status(403).json({
+        message: "Only owner or superadmin users can list auth accounts."
+      });
+    }
+
+    const limit = Math.max(1, Math.min(500, Number(req.query?.limit) || 200));
+    const accounts = await listRegisteredAuthAccounts({ limit });
+    return res.status(200).json({
+      accounts: accounts.map((account) => ({
+        uid: account.uid,
+        email: account.email,
+        fullName: account.fullName,
+        role: account.role,
+        provider: account.provider,
+        status: account.status,
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt,
+        lastLoginAt: account.lastLoginAt
+      }))
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const getSocialAuthAccountStatus = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateSocialAuthAccountStatusPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const decodedToken = await verifyFirebaseIdToken(payload.idToken);
+    const normalizedEmail = String(decodedToken?.email || "").trim().toLowerCase();
+    if (!decodedToken || !normalizedEmail) {
+      return res.status(401).json({
+        message: "Unable to verify the social sign-in token."
+      });
+    }
+
+    const account = await getRegisteredAuthAccountByEmail(normalizedEmail);
+    const requestedProvider = String(payload.provider || "google").trim().toLowerCase();
+    const registeredProvider = String(account?.provider || "").trim().toLowerCase();
+    const matchesProvider = Boolean(account && registeredProvider === requestedProvider);
+
+    return res.status(200).json({
+      email: normalizedEmail,
+      exists: Boolean(account),
+      provider: registeredProvider,
+      role: String(account?.role || "").trim().toLowerCase(),
+      status: String(account?.status || "").trim().toLowerCase(),
+      emailVerified: Boolean(account?.emailVerified),
+      matchesProvider
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const sendPasswordResetLink = async (req, res, next) => {
   try {
     const { errors, payload } = validateSendPasswordResetLinkPayload(req.body);
@@ -317,16 +517,65 @@ export const sendPasswordResetLink = async (req, res, next) => {
       return res.status(400).json({ message: errors.join("; ") });
     }
 
+    const generatedLinkResult = await generateFirebasePasswordResetLink(payload.email);
+    if (!generatedLinkResult.ok || !generatedLinkResult.link) {
+      return res.status(503).json({
+        message: "Unable to generate password reset link right now."
+      });
+    }
+
+    const resetLink = buildAppActionLinkFromFirebaseLink({
+      appLink: payload.resetLink,
+      firebaseLink: generatedLinkResult.link,
+      mode: "reset-password"
+    });
+
     const dispatchResult = await dispatchPasswordResetLink({
       email: payload.email,
-      resetLink: payload.resetLink
+      resetLink
     });
 
     return res.status(202).json({
       message: "Password reset link request accepted.",
       email: payload.email,
       dispatchQueued: Boolean(dispatchResult.queued),
-      previewResetLink: env.nodeEnv === "production" ? undefined : payload.resetLink
+      previewResetLink: env.nodeEnv === "production" ? undefined : resetLink
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const sendEmailVerificationLink = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateSendEmailVerificationLinkPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const generatedLinkResult = await generateFirebaseEmailVerificationLink(payload.email);
+    if (!generatedLinkResult.ok || !generatedLinkResult.link) {
+      return res.status(503).json({
+        message: "Unable to generate email verification link right now."
+      });
+    }
+
+    const verificationLink = buildAppActionLinkFromFirebaseLink({
+      appLink: payload.verificationLink,
+      firebaseLink: generatedLinkResult.link,
+      mode: "email-verification"
+    });
+
+    const dispatchResult = await dispatchEmailVerificationLink({
+      email: payload.email,
+      verificationLink
+    });
+
+    return res.status(202).json({
+      message: "Email verification link request accepted.",
+      email: payload.email,
+      dispatchQueued: Boolean(dispatchResult.queued),
+      previewVerificationLink: env.nodeEnv === "production" ? undefined : verificationLink
     });
   } catch (error) {
     return next(error);
@@ -395,6 +644,64 @@ export const registerAccount = async (req, res, next) => {
         phoneVerified: Boolean(result.account.phoneVerified),
         lastLoginAt: result.account.lastLoginAt
       }
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const changePassword = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    const actorEmail = getActorEmail(req);
+    if (!actorUid || !actorEmail) {
+      return res.status(401).json({
+        message: "Missing authenticated user identity from gateway request"
+      });
+    }
+
+    const { errors, payload } = validateChangePasswordPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+    if (payload.currentPassword === payload.newPassword) {
+      return res.status(400).json({
+        message: "New password must be different from your current password."
+      });
+    }
+
+    const signInResult = await signInWithFirebasePassword({
+      email: actorEmail,
+      password: payload.currentPassword
+    });
+    if (!signInResult.ok || !signInResult.uid) {
+      if (signInResult.status >= 500) {
+        return res.status(signInResult.status || 503).json({
+          message: "Unable to verify your current password right now."
+        });
+      }
+      return res.status(401).json({
+        message: "Current password is incorrect."
+      });
+    }
+    if (signInResult.uid !== actorUid) {
+      return res.status(403).json({
+        message: "Current password does not match the authenticated account."
+      });
+    }
+
+    const updateResult = await updateFirebaseUserPassword({
+      uid: actorUid,
+      newPassword: payload.newPassword
+    });
+    if (!updateResult.ok) {
+      return res.status(503).json({
+        message: "Unable to update your password right now."
+      });
+    }
+
+    return res.status(200).json({
+      message: "Your password has been updated successfully."
     });
   } catch (error) {
     return next(error);
@@ -544,6 +851,71 @@ export const logoutSession = async (req, res, next) => {
         revokedAt: result.session.revokedAt || null,
         revokedReason: result.session.revokedReason || payload.reason || "logout"
       }
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const deleteAccount = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+
+    const reason = resolveAccountDeletionReason(req.body, "account-deleted");
+    const result = await deleteAuthAccountForUid({
+      uid: actorUid,
+      reason
+    });
+    clearAuthCookies(res);
+
+    return res.status(200).json({
+      message: result.deleted ? "Auth account deleted successfully." : "Auth account not found.",
+      uid: actorUid,
+      deleted: Boolean(result.deleted),
+      revokedSessionCount: Number(result.revokedSessionCount || 0),
+      firebase: result.firebase || {}
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const deleteAccountByUid = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+    if (!isElevatedAdminActor(req)) {
+      return res.status(403).json({
+        message: "Only owner or superadmin users can delete another auth account."
+      });
+    }
+
+    const targetUid = String(req.params.uid || "").trim();
+    if (!targetUid) {
+      return res.status(400).json({ message: "uid is required." });
+    }
+
+    const reason = resolveAccountDeletionReason(req.body, "admin-account-deleted");
+    const result = await deleteAuthAccountForUid({
+      uid: targetUid,
+      reason
+    });
+
+    return res.status(200).json({
+      message: result.deleted ? "Auth account deleted successfully." : "Auth account not found.",
+      uid: targetUid,
+      deleted: Boolean(result.deleted),
+      revokedSessionCount: Number(result.revokedSessionCount || 0),
+      firebase: result.firebase || {}
     });
   } catch (error) {
     return next(error);

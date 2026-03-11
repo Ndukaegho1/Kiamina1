@@ -6,6 +6,8 @@ const PRIVILEGED_ROLES = new Set([
   "accountant"
 ]);
 
+const ADMIN_ROLES = new Set(["admin", "owner", "superadmin", "manager"]);
+
 const parseRoles = (value) => {
   if (Array.isArray(value)) {
     return value
@@ -37,3 +39,6 @@ export const getRequestActor = (req) => {
 
 export const isPrivilegedActor = (actor) =>
   actor.roles.some((role) => PRIVILEGED_ROLES.has(role));
+
+export const isAdminActor = (actor) =>
+  actor.roles.some((role) => ADMIN_ROLES.has(role));

@@ -2,17 +2,26 @@ import {
   changeDocumentStatus,
   createDocument,
   deleteDocument,
+  deleteDocumentsForOwner,
   getDocumentById,
   getDocumentsByOwner,
+  getDocumentStorageRefsByOwner,
   getDocumentSummaryByOwner,
   updateDocument
 } from "../services/documents.service.js";
+import { removeRecordsByOwner } from "../services/accounting-records.service.js";
 import {
   createSignedDownloadUrl,
   deleteStorageObject,
+  getDownloadResponseHeaders,
+  getStoredFileAsset,
   uploadFileBuffer
-} from "../services/firebase-storage.service.js";
-import { getRequestActor, isPrivilegedActor } from "../utils/request-actor.js";
+} from "../services/mongodb-storage.service.js";
+import {
+  getRequestActor,
+  isAdminActor,
+  isPrivilegedActor
+} from "../utils/request-actor.js";
 import {
   buildDocumentUpdatePayload,
   validateCreateDocumentPayload,
@@ -238,17 +247,72 @@ export const removeById = async (req, res, next) => {
 
     const deleted = await deleteDocument(req.params.id);
 
-    if (
-      deleted?.storageProvider === "firebase" &&
-      deleted.storagePath &&
-      env.deleteStorageObjectOnRecordDelete
-    ) {
+    if (deleted?.storagePath && env.deleteStorageObjectOnRecordDelete) {
       await deleteStorageObject(deleted.storagePath);
     }
 
     return res.status(200).json({
       message: "Document deleted successfully.",
       id: deleted.id
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const removeByOwner = async (req, res, next) => {
+  try {
+    const actor = requireActor(req, res);
+    if (!actor) {
+      return;
+    }
+
+    const ownerUserId = String(req.params.ownerUserId || "").trim();
+    if (!ownerUserId) {
+      return res.status(400).json({ message: "ownerUserId is required." });
+    }
+
+    const actorIsAdmin = isAdminActor(actor);
+    if (!actorIsAdmin && ownerUserId !== actor.uid) {
+      return res.status(403).json({
+        message: "You can only purge your own documents."
+      });
+    }
+
+    const storageRefs = await getDocumentStorageRefsByOwner(ownerUserId);
+    const [documentsDeletionResult, accountingDeletionResult] = await Promise.all([
+      deleteDocumentsForOwner(ownerUserId),
+      removeRecordsByOwner(ownerUserId)
+    ]);
+
+    const storageTargets = (Array.isArray(storageRefs) ? storageRefs : []).filter((record) =>
+      String(record?.storagePath || "").trim()
+    );
+
+    let storageDeletedCount = 0;
+    let storageFailedCount = 0;
+    if (env.deleteStorageObjectOnRecordDelete && storageTargets.length > 0) {
+      const storageDeleteResults = await Promise.allSettled(
+        storageTargets.map((record) =>
+          deleteStorageObject(String(record.storagePath || "").trim())
+        )
+      );
+      storageDeleteResults.forEach((result) => {
+        if (result.status === "fulfilled") {
+          storageDeletedCount += 1;
+        } else {
+          storageFailedCount += 1;
+        }
+      });
+    }
+
+    return res.status(200).json({
+      message: "Owner documents purged successfully.",
+      ownerUserId,
+      deletedDocuments: Number(documentsDeletionResult?.deletedCount || 0),
+      deletedAccountingRecords: Number(accountingDeletionResult?.deletedCount || 0),
+      deletedStorageObjects: storageDeletedCount,
+      failedStorageObjectDeletes: storageFailedCount
     });
   } catch (error) {
     return next(error);
@@ -329,15 +393,15 @@ export const getDownloadUrl = async (req, res, next) => {
       return res.status(403).json({ message: "You cannot download this document." });
     }
 
-    if (document.storageProvider !== "firebase" || !document.storagePath) {
+    if (document.storageProvider !== "mongodb" || !document.storagePath) {
       return res.status(400).json({
-        message: "This document does not have a Firebase storage object."
+        message: "This document does not have a MongoDB storage object."
       });
     }
 
     const signed = await createSignedDownloadUrl({
-      storagePath: document.storagePath,
-      fileName: document.fileName
+      req,
+      documentId: document.id
     });
 
     return res.status(200).json({
@@ -345,6 +409,51 @@ export const getDownloadUrl = async (req, res, next) => {
       downloadUrl: signed.url,
       expiresAt: signed.expiresAt
     });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const downloadById = async (req, res, next) => {
+  try {
+    const actor = requireActor(req, res);
+    if (!actor) {
+      return;
+    }
+
+    const document = await getDocumentById(req.params.id);
+    if (!document) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    const actorIsPrivileged = isPrivilegedActor(actor);
+    if (!actorIsPrivileged && document.ownerUserId !== actor.uid) {
+      return res.status(403).json({ message: "You cannot download this document." });
+    }
+
+    if (document.storageProvider !== "mongodb" || !document.storagePath) {
+      return res.status(400).json({
+        message: "This document does not have a MongoDB storage object."
+      });
+    }
+
+    const storedFile = await getStoredFileAsset(document.storagePath);
+    if (!storedFile) {
+      return res.status(404).json({ message: "Stored file not found." });
+    }
+
+    const headers = getDownloadResponseHeaders({
+      fileName: document.fileName || storedFile.fileName,
+      contentType:
+        document.metadata?.contentType || storedFile.contentType,
+      size: document.metadata?.fileSize || storedFile.size
+    });
+
+    Object.entries(headers).forEach(([headerName, headerValue]) => {
+      res.setHeader(headerName, headerValue);
+    });
+
+    return res.status(200).send(storedFile.buffer);
   } catch (error) {
     return next(error);
   }

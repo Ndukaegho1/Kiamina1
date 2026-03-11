@@ -8,15 +8,30 @@ import { notFoundMiddleware } from "./middleware/not-found.js";
 import usersRoutes from "./routes/v1/users.routes.js";
 
 const app = express();
+const helmetOptions = {
+  crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
+};
 
-app.use(helmet());
+const isAllowedOrigin = (origin = "") => {
+  if (!origin) return true;
+  if (env.corsOrigins.length === 0 || env.corsOrigins.includes(origin)) {
+    return true;
+  }
+  if (env.nodeEnv === "development") return true;
+  return false;
+};
+
+app.use(helmet(helmetOptions));
 app.use(
   cors({
+    credentials: true,
     origin(origin, callback) {
-      if (!origin || env.corsOrigins.length === 0 || env.corsOrigins.includes(origin)) {
+      if (isAllowedOrigin(origin)) {
         return callback(null, true);
       }
-      return callback(new Error("Origin not allowed by CORS policy"));
+      const corsError = new Error("Origin not allowed by CORS policy");
+      corsError.status = 403;
+      return callback(corsError);
     }
   })
 );

@@ -5,6 +5,7 @@ import {
   TopBar as ClientTopBar,
   DashboardPage as ClientDashboardPage,
   UploadHistoryPage as ClientUploadHistoryPage,
+  ResolvedDocumentsPage as ClientResolvedDocumentsPage,
   RecentActivitiesPage as ClientRecentActivitiesPage,
   SupportPage as ClientSupportPage,
   ClientSupportWidget,
@@ -33,20 +34,35 @@ import {
   isAdminInvitePending,
 } from './components/admin/adminIdentity'
 import { getScopedStorageKey } from './utils/storage'
-import { buildFileCacheKey, putCachedFileBlob } from './utils/fileCache'
+import {
+  buildFileCacheKey,
+  deleteCachedFileBlob,
+  getCachedFileBlob,
+  putCachedFileBlob,
+} from './utils/fileCache'
 import DotLottiePreloader from './components/common/DotLottiePreloader'
 import { getNetworkAwareDurationMs, getNetworkConnectionSnapshot, isPageReloadNavigation } from './utils/networkRuntime'
 import { apiFetch, clearApiAccessToken, clearApiSessionId, getApiSessionId, setApiAccessToken } from './utils/apiClient'
 import {
-  fetchAdminClientManagementFromBackend,
   fetchClientDashboardOverviewFromBackend,
   fetchClientWorkspaceFromBackend,
+  fetchSocialAuthAccountStatus,
   patchClientWorkspaceToBackend,
   persistClientOnboardingToBackend,
   recordAuthLoginSession,
   registerAuthAccountRecord,
+  syncAuthenticatedUserToBackend,
   subscribeToRealtimeEvents,
 } from './utils/clientBackendBridge'
+import {
+  applyEmailVerificationCode,
+  clearFirebaseAuthSession,
+  completePasswordResetWithCode,
+  consumeGoogleSignInRedirectResult,
+  inspectEmailVerificationCode,
+  inspectPasswordResetCode,
+  startGoogleSignInRedirect,
+} from './utils/firebaseAuthClient'
 import {
   isClientNotificationSoundPrimed,
   playClientNotificationSound,
@@ -57,9 +73,19 @@ import {
   isClientNotificationSoundEnabled,
   readClientNotificationSettings,
 } from './utils/clientNotificationPreferences'
+import {
+  buildClientEmailVerificationLink,
+  buildClientResetPasswordLink,
+} from './utils/authLinks'
+import { refreshSupportStateFromBackend } from './utils/supportCenter'
+import {
+  deleteDocumentFromBackend,
+  downloadDocumentBlobFromBackend,
+  uploadDocumentToBackend,
+} from './utils/documentsApi'
 import PreliminaryCorporateSite from './components/preliminary/PreliminaryCorporateSite'
 
-const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'recent-activities', 'support', 'settings']
+const CLIENT_PAGE_IDS = ['dashboard', 'expenses', 'sales', 'bank-statements', 'upload-history', 'resolved-documents', 'recent-activities', 'support', 'settings']
 const CLIENT_DOCUMENT_PAGE_IDS = ['expenses', 'sales', 'bank-statements']
 const APP_PAGE_IDS = [...CLIENT_PAGE_IDS, ...ADMIN_PAGE_IDS]
 const PUBLIC_SITE_PAGE_IDS = ['home', 'about', 'services', 'insights', 'careers', 'contact']
@@ -72,6 +98,13 @@ const PUBLIC_SITE_PAGE_BY_PATH = {
   '/careers': 'careers',
   '/contact': 'contact',
 }
+const normalizeAppPathname = (pathname = '/') => {
+  const rawPath = String(pathname || '/').trim() || '/'
+  return rawPath.length > 1 ? rawPath.replace(/\/+$/, '') : rawPath
+}
+const resolvePublicSitePageFromPathname = (pathname = '/') => (
+  PUBLIC_SITE_PAGE_BY_PATH[normalizeAppPathname(pathname)] || null
+)
 const CLIENT_ONBOARDING_TOTAL_STEPS = 2
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
@@ -86,29 +119,25 @@ const CLIENT_BRIEF_NOTIFICATIONS_STORAGE_KEY = 'kiaminaClientBriefNotifications'
 const CLIENT_SETTINGS_REDIRECT_SECTION_KEY = 'kiaminaClientSettingsRedirectSection'
 const CLIENT_ASSIGNMENTS_STORAGE_KEY = 'kiaminaClientAssignments'
 const IMPERSONATION_IDLE_TIMEOUT_MS = 10 * 60 * 1000
-const DEFAULT_DEV_ADMIN_ACCOUNT = {
-  fullName: 'Super Admin',
-  email: 'admin@kiamina.local',
-  password: 'Admin@123!',
-  role: 'admin',
-  adminLevel: ADMIN_LEVELS.SUPER,
-  adminPermissions: FULL_ADMIN_PERMISSION_IDS,
-  status: 'active',
-}
-const DEFAULT_OWNER_PRIVATE_KEY = 'KIAMINA-OWNER-ACCESS-2026'
-const DEFAULT_DEV_OWNER_ACCOUNT = {
-  fullName: 'Owner',
-  email: 'owner@kiamina.local',
-  password: 'Owner@123!',
-  role: 'admin',
-  adminLevel: ADMIN_LEVELS.OWNER,
-  adminPermissions: FULL_ADMIN_PERMISSION_IDS,
-  ownerPrivateKey: DEFAULT_OWNER_PRIVATE_KEY,
-  status: 'active',
-}
 const ADMIN_GOV_ID_TYPES_NIGERIA = ['International Passport', 'NIN', "Voter's Card", "Driver's Licence"]
 const ADMIN_GOV_ID_TYPE_INTERNATIONAL = 'Government Issued ID'
 const FIREBASE_WEB_API_KEY = String(import.meta.env.VITE_FIREBASE_WEB_API_KEY || '').trim()
+const GOOGLE_AUTH_DEBUG = Boolean(import.meta.env.DEV)
+
+const logGoogleAppDebug = (...args) => {
+  if (!GOOGLE_AUTH_DEBUG) return
+  console.info('[google-auth-app]', ...args)
+}
+const STRICT_BACKEND_DELIVERY = (
+  String(import.meta.env.VITE_STRICT_BACKEND_DELIVERY || 'true').trim().toLowerCase() !== 'false'
+)
+const createOwnerBootstrapStatusState = () => ({
+  loading: false,
+  checked: false,
+  canBootstrap: false,
+  adminAccountCount: 0,
+  message: '',
+})
 
 const inferRoleFromEmail = (email = '') => {
   const normalized = email.trim().toLowerCase()
@@ -224,43 +253,6 @@ const requestFirebaseIdentityToolkit = async ({
   }
 }
 
-const issueFirebaseIdTokenForCredentials = async ({
-  email = '',
-  password = '',
-} = {}) => {
-  const normalizedEmail = String(email || '').trim().toLowerCase()
-  const normalizedPassword = String(password || '')
-  if (!normalizedEmail || !normalizedPassword) {
-    return { ok: false, idToken: '', uid: '', email: '', message: 'Email and password are required.' }
-  }
-
-  const response = await requestFirebaseIdentityToolkit({
-    endpoint: 'accounts:signInWithPassword',
-    payload: {
-      email: normalizedEmail,
-      password: normalizedPassword,
-      returnSecureToken: true,
-    },
-  })
-  if (!response.ok) {
-    return {
-      ok: false,
-      idToken: '',
-      uid: '',
-      email: '',
-      message: 'Invalid credentials. Please try again.',
-    }
-  }
-
-  return {
-    ok: true,
-    idToken: String(response.data?.idToken || '').trim(),
-    uid: String(response.data?.localId || '').trim(),
-    email: String(response.data?.email || normalizedEmail).trim().toLowerCase(),
-    message: '',
-  }
-}
-
 const createFirebaseAccountWithCredentials = async ({
   email = '',
   password = '',
@@ -284,7 +276,13 @@ const createFirebaseAccountWithCredentials = async ({
   if (!signupResponse.ok) {
     const firebaseCode = String(signupResponse.data?.error?.message || '').trim().toUpperCase()
     if (firebaseCode.includes('EMAIL_EXISTS')) {
-      return { ok: false, idToken: '', uid: '', email: '', message: 'An account with this email already exists.' }
+      return {
+        ok: false,
+        idToken: '',
+        uid: '',
+        email: '',
+        message: 'An account already exists for this email. Sign in instead or use a different email address.',
+      }
     }
     return { ok: false, idToken: '', uid: '', email: '', message: 'Unable to create account right now.' }
   }
@@ -310,6 +308,40 @@ const createFirebaseAccountWithCredentials = async ({
   }
 }
 
+const lookupFirebaseSignInMethods = async (email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) {
+    return { ok: false, methods: [], registered: false, message: 'Email is required.' }
+  }
+
+  const lookupResponse = await requestFirebaseIdentityToolkit({
+    endpoint: 'accounts:createAuthUri',
+    payload: {
+      identifier: normalizedEmail,
+      continueUri: typeof window !== 'undefined' ? window.location.origin : 'http://localhost',
+    },
+  })
+
+  if (!lookupResponse.ok) {
+    return { ok: false, methods: [], registered: false, message: 'Unable to verify email availability right now.' }
+  }
+
+  const methods = Array.isArray(lookupResponse.data?.signinMethods)
+    ? lookupResponse.data.signinMethods.map((method) => String(method || '').trim().toLowerCase()).filter(Boolean)
+    : []
+  const legacyProviders = Array.isArray(lookupResponse.data?.allProviders)
+    ? lookupResponse.data.allProviders.map((provider) => String(provider || '').trim().toLowerCase()).filter(Boolean)
+    : []
+  const combinedMethods = [...new Set([...methods, ...legacyProviders])]
+
+  return {
+    ok: true,
+    methods: combinedMethods,
+    registered: Boolean(lookupResponse.data?.registered || combinedMethods.length > 0),
+    message: '',
+  }
+}
+
 const resolveIdentityFromAuthTokens = async ({
   idToken = '',
   accessToken = '',
@@ -319,7 +351,7 @@ const resolveIdentityFromAuthTokens = async ({
   const normalizedAccessToken = String(accessToken || '').trim()
   const normalizedSessionId = String(sessionId || '').trim()
   if (!normalizedIdToken && !normalizedAccessToken) {
-    return { ok: false, uid: '', email: '', roles: [], message: 'Missing authentication token.' }
+    return { ok: false, uid: '', email: '', roles: [], emailVerified: false, message: 'Missing authentication token.' }
   }
 
   try {
@@ -334,7 +366,7 @@ const resolveIdentityFromAuthTokens = async ({
     })
     if (!response.ok) {
       const message = await readErrorMessageFromResponse(response)
-      return { ok: false, uid: '', email: '', roles: [], message: message || 'Unable to verify token.' }
+      return { ok: false, uid: '', email: '', roles: [], emailVerified: false, message: message || 'Unable to verify token.' }
     }
     const payload = await response.json().catch(() => ({}))
     const roles = Array.isArray(payload?.roles) ? payload.roles : []
@@ -342,11 +374,21 @@ const resolveIdentityFromAuthTokens = async ({
       ok: true,
       uid: String(payload?.uid || '').trim(),
       email: String(payload?.email || '').trim().toLowerCase(),
+      emailVerified: Boolean(payload?.emailVerified),
       roles: roles.map((role) => String(role || '').trim().toLowerCase()).filter(Boolean),
       message: '',
     }
   } catch {
-    return { ok: false, uid: '', email: '', roles: [], message: 'Unable to verify token.' }
+    const apiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '').trim()
+    const endpointHint = apiBaseUrl ? `${apiBaseUrl}/auth/verify-token` : '/api/v1/auth/verify-token'
+    return {
+      ok: false,
+      uid: '',
+      email: '',
+      roles: [],
+      emailVerified: false,
+      message: `Unable to verify token. Ensure backend is running and reachable at ${endpointHint}.`,
+    }
   }
 }
 
@@ -612,6 +654,7 @@ const toIsoDate = (value) => {
 }
 
 const buildFileSnapshot = (file = {}) => ({
+  fileId: file.fileId || '',
   filename: file.filename || 'Document',
   extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
   status: file.status || 'Pending Review',
@@ -624,6 +667,9 @@ const buildFileSnapshot = (file = {}) => ({
   fileCacheKey: file.fileCacheKey || '',
   folderId: file.folderId || '',
   folderName: file.folderName || '',
+  backendDocumentId: file.backendDocumentId || '',
+  backendStorageProvider: file.backendStorageProvider || '',
+  backendStoragePath: file.backendStoragePath || '',
   previewUrl: file.previewUrl || null,
 })
 
@@ -1172,9 +1218,31 @@ const normalizeVerificationDocs = (payload = {}) => ({
   govIdVerificationStatus: String(payload?.govIdVerificationStatus || '').trim(),
   govIdClarityStatus: String(payload?.govIdClarityStatus || '').trim(),
   businessReg: String(payload?.businessReg || '').trim(),
+  businessRegFileCacheKey: String(payload?.businessRegFileCacheKey || '').trim(),
+  businessRegMimeType: String(payload?.businessRegMimeType || '').trim(),
+  businessRegSize: Math.max(0, Number(payload?.businessRegSize || 0)),
+  businessRegUploadedAt: String(payload?.businessRegUploadedAt || '').trim(),
   businessRegVerificationStatus: String(payload?.businessRegVerificationStatus || '').trim(),
   businessRegSubmittedAt: String(payload?.businessRegSubmittedAt || '').trim(),
 })
+
+const normalizeAccountSettings = (payload = {}) => {
+  const twoStepEnabled = Boolean(payload?.twoStepEnabled || payload?.smsMfaEnabled)
+  return {
+    twoStepEnabled,
+    twoStepMethod: twoStepEnabled
+      ? 'sms'
+      : String(payload?.twoStepMethod || '').trim().toLowerCase(),
+    verifiedPhoneNumber: String(
+      payload?.verifiedPhoneNumber
+      || payload?.phoneNumber
+      || '',
+    ).replace(/\s+/g, '').trim(),
+    recoveryEmail: String(payload?.recoveryEmail || payload?.email || '').trim().toLowerCase(),
+    enabledAt: String(payload?.enabledAt || '').trim(),
+    lastVerifiedAt: String(payload?.lastVerifiedAt || payload?.enabledAt || '').trim(),
+  }
+}
 
 const resolveSettingsProfileNameParts = (payload = {}) => {
   const fallbackParts = String(payload?.fullName || '').trim().split(/\s+/).filter(Boolean)
@@ -1194,16 +1262,314 @@ const buildSettingsProfileFullName = (payload = {}) => {
 
 const normalizeSettingsProfile = (payload = {}) => {
   const names = resolveSettingsProfileNameParts(payload)
+  const resolvedPhone = String(payload?.phone || '').trim()
+  const resolvedPhoneCountryCode = String(payload?.phoneCountryCode || '').trim()
+  const resolvedPhoneLocalNumber = String(payload?.phoneLocalNumber || '').replace(/\D/g, '').trim()
   return {
     firstName: names.firstName,
     lastName: names.lastName,
     otherNames: names.otherNames,
     fullName: buildSettingsProfileFullName(payload) || String(payload?.fullName || '').trim(),
     email: String(payload?.email || '').trim().toLowerCase(),
-    phone: String(payload?.phone || '').trim(),
+    phone: resolvedPhone,
+    phoneCountryCode: resolvedPhoneCountryCode,
+    phoneLocalNumber: resolvedPhoneLocalNumber,
+    roleInCompany: String(payload?.roleInCompany || '').trim(),
     address: String(payload?.address1 || payload?.address || '').trim(),
+    address1: String(payload?.address1 || payload?.address || '').trim(),
+    address2: String(payload?.address2 || '').trim(),
+    city: String(payload?.city || '').trim(),
+    postalCode: String(payload?.postalCode || '').trim(),
+    addressCountry: String(payload?.addressCountry || payload?.country || '').trim(),
     businessType: String(payload?.businessType || '').trim(),
+    businessName: String(payload?.businessName || '').trim(),
     country: String(payload?.country || payload?.addressCountry || '').trim(),
+    currency: String(payload?.currency || '').trim(),
+    language: String(payload?.language || '').trim(),
+    industry: String(payload?.industry || '').trim(),
+    industryOther: String(payload?.industryOther || '').trim(),
+    cacNumber: String(payload?.cacNumber || '').trim(),
+    tin: String(payload?.tin || '').trim(),
+    reportingCycle: String(payload?.reportingCycle || '').trim(),
+    startMonth: String(payload?.startMonth || '').trim(),
+  }
+}
+
+const sanitizeProfileNameFieldForBackend = (value = '') => (
+  String(value || '')
+    .replace(/[^A-Za-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+)
+
+const normalizeClientNameDraft = (payload = {}) => {
+  const source = {
+    fullName: String(payload?.fullName || payload?.displayName || '').trim(),
+    firstName: String(payload?.firstName || '').trim(),
+    lastName: String(payload?.lastName || '').trim(),
+    otherNames: String(payload?.otherNames || '').trim(),
+  }
+  const names = resolveSettingsProfileNameParts(source)
+  const fullName = [names.firstName, names.otherNames, names.lastName].filter(Boolean).join(' ').trim()
+  return {
+    firstName: names.firstName,
+    lastName: names.lastName,
+    otherNames: names.otherNames,
+    fullName,
+  }
+}
+
+const SUPPORTED_PHONE_COUNTRY_CODES = ['+234', '+44', '+61', '+1']
+const CLIENT_PHONE_LOCAL_NUMBER_REGEX = /^\d{10,11}$/
+
+const sanitizePhoneDigitsOnly = (value = '') => String(value || '').replace(/\D/g, '')
+
+const sanitizeClientPhoneLocalNumber = (value = '') => sanitizePhoneDigitsOnly(value).slice(0, 11)
+
+const normalizeClientPhoneLocalNumber = (value = '') => {
+  const normalizedDigits = sanitizeClientPhoneLocalNumber(value)
+  if (!CLIENT_PHONE_LOCAL_NUMBER_REGEX.test(normalizedDigits)) {
+    return {
+      rawDigits: normalizedDigits,
+      localDigits: '',
+      valid: false,
+    }
+  }
+  return {
+    rawDigits: normalizedDigits,
+    localDigits: normalizedDigits.length === 11 && normalizedDigits.startsWith('0')
+      ? normalizedDigits.slice(1)
+      : normalizedDigits,
+    valid: true,
+  }
+}
+
+const resolveSupportedPhoneCountryCode = (value = '') => {
+  const raw = String(value || '').trim()
+  if (!raw.startsWith('+')) return ''
+  const supportedCode = [...SUPPORTED_PHONE_COUNTRY_CODES]
+    .sort((left, right) => right.length - left.length)
+    .find((code) => raw.startsWith(code))
+  if (supportedCode) return supportedCode
+  const fallbackMatch = raw.match(/^\+\d{1,4}/)
+  return fallbackMatch ? fallbackMatch[0] : ''
+}
+
+const normalizeClientPhoneForBackend = ({
+  phone = '',
+  phoneCountryCode = '',
+  phoneLocalNumber = '',
+} = {}) => {
+  const explicitCountryCode = String(phoneCountryCode || '').trim()
+  const explicitPhoneInfo = normalizeClientPhoneLocalNumber(phoneLocalNumber)
+  const explicitLocalNumber = explicitPhoneInfo.localDigits
+  if (explicitLocalNumber) {
+    const resolvedCountryCode = explicitCountryCode || '+234'
+    return {
+      phoneCountryCode: resolvedCountryCode,
+      phoneLocalNumber: explicitLocalNumber,
+      compactPhone: `${resolvedCountryCode}${explicitLocalNumber}`.replace(/\s+/g, ''),
+      displayPhone: `${resolvedCountryCode} ${explicitLocalNumber}`.trim(),
+    }
+  }
+
+  const rawPhone = String(phone || '').trim()
+  if (!rawPhone) {
+    return {
+      phoneCountryCode: explicitCountryCode || '+234',
+      phoneLocalNumber: '',
+      compactPhone: '',
+      displayPhone: '',
+    }
+  }
+
+  const compactRawPhone = rawPhone.replace(/\s+/g, '')
+  const compactRawDigits = sanitizePhoneDigitsOnly(compactRawPhone)
+  const resolvedCountryCode = explicitCountryCode || resolveSupportedPhoneCountryCode(rawPhone) || '+234'
+  const countryDigits = sanitizePhoneDigitsOnly(resolvedCountryCode)
+  const derivedPhoneInfo = normalizeClientPhoneLocalNumber(
+    countryDigits && compactRawDigits.startsWith(countryDigits)
+      ? compactRawDigits.slice(countryDigits.length)
+      : compactRawDigits,
+  )
+  const derivedLocalNumber = derivedPhoneInfo.localDigits
+
+  return {
+    phoneCountryCode: resolvedCountryCode,
+    phoneLocalNumber: derivedLocalNumber,
+    compactPhone: derivedLocalNumber ? `${resolvedCountryCode}${derivedLocalNumber}` : compactRawPhone,
+    displayPhone: derivedLocalNumber ? `${resolvedCountryCode} ${derivedLocalNumber}`.trim() : rawPhone,
+  }
+}
+
+const normalizeBusinessTypeForBackend = (value = '') => {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (normalized === 'individual') return 'individual'
+  if (normalized === 'business') return 'business'
+  if (normalized === 'non-profit' || normalized === 'non profit' || normalized === 'nonprofit') return 'non-profit'
+  return ''
+}
+
+const buildClientProfilePayloadForBackend = (profile = {}) => {
+  const phoneParts = normalizeClientPhoneForBackend({
+    phone: profile?.phone,
+    phoneCountryCode: profile?.phoneCountryCode,
+    phoneLocalNumber: profile?.phoneLocalNumber,
+  })
+
+  return {
+    firstName: sanitizeProfileNameFieldForBackend(profile?.firstName || ''),
+    lastName: sanitizeProfileNameFieldForBackend(profile?.lastName || ''),
+    otherNames: sanitizeProfileNameFieldForBackend(profile?.otherNames || ''),
+    phoneCountryCode: phoneParts.phoneCountryCode,
+    phoneLocalNumber: phoneParts.phoneLocalNumber,
+    roleInCompany: String(profile?.roleInCompany || '').trim(),
+    businessType: normalizeBusinessTypeForBackend(profile?.businessType || ''),
+    businessName: String(profile?.businessName || '').trim(),
+    country: String(profile?.country || '').trim(),
+    currency: String(profile?.currency || '').trim().toUpperCase(),
+    language: String(profile?.language || '').trim(),
+    industry: String(profile?.industry || '').trim(),
+    industryOther: String(profile?.industryOther || '').trim(),
+    cacNumber: String(profile?.cacNumber || '').trim(),
+    tin: String(profile?.tin || '').trim(),
+    reportingCycle: String(profile?.reportingCycle || '').trim(),
+    startMonth: String(profile?.startMonth || '').trim(),
+    address1: String(profile?.address1 || profile?.address || '').trim(),
+    address2: String(profile?.address2 || '').trim(),
+    city: String(profile?.city || '').trim(),
+    postalCode: String(profile?.postalCode || '').trim(),
+    addressCountry: String(profile?.addressCountry || profile?.country || '').trim(),
+  }
+}
+
+const checkClientPhoneAvailability = async (phoneNumber = '') => {
+  const normalizedPhone = normalizeClientPhoneLocalNumber(phoneNumber)
+  const normalizedPhoneNumber = normalizedPhone.rawDigits
+  if (!normalizedPhoneNumber) {
+    return { ok: true, available: true, message: '' }
+  }
+  if (!normalizedPhone.valid) {
+    return {
+      ok: false,
+      available: false,
+      message: 'Phone number must be 10 or 11 digits.',
+    }
+  }
+
+  try {
+    const query = new URLSearchParams({ phoneNumber: normalizedPhoneNumber }).toString()
+    const response = await apiFetch(`/api/users/public/phone-availability?${query}`, {
+      method: 'GET',
+    })
+    const data = await response.json().catch(() => ({}))
+    return {
+      ok: response.ok,
+      available: Boolean(data?.available),
+      message: String(data?.message || '').trim(),
+    }
+  } catch {
+    return {
+      ok: false,
+      available: false,
+      message: 'Unable to verify phone number right now.',
+    }
+  }
+}
+
+const persistClientProfileToBackend = async ({
+  authorizationToken = '',
+  profile = {},
+} = {}) => {
+  const token = String(authorizationToken || '').trim()
+  if (!token) {
+    return { ok: false, status: 0, message: 'Missing authorization token.' }
+  }
+
+  try {
+    const response = await apiFetch('/api/users/me/profile', {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(buildClientProfilePayloadForBackend(profile)),
+    })
+    const data = await response.json().catch(() => ({}))
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+      message: String(data?.message || '').trim(),
+    }
+  } catch {
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      message: 'Unable to save profile right now.',
+    }
+  }
+}
+
+const issueSmsOtpChallenge = async ({
+  phoneNumber = '',
+  purpose = 'mfa',
+  email = '',
+} = {}) => {
+  try {
+    const response = await apiFetch('/api/auth/send-sms-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phoneNumber: String(phoneNumber || '').trim(),
+        purpose: String(purpose || 'mfa').trim().toLowerCase(),
+        email: String(email || '').trim().toLowerCase(),
+      }),
+    })
+    const data = await response.json().catch(() => ({}))
+    return {
+      ok: response.ok,
+      status: response.status,
+      expiresAt: String(data?.expiresAt || '').trim(),
+      previewOtp: String(data?.previewOtp || '').trim(),
+      message: String(data?.message || '').trim(),
+    }
+  } catch {
+    return {
+      ok: false,
+      status: 0,
+      expiresAt: '',
+      previewOtp: '',
+      message: 'Unable to send verification code right now.',
+    }
+  }
+}
+
+const verifySmsOtpChallengeCode = async ({
+  phoneNumber = '',
+  purpose = 'mfa',
+  email = '',
+  otp = '',
+} = {}) => {
+  try {
+    const response = await apiFetch('/api/auth/verify-sms-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        phoneNumber: String(phoneNumber || '').trim(),
+        purpose: String(purpose || 'mfa').trim().toLowerCase(),
+        email: String(email || '').trim().toLowerCase(),
+        otp: String(otp || '').trim(),
+      }),
+    })
+    if (!response.ok) {
+      const message = await readErrorMessageFromResponse(response)
+      return { ok: false, message: message || 'Incorrect verification code.' }
+    }
+    return { ok: true, message: 'SMS OTP verified successfully.' }
+  } catch {
+    return { ok: false, message: 'Unable to verify OTP right now.' }
   }
 }
 
@@ -1217,10 +1583,22 @@ const readScopedVerificationDocs = (email = '') => {
   return normalizeVerificationDocs(workspaceCache?.verificationDocs || {})
 }
 
+const readScopedAccountSettings = (email = '') => {
+  const workspaceCache = getClientWorkspaceCache(email)
+  return normalizeAccountSettings(workspaceCache?.accountSettings || {})
+}
+
 const persistScopedVerificationDocs = (email = '', docs = {}) => {
   const normalizedDocs = normalizeVerificationDocs(docs)
   setClientWorkspaceCache(email, {
     verificationDocs: normalizedDocs,
+  })
+}
+
+const persistScopedAccountSettings = (email = '', settings = {}) => {
+  const normalizedSettings = normalizeAccountSettings(settings)
+  setClientWorkspaceCache(email, {
+    accountSettings: normalizedSettings,
   })
 }
 
@@ -1305,6 +1683,12 @@ const resolveVerificationProgress = ({
     govIdVerificationStatus: normalizedSettingsDocs.govIdVerificationStatus || normalizedOnboardingDocs.govIdVerificationStatus,
     govIdClarityStatus: normalizedSettingsDocs.govIdClarityStatus || normalizedOnboardingDocs.govIdClarityStatus,
     businessReg: normalizedSettingsDocs.businessReg || normalizedOnboardingDocs.businessReg,
+    businessRegFileCacheKey: normalizedSettingsDocs.businessRegFileCacheKey || normalizedOnboardingDocs.businessRegFileCacheKey,
+    businessRegMimeType: normalizedSettingsDocs.businessRegMimeType || normalizedOnboardingDocs.businessRegMimeType,
+    businessRegSize: normalizedSettingsDocs.businessRegSize || normalizedOnboardingDocs.businessRegSize,
+    businessRegUploadedAt: normalizedSettingsDocs.businessRegUploadedAt || normalizedOnboardingDocs.businessRegUploadedAt,
+    businessRegVerificationStatus: normalizedSettingsDocs.businessRegVerificationStatus || normalizedOnboardingDocs.businessRegVerificationStatus,
+    businessRegSubmittedAt: normalizedSettingsDocs.businessRegSubmittedAt || normalizedOnboardingDocs.businessRegSubmittedAt,
   }
   const profileStepCompleted = Boolean(
     normalizedSettingsProfile.fullName
@@ -1398,31 +1782,6 @@ function App() {
       return normalized
     } catch {
       return []
-    }
-  }
-  const ensureDefaultDevAdminAccount = () => {
-    if (!import.meta.env.DEV) return
-    try {
-      const accounts = getSavedAccounts()
-      const seeds = [DEFAULT_DEV_OWNER_ACCOUNT, DEFAULT_DEV_ADMIN_ACCOUNT].map((entry) => normalizeAccount(entry))
-      const nextAccounts = [...accounts]
-      seeds.forEach((seed) => {
-        const adminIndex = nextAccounts.findIndex(
-          (account) => account.email?.trim()?.toLowerCase() === seed.email.toLowerCase(),
-        )
-        if (adminIndex === -1) {
-          nextAccounts.push(seed)
-          return
-        }
-        const existing = nextAccounts[adminIndex]
-        nextAccounts[adminIndex] = normalizeAccount({
-          ...existing,
-          ...seed,
-        })
-      })
-      localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
-    } catch {
-      // Ignore seeding failures in local demo mode.
     }
   }
   const getSavedAdminInvites = () => {
@@ -1553,7 +1912,14 @@ function App() {
   const [showAuth, setShowAuth] = useState(false)
   const [showAdminLogin, setShowAdminLogin] = useState(false)
   const [publicSitePage, setPublicSitePage] = useState('home')
+  const [isPublicSiteView, setIsPublicSiteView] = useState(() => (
+    Boolean(resolvePublicSitePageFromPathname(typeof window === 'undefined' ? '/' : window.location.pathname))
+  ))
   const [adminSetupToken, setAdminSetupToken] = useState('')
+  const [isAdminSetupRouteActive, setIsAdminSetupRouteActive] = useState(() => (
+    normalizeAppPathname(typeof window === 'undefined' ? '/' : window.location.pathname) === '/admin/setup'
+  ))
+  const [ownerBootstrapStatus, setOwnerBootstrapStatus] = useState(() => createOwnerBootstrapStatusState())
   const [impersonationSession, setImpersonationSession] = useState(initialImpersonationSession)
   const [adminImpersonationSession, setAdminImpersonationSession] = useState(initialAdminImpersonationSession)
   const [pendingImpersonationClient, setPendingImpersonationClient] = useState(null)
@@ -1574,8 +1940,13 @@ function App() {
     })
     return onboardingProgress.docs
   })
+  const [accountSettingsSnapshot, setAccountSettingsSnapshot] = useState(() => (
+    readScopedAccountSettings(initialScopedClientEmail)
+  ))
   const [otpChallenge, setOtpChallenge] = useState(null)
+  const [pendingGoogleSocialAuth, setPendingGoogleSocialAuth] = useState(null)
   const [passwordResetEmail, setPasswordResetEmail] = useState('')
+  const [emailVerificationEmail, setEmailVerificationEmail] = useState('')
   const [activePage, setActivePage] = useState(() => getDefaultPageForRole(initialAuthUser?.role))
   const [activeFolderRoute, setActiveFolderRoute] = useState(null)
   const [isModalOpen, setIsModalOpen] = useState(false)
@@ -1622,6 +1993,9 @@ function App() {
   const slowRuntimeMinVisibleUntilRef = useRef(0)
   const slowRuntimeMessageRef = useRef('Please wait...')
   const slowRuntimeVisibleRef = useRef(false)
+  const clientWorkspaceSyncSignaturesRef = useRef(new Map())
+  const clientProfileSyncSignaturesRef = useRef(new Map())
+  const googleRedirectResumeAttemptedRef = useRef(false)
   
   const currentUserRole = normalizeRole(authUser?.role, authUser?.email || '')
   const isAdminView = currentUserRole === 'admin'
@@ -1786,6 +2160,7 @@ function App() {
       'Sales',
       'Bank Statements',
       'Upload History',
+      'Resolved Documents',
       'Recent Activities',
       'Folders',
       'Files',
@@ -1806,6 +2181,17 @@ function App() {
     ? impersonationSession.clientEmail
     : authUser?.email
   const normalizedScopedClientEmail = (scopedClientEmail || '').trim().toLowerCase()
+  const scopedClientUid = String(
+    isImpersonatingClient
+      ? (
+        impersonationSession?.clientUid
+        || getSavedAccounts().find((account) => (
+          String(account?.email || '').trim().toLowerCase() === normalizedScopedClientEmail
+        ))?.uid
+        || ''
+      )
+      : (authUser?.uid || ''),
+  ).trim()
   const verificationProgress = useMemo(() => (
     resolveVerificationProgress({
       onboardingData: onboardingState.data,
@@ -2076,6 +2462,7 @@ function App() {
     setActivePage('settings')
     setActiveFolderRoute(null)
     setIsMobileSidebarOpen(false)
+    setIsPublicSiteView(false)
     try {
       if (replace) history.replaceState({}, '', '/settings')
       else history.pushState({}, '', '/settings')
@@ -2099,6 +2486,7 @@ function App() {
     setActivePage(page)
     setActiveFolderRoute(null)
     setIsMobileSidebarOpen(false)
+    setIsPublicSiteView(false)
     const path = page === 'dashboard' ? '/dashboard' : `/${page}`
     try {
       if (replace) history.replaceState({}, '', path)
@@ -2118,6 +2506,7 @@ function App() {
     setActivePage(category)
     setActiveFolderRoute({ category, folderId })
     setIsMobileSidebarOpen(false)
+    setIsPublicSiteView(false)
     const encodedId = encodeURIComponent(folderId)
     const path = `/${category}/folder/${encodedId}`
     try {
@@ -2283,12 +2672,23 @@ function App() {
     handleSetActivePage(targetPage)
   }
 
+  useEffect(() => {
+    if (authMode !== 'signup' && pendingGoogleSocialAuth) {
+      setPendingGoogleSocialAuth(null)
+    }
+  }, [authMode, pendingGoogleSocialAuth])
+
   const navigateToPublicSitePage = (page = 'home', { replace = false } = {}) => {
     const resolvedPage = PUBLIC_SITE_PAGE_IDS.includes(page) ? page : 'home'
     const nextPath = resolvedPage === 'home' ? '/' : `/${resolvedPage}`
     setShowAuth(false)
     setShowAdminLogin(false)
+    setIsPublicSiteView(true)
+    setPendingGoogleSocialAuth(null)
+    setEmailVerificationEmail('')
+    setPasswordResetEmail('')
     setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
     setActiveFolderRoute(null)
     setPublicSitePage(resolvedPage)
     try {
@@ -2298,13 +2698,42 @@ function App() {
   }
 
   const navigateToAuth = (mode = 'login', { replace = false } = {}) => {
-    setAuthMode(mode)
+    const normalizedMode = ['login', 'signup', 'forgot-password', 'reset-password', 'email-verification'].includes(String(mode || '').trim().toLowerCase())
+      ? String(mode || '').trim().toLowerCase()
+      : 'login'
+    setAuthMode(normalizedMode)
     setShowAuth(true)
     setShowAdminLogin(false)
+    setIsPublicSiteView(false)
+    if (normalizedMode !== 'signup') {
+      setPendingGoogleSocialAuth(null)
+    }
+    if (normalizedMode !== 'reset-password') {
+      setPasswordResetEmail('')
+    }
+    if (normalizedMode !== 'email-verification') {
+      setEmailVerificationEmail('')
+    }
     setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
+    const resetEmailQuery = normalizedMode === 'reset-password' && passwordResetEmail
+      ? `&email=${encodeURIComponent(String(passwordResetEmail || '').trim().toLowerCase())}`
+      : ''
+    const verificationEmailQuery = normalizedMode === 'email-verification' && emailVerificationEmail
+      ? `&email=${encodeURIComponent(String(emailVerificationEmail || '').trim().toLowerCase())}`
+      : ''
+    const authPath = normalizedMode === 'signup'
+      ? '/signup'
+      : normalizedMode === 'forgot-password'
+        ? '/login?mode=forgot-password'
+        : normalizedMode === 'reset-password'
+          ? `/login?mode=reset-password${resetEmailQuery}`
+          : normalizedMode === 'email-verification'
+            ? `/login?mode=email-verification${verificationEmailQuery}`
+          : '/login'
     try {
-      if (replace) history.replaceState({}, '', mode === 'signup' ? '/signup' : '/login')
-      else history.pushState({}, '', mode === 'signup' ? '/signup' : '/login')
+      if (replace) history.replaceState({}, '', authPath)
+      else history.pushState({}, '', authPath)
     } catch {}
   }
 
@@ -2321,7 +2750,12 @@ function App() {
     setAuthMode('login')
     setShowAuth(false)
     setShowAdminLogin(true)
+    setIsPublicSiteView(false)
+    setPendingGoogleSocialAuth(null)
+    setEmailVerificationEmail('')
+    setPasswordResetEmail('')
     setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
     try {
       if (replace) history.replaceState({}, '', '/admin/login')
       else history.pushState({}, '', '/admin/login')
@@ -2342,7 +2776,7 @@ function App() {
       isAuthenticated
       && !showAuth
       && !showAdminLogin
-      && !adminSetupToken
+      && !isAdminSetupRouteActive
       && isPageReloadNavigation(),
     )
 
@@ -2371,7 +2805,7 @@ function App() {
       dashboardBootstrapTimerRef.current = null
       setIsDashboardBootstrapLoading(false)
     }, getNetworkAwareDurationMs('dashboard-refresh'))
-  }, [isAuthenticated, showAuth, showAdminLogin, adminSetupToken])
+  }, [isAuthenticated, showAuth, showAdminLogin, isAdminSetupRouteActive])
 
   useEffect(() => () => {
     if (dashboardSearchTimeoutRef.current) {
@@ -2396,49 +2830,67 @@ function App() {
   }, [])
 
   useEffect(() => {
-    ensureDefaultDevAdminAccount()
-  }, [])
-
-  useEffect(() => {
     // Initialize route from URL on first load
     const syncFromLocation = () => {
-      const rawPath = window.location.pathname || '/'
-      const path = rawPath.length > 1 ? rawPath.replace(/\/+$/, '') : rawPath
-      const publicSitePageCandidate = PUBLIC_SITE_PAGE_BY_PATH[path] || null
+      const path = normalizeAppPathname(window.location.pathname || '/')
+      const publicSitePageCandidate = resolvePublicSitePageFromPathname(path)
       if (publicSitePageCandidate) {
         setShowAuth(false)
         setShowAdminLogin(false)
+        setIsPublicSiteView(true)
         setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
         setActiveFolderRoute(null)
         setPublicSitePage(publicSitePageCandidate)
         return
       }
       if (path === '/login' || path === '/signup' || path === '/auth') {
+        const params = new URLSearchParams(window.location.search || '')
+        const requestedMode = String(params.get('mode') || '').trim().toLowerCase()
+        const resetEmail = String(params.get('email') || '').trim().toLowerCase()
+        const verificationEmail = String(params.get('email') || '').trim().toLowerCase()
+        const resolvedAuthMode = path === '/signup'
+          ? 'signup'
+          : (requestedMode === 'forgot-password' || requestedMode === 'reset-password' || requestedMode === 'email-verification')
+            ? requestedMode
+            : 'login'
         setShowAuth(true)
         setShowAdminLogin(false)
+        setIsPublicSiteView(false)
         setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
         setActiveFolderRoute(null)
         setPublicSitePage('home')
-        setAuthMode(path === '/signup' ? 'signup' : 'login')
+        setAuthMode(resolvedAuthMode)
+        setPasswordResetEmail(resolvedAuthMode === 'reset-password' ? resetEmail : '')
+        setEmailVerificationEmail(resolvedAuthMode === 'email-verification' ? verificationEmail : '')
         return
       }
       if (path === '/admin/login') {
         setShowAuth(false)
         setShowAdminLogin(true)
+        setIsPublicSiteView(false)
         setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
         setActiveFolderRoute(null)
         setPublicSitePage('home')
         setAuthMode('login')
+        setPasswordResetEmail('')
+        setEmailVerificationEmail('')
         return
       }
       if (path === '/admin/setup') {
         const inviteToken = new URLSearchParams(window.location.search).get('invite') || ''
         setShowAuth(false)
         setShowAdminLogin(false)
+        setIsPublicSiteView(false)
         setAdminSetupToken(inviteToken)
+        setIsAdminSetupRouteActive(true)
         setActiveFolderRoute(null)
         setPublicSitePage('home')
         setAuthMode('login')
+        setPasswordResetEmail('')
+        setEmailVerificationEmail('')
         return
       }
       const folderRouteMatch = path.match(/^\/(expenses|sales|bank-statements)\/folder\/([^/]+)$/)
@@ -2447,7 +2899,9 @@ function App() {
         const folderId = decodeURIComponent(folderRouteMatch[2] || '')
         setShowAuth(false)
         setShowAdminLogin(false)
+        setIsPublicSiteView(false)
         setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
         setPublicSitePage('home')
         setActivePage(folderCategory)
         setActiveFolderRoute({ category: folderCategory, folderId })
@@ -2457,7 +2911,9 @@ function App() {
       if (candidate === 'chat') {
         setShowAuth(false)
         setShowAdminLogin(false)
+        setIsPublicSiteView(false)
         setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
         setPublicSitePage('home')
         setActiveFolderRoute(null)
         setActivePage('support')
@@ -2466,22 +2922,29 @@ function App() {
       if (APP_PAGE_IDS.includes(candidate)) {
         setShowAuth(false)
         setShowAdminLogin(false)
+        setIsPublicSiteView(false)
         setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
         setPublicSitePage('home')
         setActiveFolderRoute(null)
         setActivePage(candidate)
+        setPasswordResetEmail('')
         return
       }
       setShowAuth(false)
       setShowAdminLogin(false)
       setAdminSetupToken('')
+      setIsAdminSetupRouteActive(false)
       setActiveFolderRoute(null)
+      setPasswordResetEmail('')
       if (isAuthenticated) {
         setPublicSitePage('home')
+        setIsPublicSiteView(true)
         setActivePage(getDefaultPageForRole(initialAuthUser?.role))
         return
       }
       setPublicSitePage('home')
+      setIsPublicSiteView(true)
     }
 
     syncFromLocation()
@@ -2490,6 +2953,36 @@ function App() {
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [initialAuthUser?.role, isAuthenticated])
+
+  useEffect(() => {
+    if (!isAdminSetupRouteActive || adminSetupToken) {
+      setOwnerBootstrapStatus(createOwnerBootstrapStatusState())
+      return
+    }
+
+    let isCancelled = false
+    setOwnerBootstrapStatus((previous) => ({
+      ...previous,
+      loading: true,
+      checked: previous.checked,
+    }))
+
+    ;(async () => {
+      const status = await fetchOwnerBootstrapStatus()
+      if (isCancelled) return
+      setOwnerBootstrapStatus({
+        loading: false,
+        checked: true,
+        canBootstrap: Boolean(status.canBootstrap),
+        adminAccountCount: Math.max(0, Number(status.adminAccountCount || 0)),
+        message: String(status.message || '').trim(),
+      })
+    })()
+
+    return () => {
+      isCancelled = true
+    }
+  }, [isAdminSetupRouteActive, adminSetupToken])
 
   useEffect(() => {
     if (!isClientVerificationLocked) return
@@ -2506,9 +2999,11 @@ function App() {
 
   useEffect(() => {
     if (!scopedClientEmail) {
+      clientWorkspaceSyncSignaturesRef.current.clear()
       setClientActivityRecords([])
       setSettingsProfileSnapshot(normalizeSettingsProfile({}))
       setVerificationDocsSnapshot(normalizeVerificationDocs({}))
+      setAccountSettingsSnapshot(normalizeAccountSettings({}))
       return
     }
 
@@ -2524,6 +3019,7 @@ function App() {
       })
       setSettingsProfileSnapshot(savedVerificationProgress.profile)
       setVerificationDocsSnapshot(savedVerificationProgress.docs)
+      setAccountSettingsSnapshot(readScopedAccountSettings(scopedClientEmail))
       const fallbackCompanyName = impersonationSession?.businessName || ''
       const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
         || authUser?.fullName?.trim()?.split(/\s+/)?.[0]
@@ -2553,9 +3049,62 @@ function App() {
         return
       }
 
-      const workspace = response.data.workspace && typeof response.data.workspace === 'object'
+      const fetchedWorkspace = response.data.workspace && typeof response.data.workspace === 'object'
         ? response.data.workspace
         : {}
+      const existingWorkspaceCache = getClientWorkspaceCache(scopedClientEmail) || {}
+      const workspace = {
+        ...existingWorkspaceCache,
+        ...fetchedWorkspace,
+        onboardingState: {
+          ...(existingWorkspaceCache.onboardingState && typeof existingWorkspaceCache.onboardingState === 'object'
+            ? existingWorkspaceCache.onboardingState
+            : {}),
+          ...(fetchedWorkspace.onboardingState && typeof fetchedWorkspace.onboardingState === 'object'
+            ? fetchedWorkspace.onboardingState
+            : {}),
+        },
+        settingsProfile: {
+          ...(existingWorkspaceCache.settingsProfile && typeof existingWorkspaceCache.settingsProfile === 'object'
+            ? existingWorkspaceCache.settingsProfile
+            : {}),
+          ...(fetchedWorkspace.settingsProfile && typeof fetchedWorkspace.settingsProfile === 'object'
+            ? fetchedWorkspace.settingsProfile
+            : {}),
+        },
+        verificationDocs: {
+          ...(existingWorkspaceCache.verificationDocs && typeof existingWorkspaceCache.verificationDocs === 'object'
+            ? existingWorkspaceCache.verificationDocs
+            : {}),
+          ...(fetchedWorkspace.verificationDocs && typeof fetchedWorkspace.verificationDocs === 'object'
+            ? fetchedWorkspace.verificationDocs
+            : {}),
+        },
+        statusControl: {
+          ...(existingWorkspaceCache.statusControl && typeof existingWorkspaceCache.statusControl === 'object'
+            ? existingWorkspaceCache.statusControl
+            : {}),
+          ...(fetchedWorkspace.statusControl && typeof fetchedWorkspace.statusControl === 'object'
+            ? fetchedWorkspace.statusControl
+            : {}),
+        },
+        notificationSettings: {
+          ...(existingWorkspaceCache.notificationSettings && typeof existingWorkspaceCache.notificationSettings === 'object'
+            ? existingWorkspaceCache.notificationSettings
+            : {}),
+          ...(fetchedWorkspace.notificationSettings && typeof fetchedWorkspace.notificationSettings === 'object'
+            ? fetchedWorkspace.notificationSettings
+            : {}),
+        },
+        accountSettings: {
+          ...(existingWorkspaceCache.accountSettings && typeof existingWorkspaceCache.accountSettings === 'object'
+            ? existingWorkspaceCache.accountSettings
+            : {}),
+          ...(fetchedWorkspace.accountSettings && typeof fetchedWorkspace.accountSettings === 'object'
+            ? fetchedWorkspace.accountSettings
+            : {}),
+        },
+      }
       setClientWorkspaceCache(scopedClientEmail, workspace)
 
       const fallbackFirstName = authUser?.fullName?.trim()?.split(/\s+/)?.[0] || 'Client'
@@ -2574,16 +3123,47 @@ function App() {
 
       const settingsProfile = normalizeSettingsProfile(workspace.settingsProfile || {})
       const verificationDocs = normalizeVerificationDocs(workspace.verificationDocs || {})
+      const accountSettings = normalizeAccountSettings(workspace.accountSettings || {})
       const verificationProgress = resolveVerificationProgress({
         onboardingData: nextOnboardingState.data,
         settingsDocs: verificationDocs,
         settingsProfile,
       })
+      const normalizedScopedEmail = String(scopedClientEmail || '').trim().toLowerCase()
+      if (normalizedScopedEmail) {
+        const initialWorkspacePayload = {
+          documents: workspace.documents && typeof workspace.documents === 'object'
+            ? workspace.documents
+            : createDefaultClientDocuments(),
+          activityLog: Array.isArray(workspace.activityLog) ? workspace.activityLog : [],
+          onboardingState: nextOnboardingState,
+          settingsProfile: workspace.settingsProfile && typeof workspace.settingsProfile === 'object'
+            ? workspace.settingsProfile
+            : settingsProfile,
+          verificationDocs: verificationProgress.docs,
+          statusControl: workspace.statusControl && typeof workspace.statusControl === 'object'
+            ? workspace.statusControl
+            : {},
+          notificationSettings: workspace.notificationSettings && typeof workspace.notificationSettings === 'object'
+            ? workspace.notificationSettings
+            : {},
+          accountSettings: workspace.accountSettings && typeof workspace.accountSettings === 'object'
+            ? workspace.accountSettings
+            : accountSettings,
+          profilePhoto: String(workspace.profilePhoto || '').trim(),
+          companyLogo: String(workspace.companyLogo || '').trim(),
+        }
+        clientWorkspaceSyncSignaturesRef.current.set(
+          normalizedScopedEmail,
+          JSON.stringify(initialWorkspacePayload),
+        )
+      }
       const docs = readClientDocuments(scopedClientEmail, authUser?.fullName || fallbackFirstName)
 
       setOnboardingState(nextOnboardingState)
       setSettingsProfileSnapshot(verificationProgress.profile)
       setVerificationDocsSnapshot(verificationProgress.docs)
+      setAccountSettingsSnapshot(accountSettings)
       setCompanyName(settingsProfile.businessName?.trim() || '')
       setClientFirstName(settingsProfile.firstName || fallbackFirstName)
       setProfilePhoto(String(workspace.profilePhoto || '').trim())
@@ -2666,6 +3246,132 @@ function App() {
     uploadHistoryRecords,
     expenseClassOptions,
     salesClassOptions,
+  ])
+
+  useEffect(() => {
+    const normalizedScopedEmail = String(scopedClientEmail || '').trim().toLowerCase()
+    if (!normalizedScopedEmail || isImpersonatingClient) return
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+    if (!authorizationToken) return
+
+    const workspaceCache = getClientWorkspaceCache(normalizedScopedEmail) || {}
+    const workspacePayload = {
+      documents: {
+        expenses: expenseDocuments,
+        sales: salesDocuments,
+        bankStatements: bankStatementDocuments,
+        uploadHistory: uploadHistoryRecords,
+        expenseClassOptions,
+        salesClassOptions,
+      },
+      activityLog: Array.isArray(clientActivityRecords) ? clientActivityRecords : [],
+      onboardingState,
+      settingsProfile: workspaceCache.settingsProfile && typeof workspaceCache.settingsProfile === 'object'
+        ? workspaceCache.settingsProfile
+        : settingsProfileSnapshot,
+      verificationDocs: verificationDocsSnapshot,
+      statusControl: workspaceCache.statusControl && typeof workspaceCache.statusControl === 'object'
+        ? workspaceCache.statusControl
+        : {},
+      notificationSettings: workspaceCache.notificationSettings && typeof workspaceCache.notificationSettings === 'object'
+        ? workspaceCache.notificationSettings
+        : {},
+      accountSettings: workspaceCache.accountSettings && typeof workspaceCache.accountSettings === 'object'
+        ? workspaceCache.accountSettings
+        : accountSettingsSnapshot,
+      profilePhoto: String(profilePhoto || '').trim(),
+      companyLogo: String(companyLogo || '').trim(),
+    }
+
+    setClientWorkspaceCache(normalizedScopedEmail, workspacePayload)
+    const serializedPayload = JSON.stringify(workspacePayload)
+    if (clientWorkspaceSyncSignaturesRef.current.get(normalizedScopedEmail) === serializedPayload) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(async () => {
+      const response = await patchClientWorkspaceToBackend({
+        authorizationToken,
+        workspacePayload,
+      })
+      if (response.ok) {
+        clientWorkspaceSyncSignaturesRef.current.set(normalizedScopedEmail, serializedPayload)
+      }
+    }, 450)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+    }
+  }, [
+    scopedClientEmail,
+    isImpersonatingClient,
+    authUser?.firebaseIdToken,
+    expenseDocuments,
+    salesDocuments,
+    bankStatementDocuments,
+    uploadHistoryRecords,
+    expenseClassOptions,
+    salesClassOptions,
+    clientActivityRecords,
+    onboardingState,
+    settingsProfileSnapshot,
+    verificationDocsSnapshot,
+    accountSettingsSnapshot,
+    profilePhoto,
+    companyLogo,
+  ])
+
+  useEffect(() => {
+    const normalizedScopedEmail = String(scopedClientEmail || '').trim().toLowerCase()
+    if (!normalizedScopedEmail || isImpersonatingClient || currentUserRole !== 'client') return
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+    const sessionId = String(authUser?.sessionId || getApiSessionId() || '').trim()
+    if (!authorizationToken || !sessionId) return
+
+    const workspaceCache = getClientWorkspaceCache(normalizedScopedEmail) || {}
+    const settingsProfile = workspaceCache.settingsProfile && typeof workspaceCache.settingsProfile === 'object'
+      ? workspaceCache.settingsProfile
+      : {}
+    const profilePayload = buildClientProfilePayloadForBackend(settingsProfile)
+    const hasAnyProfileValues = Boolean(
+      profilePayload.firstName
+      || profilePayload.lastName
+      || profilePayload.otherNames
+      || profilePayload.phoneLocalNumber
+      || profilePayload.businessType
+      || profilePayload.businessName
+      || profilePayload.country
+      || profilePayload.address1
+      || profilePayload.tin
+      || profilePayload.cacNumber
+    )
+    if (!hasAnyProfileValues) return
+
+    const signature = JSON.stringify(profilePayload)
+    if (clientProfileSyncSignaturesRef.current.get(normalizedScopedEmail) === signature) {
+      return
+    }
+
+    let cancelled = false
+    ;(async () => {
+      const response = await persistClientProfileToBackend({
+        authorizationToken,
+        profile: settingsProfile,
+      })
+      if (cancelled || !response.ok) return
+      clientProfileSyncSignaturesRef.current.set(normalizedScopedEmail, signature)
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    scopedClientEmail,
+    isImpersonatingClient,
+    currentUserRole,
+    authUser?.firebaseIdToken,
+    authUser?.sessionId,
+    settingsProfileSnapshot,
   ])
 
   useEffect(() => {
@@ -2762,17 +3468,21 @@ function App() {
     }, scopedClientEmail)
   }
 
-  const syncProfileToSettings = (fullName, email) => {
+  const syncProfileToSettings = (fullName, email, nameDraft = null) => {
     const normalizedEmail = String(email || '').trim().toLowerCase()
     if (!normalizedEmail) return
     const existing = readScopedSettingsProfile(normalizedEmail)
-    const fullNameParts = resolveSettingsProfileNameParts({ ...existing, fullName: fullName || existing.fullName || '' })
+    const normalizedDraft = normalizeClientNameDraft({
+      ...existing,
+      ...(nameDraft && typeof nameDraft === 'object' ? nameDraft : {}),
+      fullName: fullName || nameDraft?.fullName || existing.fullName || '',
+    })
     const next = {
       ...existing,
-      fullName: fullName || existing.fullName || '',
-      firstName: fullNameParts.firstName || existing.firstName || '',
-      lastName: fullNameParts.lastName || existing.lastName || '',
-      otherNames: fullNameParts.otherNames || existing.otherNames || '',
+      fullName: normalizedDraft.fullName || fullName || existing.fullName || '',
+      firstName: normalizedDraft.firstName || existing.firstName || '',
+      lastName: normalizedDraft.lastName || existing.lastName || '',
+      otherNames: normalizedDraft.otherNames || existing.otherNames || '',
       email: normalizedEmail,
     }
     setClientWorkspaceCache(normalizedEmail, {
@@ -2823,12 +3533,83 @@ function App() {
     return { ok: true, data: response.data }
   }
 
+  useEffect(() => {
+    if (!isAuthenticated) return
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+    if (!authorizationToken) return
+
+    let supportRefreshTimer = null
+    let dashboardRefreshTimer = null
+    const scheduleSupportRefresh = () => {
+      if (supportRefreshTimer) return
+      supportRefreshTimer = window.setTimeout(() => {
+        supportRefreshTimer = null
+        void refreshSupportStateFromBackend()
+      }, 250)
+    }
+    const scheduleClientDashboardRefresh = () => {
+      if (dashboardRefreshTimer) return
+      dashboardRefreshTimer = window.setTimeout(() => {
+        dashboardRefreshTimer = null
+        void refreshClientDashboardOverview({ authorizationToken })
+      }, 300)
+    }
+
+    const subscription = subscribeToRealtimeEvents({
+      scope: isAdminView && !isImpersonatingClient ? 'all' : 'me',
+      topics: ['support', 'chatbot', 'notifications', 'users'],
+      onEvent: (event) => {
+        const eventType = String(event?.eventType || '').trim().toLowerCase()
+        if (!eventType) return
+
+        if (
+          eventType.startsWith('support.')
+          || eventType.startsWith('chatbot.')
+          || eventType.startsWith('notifications.')
+        ) {
+          scheduleSupportRefresh()
+          window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+        }
+
+        if (eventType === 'admin.client-management.updated') {
+          window.dispatchEvent(new Event('kiamina:admin-client-management-sync'))
+          window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+        }
+
+        if (eventType === 'admin.dashboard.updated') {
+          scheduleSupportRefresh()
+          window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+        }
+
+        if (
+          !isImpersonatingClient
+          && currentUserRole === 'client'
+          && (
+            eventType === 'client.dashboard.updated'
+            || eventType === 'client.workspace.updated'
+            || eventType === 'client.profile.updated'
+          )
+        ) {
+          scheduleClientDashboardRefresh()
+        }
+      },
+    })
+
+    return () => {
+      if (supportRefreshTimer) window.clearTimeout(supportRefreshTimer)
+      if (dashboardRefreshTimer) window.clearTimeout(dashboardRefreshTimer)
+      subscription.close()
+    }
+  }, [isAuthenticated, authUser?.firebaseIdToken, isAdminView, isImpersonatingClient, currentUserRole])
+
   const hydrateAuthenticatedUserFromBackend = async ({
+    fallbackUid = '',
     fallbackEmail = '',
     fallbackFullName = '',
     fallbackRole = 'client',
     authorizationToken = '',
   } = {}) => {
+    const normalizedFallbackUid = String(fallbackUid || '').trim()
     const normalizedFallbackEmail = String(fallbackEmail || '').trim().toLowerCase()
     const normalizedFallbackFullName = String(fallbackFullName || '').trim()
     const normalizedFallbackRole = normalizeRole(fallbackRole, normalizedFallbackEmail)
@@ -2837,6 +3618,7 @@ function App() {
       return {
         ok: true,
         user: normalizeUser({
+          uid: normalizedFallbackUid,
           fullName: normalizedFallbackFullName || 'User',
           email: normalizedFallbackEmail,
           role: normalizedFallbackRole,
@@ -2847,6 +3629,15 @@ function App() {
     }
 
     try {
+      if (normalizedFallbackUid && normalizedFallbackEmail) {
+        await syncAuthenticatedUserToBackend({
+          authorizationToken: token,
+          uid: normalizedFallbackUid,
+          email: normalizedFallbackEmail,
+          displayName: normalizedFallbackFullName,
+          roles: [normalizedFallbackRole],
+        })
+      }
       const response = await apiFetch('/api/users/me', {
         method: 'GET',
         headers: {
@@ -2857,6 +3648,7 @@ function App() {
         return {
           ok: true,
           user: normalizeUser({
+            uid: normalizedFallbackUid,
             fullName: normalizedFallbackFullName || 'User',
             email: normalizedFallbackEmail,
             role: normalizedFallbackRole,
@@ -2884,6 +3676,7 @@ function App() {
       return {
         ok: true,
         user: normalizeUser({
+          uid: String(payload?.uid || normalizedFallbackUid).trim(),
           fullName: resolvedFullName,
           email: resolvedEmail,
           role: resolvedRole,
@@ -2895,6 +3688,7 @@ function App() {
       return {
         ok: true,
         user: normalizeUser({
+          uid: normalizedFallbackUid,
           fullName: normalizedFallbackFullName || 'User',
           email: normalizedFallbackEmail,
           role: normalizedFallbackRole,
@@ -2930,20 +3724,33 @@ function App() {
     setShowAuth(false)
     setShowAdminLogin(false)
     setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
     setImpersonationSession(null)
     setAdminImpersonationSession(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
     persistAdminImpersonationSession(null)
-    setOnboardingState(getSavedOnboardingState(normalizedUser.email))
+    const nextOnboardingState = getSavedOnboardingState(normalizedUser.email)
+    setOnboardingState(nextOnboardingState)
     setCompanyName(getSavedCompanyName(normalizedUser.email))
     setClientFirstName(getSavedClientFirstName(normalizedUser.email, normalizedUser.fullName?.trim()?.split(/\s+/)?.[0] || 'Client'))
 
+    const normalizedRole = normalizeRole(normalizedUser.role, normalizedUser.email)
+    const shouldOpenPublicHome = (
+      normalizedRole === 'client'
+      && Boolean(nextOnboardingState.completed || nextOnboardingState.skipped)
+    )
     const defaultPage = getDefaultPageForRole(normalizedUser.role)
     setActivePage(defaultPage)
     setActiveFolderRoute(null)
+    setPublicSitePage('home')
+    setIsPublicSiteView(shouldOpenPublicHome)
     try {
-      history.replaceState({}, '', defaultPage === 'dashboard' ? '/dashboard' : `/${defaultPage}`)
+      if (shouldOpenPublicHome) {
+        history.replaceState({}, '', '/')
+      } else {
+        history.replaceState({}, '', defaultPage === 'dashboard' ? '/dashboard' : `/${defaultPage}`)
+      }
     } catch {
       // ignore
     }
@@ -2956,23 +3763,39 @@ function App() {
     }
     const startedAt = Date.now()
 
-    let result = { ok: false, message: 'Unable to send OTP right now.' }
+    let result = {
+      ok: false,
+      message: 'Unable to send OTP right now.',
+      previewOtp: '',
+      dispatchQueued: false,
+      deliveryError: '',
+    }
     try {
       const response = await apiFetch('/api/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: normalizedEmail, purpose }),
       })
-      if (!response.ok) {
-        const errorMessage = await readErrorMessageFromResponse(response)
-        result = { ok: false, message: errorMessage || 'Unable to send OTP right now.' }
-      } else {
-        const payload = await response.json().catch(() => ({}))
-        const successMessage = String(payload?.message || '').trim()
-        result = { ok: true, message: successMessage || 'OTP sent successfully.' }
+      const payload = await response.json().catch(() => ({}))
+      const responseMessage = String(payload?.message || '').trim()
+      const previewOtp = String(payload?.previewOtp || '').trim()
+      const deliveryError = String(payload?.deliveryError || '').trim()
+      const dispatchQueued = payload?.dispatchQueued !== false
+      result = {
+        ok: response.ok,
+        message: responseMessage || (response.ok ? 'OTP sent successfully.' : 'Unable to send OTP right now.'),
+        previewOtp,
+        dispatchQueued,
+        deliveryError,
       }
     } catch {
-      result = { ok: false, message: 'Unable to send OTP right now.' }
+      result = {
+        ok: false,
+        message: 'Unable to send OTP right now.',
+        previewOtp: '',
+        dispatchQueued: false,
+        deliveryError: '',
+      }
     }
 
     const minimumDelayMs = getNetworkAwareDurationMs('search')
@@ -2980,6 +3803,16 @@ function App() {
     const remainingMs = Math.max(0, minimumDelayMs - elapsedMs)
     if (remainingMs > 0) {
       await new Promise((resolve) => window.setTimeout(resolve, remainingMs))
+    }
+
+    if (result.ok && STRICT_BACKEND_DELIVERY && result.dispatchQueued === false) {
+      return {
+        ok: false,
+        message: result.deliveryError || 'OTP delivery failed. Please try again shortly.',
+        previewOtp: '',
+        dispatchQueued: false,
+        deliveryError: result.deliveryError || 'otp-delivery-failed',
+      }
     }
 
     return result
@@ -2990,7 +3823,7 @@ function App() {
     if (!normalizedEmail) return { ok: false, message: 'Email is required.' }
     const startedAt = Date.now()
 
-    const resetLink = `${window.location.origin}/login?reset=1&email=${encodeURIComponent(normalizedEmail)}`
+    const resetLink = buildClientResetPasswordLink(normalizedEmail)
 
     let result = { ok: false, message: 'Unable to send password reset link.' }
     try {
@@ -3008,7 +3841,15 @@ function App() {
       } else {
         const payload = await response.json().catch(() => ({}))
         const successMessage = String(payload?.message || '').trim()
-        result = { ok: true, message: successMessage || 'Password reset link sent. Please check your email.' }
+        const dispatchQueued = payload?.dispatchQueued !== false
+        if (!dispatchQueued && STRICT_BACKEND_DELIVERY) {
+          result = {
+            ok: false,
+            message: 'Password reset delivery failed. Please try again shortly.',
+          }
+        } else {
+          result = { ok: true, message: successMessage || 'Password reset link sent. Please check your email.' }
+        }
       }
     } catch {
       result = { ok: false, message: 'Unable to send password reset link.' }
@@ -3024,38 +3865,630 @@ function App() {
     return result
   }
 
-  const handleSocialLogin = async (provider, providedFullName = '') => {
+  const issueEmailVerificationLink = async (email) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    if (!normalizedEmail) return { ok: false, message: 'Email is required.' }
+    const startedAt = Date.now()
+
+    const verificationLink = buildClientEmailVerificationLink(normalizedEmail)
+
+    let result = { ok: false, message: 'Unable to send verification email right now.' }
+    try {
+      const response = await apiFetch('/api/auth/send-email-verification-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          verificationLink,
+        }),
+      })
+      if (!response.ok) {
+        const errorMessage = await readErrorMessageFromResponse(response)
+        result = {
+          ok: false,
+          message: errorMessage || 'Unable to send verification email right now.',
+        }
+      } else {
+        const payload = await response.json().catch(() => ({}))
+        const successMessage = String(payload?.message || '').trim()
+        const dispatchQueued = payload?.dispatchQueued !== false
+        if (!dispatchQueued && STRICT_BACKEND_DELIVERY) {
+          result = {
+            ok: false,
+            message: 'Verification email delivery failed. Please try again shortly.',
+          }
+        } else {
+          result = {
+            ok: true,
+            message: successMessage || 'Verification email sent successfully.',
+          }
+        }
+      }
+    } catch {
+      result = { ok: false, message: 'Unable to send verification email right now.' }
+    }
+
+    const minimumDelayMs = getNetworkAwareDurationMs('search')
+    const elapsedMs = Date.now() - startedAt
+    const remainingMs = Math.max(0, minimumDelayMs - elapsedMs)
+    if (remainingMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, remainingMs))
+    }
+
+    return result
+  }
+
+  const authenticatePasswordCredentials = async ({ email = '', password = '' } = {}) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    const normalizedPassword = String(password || '')
+    if (!normalizedEmail || !normalizedPassword) {
+      return {
+        ok: false,
+        locked: false,
+        status: 400,
+        idToken: '',
+        uid: '',
+        email: '',
+        message: 'Email and password are required.',
+      }
+    }
+
+    try {
+      const response = await apiFetch('/api/auth/authenticate-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: normalizedEmail,
+          password: normalizedPassword,
+        }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        return {
+          ok: false,
+          locked: response.status === 423,
+          status: response.status,
+          idToken: '',
+          uid: '',
+          email: normalizedEmail,
+          message: String(payload?.message || '').trim(),
+        }
+      }
+      return {
+        ok: true,
+        locked: false,
+        status: response.status,
+        idToken: String(payload?.idToken || '').trim(),
+        uid: String(payload?.uid || '').trim(),
+        email: String(payload?.email || normalizedEmail).trim().toLowerCase(),
+        message: String(payload?.message || '').trim(),
+      }
+    } catch {
+      return {
+        ok: false,
+        locked: false,
+        status: 0,
+        idToken: '',
+        uid: '',
+        email: normalizedEmail,
+        message: 'Unable to verify credentials right now.',
+      }
+    }
+  }
+
+  const persistClientProfileNamesToBackend = async ({
+    authorizationToken = '',
+    firstName = '',
+    lastName = '',
+    otherNames = '',
+  } = {}) => {
+    const token = String(authorizationToken || '').trim()
+    if (!token) return { ok: false, status: 0 }
+
+    const payload = {
+      firstName: sanitizeProfileNameFieldForBackend(firstName),
+      lastName: sanitizeProfileNameFieldForBackend(lastName),
+      otherNames: sanitizeProfileNameFieldForBackend(otherNames),
+    }
+
+    if (!payload.firstName && !payload.lastName && !payload.otherNames) {
+      return { ok: false, status: 0 }
+    }
+
+    try {
+      const response = await apiFetch('/api/users/me/profile', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      })
+      return { ok: response.ok, status: response.status }
+    } catch {
+      return { ok: false, status: 0 }
+    }
+  }
+
+  const fetchOwnerBootstrapStatus = async () => {
+    try {
+      const response = await apiFetch('/api/auth/bootstrap-owner-status', {
+        method: 'GET',
+      })
+      if (!response.ok) {
+        const errorMessage = await readErrorMessageFromResponse(response)
+        return {
+          ok: false,
+          canBootstrap: false,
+          adminAccountCount: 0,
+          message: errorMessage || 'Unable to verify owner bootstrap status right now.',
+        }
+      }
+      const payload = await response.json().catch(() => ({}))
+      return {
+        ok: true,
+        canBootstrap: Boolean(payload?.canBootstrapOwner),
+        adminAccountCount: Math.max(0, Number(payload?.adminAccountCount || 0)),
+        message: String(payload?.message || '').trim(),
+      }
+    } catch {
+      return {
+        ok: false,
+        canBootstrap: false,
+        adminAccountCount: 0,
+        message: 'Unable to verify owner bootstrap status right now.',
+      }
+    }
+  }
+
+  const handleSocialLogin = async (provider, providedNameDraft = null, options = {}) => {
     const normalizedProvider = String(provider || '').trim().toLowerCase()
-    const normalizedProvidedFullName = providedFullName.trim()
+    logGoogleAppDebug('handleSocialLogin:start', {
+      provider: normalizedProvider,
+      authMode,
+      hasProvidedNameDraft: Boolean(providedNameDraft),
+      hasGoogleContext: Boolean(options?.googleContext),
+    })
     if (normalizedProvider !== 'google') {
       showToast('error', 'Authentication failed. Please try again.')
       return { ok: false, message: 'Authentication failed. Please try again.' }
     }
-    if (!normalizedProvidedFullName) {
-      return { ok: false, requiresFullName: true, provider: normalizedProvider }
-    }
 
-    showToast('error', 'Google login is not configured yet. Use email and password for now.')
-    return { ok: false, message: 'Google login is not configured yet. Use email and password for now.' }
+    const resolvedMode = String(options?.modeOverride || authMode || 'login').trim().toLowerCase()
+    const isSignupMode = resolvedMode === 'signup'
+    try {
+      const isSubmittedFromPrompt = (
+        typeof providedNameDraft === 'string'
+        || (providedNameDraft && typeof providedNameDraft === 'object')
+      )
+
+      let googleContext = options?.googleContext || null
+
+      if (isSubmittedFromPrompt) {
+        googleContext = pendingGoogleSocialAuth
+        if (!googleContext?.idToken || !googleContext?.email) {
+          setPendingGoogleSocialAuth(null)
+          return { ok: false, message: 'Google session expired. Please continue with Google again.' }
+        }
+      } else if (!googleContext) {
+        const redirectResult = await startGoogleSignInRedirect({
+          intent: isSignupMode ? 'signup' : 'login',
+        })
+        if (!redirectResult.ok) {
+          return { ok: false, message: redirectResult.message || 'Unable to authenticate with Google right now.' }
+        }
+        if (redirectResult.pendingRedirect) {
+          return { ok: true, pendingRedirect: true }
+        }
+        googleContext = {
+          provider: 'google',
+          idToken: redirectResult.idToken,
+          uid: redirectResult.uid,
+          email: redirectResult.email,
+          profile: normalizeClientNameDraft({
+            fullName: redirectResult.fullName,
+            firstName: redirectResult.firstName,
+            lastName: redirectResult.lastName,
+            otherNames: redirectResult.otherNames,
+          }),
+        }
+      }
+
+      if (!googleContext?.idToken || !googleContext?.email) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return { ok: false, message: 'Google sign-in session is incomplete. Please try again.' }
+      }
+
+      const submittedProfile = normalizeClientNameDraft(
+        typeof providedNameDraft === 'string'
+          ? { fullName: providedNameDraft }
+          : (providedNameDraft || {}),
+      )
+      const contextProfile = normalizeClientNameDraft(googleContext.profile || {})
+      const effectiveProfile = normalizeClientNameDraft({
+        firstName: submittedProfile.firstName || contextProfile.firstName,
+        lastName: submittedProfile.lastName || contextProfile.lastName,
+        otherNames: submittedProfile.otherNames || contextProfile.otherNames,
+        fullName: submittedProfile.fullName || contextProfile.fullName,
+      })
+
+      if (isSignupMode && !isSubmittedFromPrompt && (!effectiveProfile.firstName || !effectiveProfile.lastName)) {
+        setPendingGoogleSocialAuth(googleContext)
+        return {
+          ok: false,
+          requiresProfileCompletion: true,
+          provider: normalizedProvider,
+          profile: effectiveProfile,
+        }
+      }
+
+      if (isSignupMode && (!effectiveProfile.firstName || !effectiveProfile.lastName)) {
+        return { ok: false, message: 'First and last name are required to continue.' }
+      }
+
+      const resolvedFullName = String(
+        effectiveProfile.fullName
+        || googleContext?.profile?.fullName
+        || googleContext.email?.split('@')?.[0]
+        || 'Client User',
+      ).trim()
+
+      const identityResult = await resolveIdentityFromAuthTokens({ idToken: googleContext.idToken })
+      logGoogleAppDebug('verify-token', {
+        ok: identityResult.ok,
+        email: identityResult.email,
+        roles: identityResult.roles,
+        message: identityResult.message || '',
+      })
+      if (!identityResult.ok) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return { ok: false, message: identityResult.message || 'Unable to verify token.' }
+      }
+
+      const resolvedEmail = String(identityResult.email || googleContext.email || '').trim().toLowerCase()
+      if (!resolvedEmail) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return { ok: false, message: 'Google account email is required to continue.' }
+      }
+
+      const socialAccountStatus = await fetchSocialAuthAccountStatus({
+        idToken: googleContext.idToken,
+        provider: 'google',
+      })
+      const socialAccountRecord = socialAccountStatus?.data && typeof socialAccountStatus.data === 'object'
+        ? socialAccountStatus.data
+        : {}
+      const registeredProvider = String(socialAccountRecord.provider || '').trim().toLowerCase()
+      const accountExistsForGoogleEmail = Boolean(socialAccountRecord.exists)
+      const accountMatchesGoogle = Boolean(socialAccountRecord.matchesProvider)
+
+      if (!socialAccountStatus.ok) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return {
+          ok: false,
+          message: String(socialAccountRecord.message || 'Unable to verify your Google account right now.').trim(),
+        }
+      }
+
+      if (!isSignupMode && !accountExistsForGoogleEmail) {
+        return {
+          ok: false,
+          message: 'No Google sign-in account was found for this email. Create an account with Google first or use email sign-in.',
+        }
+      }
+
+      if (!isSignupMode && accountExistsForGoogleEmail && !accountMatchesGoogle) {
+        return {
+          ok: false,
+          message: registeredProvider === 'email-password'
+            ? 'This email is registered with email and password. Sign in with your email address and password instead.'
+            : 'This email is already linked to a different sign-in method. Use the original sign-in method for this account.',
+        }
+      }
+
+      if (isSignupMode && accountExistsForGoogleEmail && accountMatchesGoogle) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return {
+          ok: false,
+          message: 'This Google account is already registered. Sign in instead.',
+        }
+      }
+
+      if (isSignupMode && accountExistsForGoogleEmail && !accountMatchesGoogle) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return {
+          ok: false,
+          message: registeredProvider === 'email-password'
+            ? 'An account already exists for this email. Sign in with your email and password instead.'
+            : 'This email is already linked to a different sign-in method. Use the original sign-in method for this account.',
+        }
+      }
+
+      const resolvedRoles = Array.isArray(identityResult.roles)
+        ? identityResult.roles.map((role) => String(role || '').trim().toLowerCase()).filter(Boolean)
+        : []
+      const hasAdminRole = resolvedRoles.includes('admin')
+      if (hasAdminRole) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return { ok: false, message: 'This Google account has admin access. Use /admin/login.' }
+      }
+
+      const fallbackRole = 'client'
+      const registerResult = await registerAuthAccountRecord({
+        uid: identityResult.uid || googleContext.uid || '',
+        email: resolvedEmail,
+        fullName: resolvedFullName,
+        role: fallbackRole,
+        provider: 'google',
+        status: 'active',
+        emailVerified: true,
+      })
+      logGoogleAppDebug('register-account', {
+        ok: registerResult.ok,
+        status: registerResult.status,
+        data: registerResult.data || null,
+      })
+      if (!registerResult.ok) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return {
+          ok: false,
+          message: String(registerResult?.data?.message || 'Unable to register account right now.').trim(),
+        }
+      }
+
+      const rememberSession = true
+      const loginSessionResult = await recordAuthLoginSession({
+        uid: identityResult.uid || googleContext.uid || '',
+        email: resolvedEmail,
+        role: fallbackRole,
+        loginMethod: 'google',
+        remember: rememberSession,
+        mfaCompleted: true,
+      })
+      logGoogleAppDebug('login-session', {
+        ok: loginSessionResult.ok,
+        status: loginSessionResult.status,
+        data: loginSessionResult.data || null,
+      })
+      if (!loginSessionResult.ok) {
+        if (isSignupMode) setPendingGoogleSocialAuth(null)
+        return {
+          ok: false,
+          message: String(loginSessionResult?.data?.message || 'Unable to start login session.').trim(),
+        }
+      }
+      const issuedSessionId = String(loginSessionResult?.data?.session?.sessionId || '').trim()
+
+      const hydratedProfile = await hydrateAuthenticatedUserFromBackend({
+        fallbackUid: identityResult.uid || googleContext.uid || '',
+        fallbackEmail: resolvedEmail,
+        fallbackFullName: resolvedFullName,
+        fallbackRole,
+        authorizationToken: googleContext.idToken,
+      })
+      logGoogleAppDebug('hydrate-user', {
+        ok: hydratedProfile.ok,
+        user: hydratedProfile.user || null,
+      })
+
+      const user = normalizeUser({
+        ...(hydratedProfile.user || {}),
+        fullName: String(hydratedProfile?.user?.fullName || resolvedFullName).trim() || resolvedFullName,
+        sessionId: issuedSessionId,
+        firebaseIdToken: googleContext.idToken,
+      })
+      logGoogleAppDebug('persist-user', {
+        email: user?.email,
+        role: user?.role,
+        sessionId: user?.sessionId,
+      })
+
+      persistAuthUser(user, rememberSession)
+      setApiAccessToken(googleContext.idToken, { remember: rememberSession })
+      syncProfileToSettings(user.fullName, user.email, effectiveProfile)
+
+      if (fallbackRole === 'client') {
+        await persistClientProfileNamesToBackend({
+          authorizationToken: googleContext.idToken,
+          firstName: effectiveProfile.firstName,
+          lastName: effectiveProfile.lastName,
+          otherNames: effectiveProfile.otherNames,
+        })
+
+        if (isSignupMode) {
+          persistOnboardingState({
+            currentStep: 1,
+            completed: false,
+            skipped: false,
+            verificationPending: true,
+            data: {
+              ...defaultOnboardingData,
+              businessName: '',
+              primaryContact: user.fullName || resolvedFullName,
+            },
+          }, user.email)
+          appendClientActivityLog(user.email, {
+            actorName: user.fullName || 'Client User',
+            actorRole: 'client',
+            action: 'Client account created',
+            details: 'Client completed Google signup.',
+          })
+        } else {
+          appendClientActivityLog(user.email, {
+            actorName: user.fullName || 'Client User',
+            actorRole: 'client',
+            action: 'Client login',
+            details: 'Client authenticated successfully via Google.',
+          })
+        }
+
+        await refreshClientDashboardOverview({ authorizationToken: googleContext.idToken })
+      }
+
+      if (isSignupMode) setPendingGoogleSocialAuth(null)
+      showToast('success', 'Authentication successful.')
+      return { ok: true }
+    } catch (error) {
+      logGoogleAppDebug('handleSocialLogin:failed', {
+        message: String(error?.message || '').trim(),
+      })
+      if (isSignupMode) setPendingGoogleSocialAuth(null)
+      const fallbackMessage = 'Unable to authenticate with Google right now. Please try again.'
+      return {
+        ok: false,
+        message: String(error?.message || '').trim() || fallbackMessage,
+      }
+    }
   }
 
-  const handleLogin = async ({ email, password, remember, agree }) => {
-    const loginFailureMessage = 'Invalid credentials. Please try again.'
-    if (!agree) {
-      return { ok: false, message: loginFailureMessage }
+  useEffect(() => {
+    if (isAuthenticated || googleRedirectResumeAttemptedRef.current) return undefined
+
+    googleRedirectResumeAttemptedRef.current = true
+    let isDisposed = false
+
+    const resumeGoogleRedirect = async () => {
+      let redirectResult = null
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        redirectResult = await consumeGoogleSignInRedirectResult()
+        logGoogleAppDebug('resumeGoogleRedirect:attempt', {
+          attempt: attempt + 1,
+          hasResult: Boolean(redirectResult?.hasResult),
+          pendingRedirect: Boolean(redirectResult?.pendingRedirect),
+          intent: redirectResult?.intent || '',
+          message: redirectResult?.message || '',
+        })
+        if (isDisposed) return
+        if (redirectResult?.hasResult || !redirectResult?.pendingRedirect) {
+          break
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500))
+      }
+      if (isDisposed || !redirectResult?.hasResult) return
+
+      const redirectMode = redirectResult.intent === 'signup' ? 'signup' : 'login'
+      const googleContext = {
+        provider: 'google',
+        idToken: redirectResult.idToken,
+        uid: redirectResult.uid,
+        email: redirectResult.email,
+        profile: normalizeClientNameDraft({
+          fullName: redirectResult.fullName,
+          firstName: redirectResult.firstName,
+          lastName: redirectResult.lastName,
+          otherNames: redirectResult.otherNames,
+        }),
+      }
+
+      setShowAuth(true)
+      setShowAdminLogin(false)
+      setIsPublicSiteView(false)
+      setAuthMode(redirectMode)
+
+      const result = await handleSocialLogin('google', null, {
+        googleContext,
+        modeOverride: redirectMode,
+      })
+      if (isDisposed) return
+      if (!result?.ok && !result?.requiresProfileCompletion) {
+        showToast('error', result?.message || 'Unable to authenticate with Google right now. Please try again.')
+      }
     }
+
+    void resumeGoogleRedirect()
+    return () => {
+      isDisposed = true
+    }
+  }, [isAuthenticated])
+
+  const handleLogin = async ({ email, password, remember }) => {
+    const loginFailureMessage = 'Incorrect email or password'
+    const loginLockoutMessage = 'Your account has been temporarily locked due to multiple failed login attempts.'
     const normalizedEmail = String(email || '').trim().toLowerCase()
     const normalizedPassword = String(password || '')
     if (!normalizedEmail || !normalizedPassword) {
       return { ok: false, message: loginFailureMessage }
     }
 
-    const firebaseAuthResult = await issueFirebaseIdTokenForCredentials({
+    const firebaseAuthResult = await authenticatePasswordCredentials({
       email: normalizedEmail,
       password: normalizedPassword,
     })
     if (!firebaseAuthResult.ok || !firebaseAuthResult.idToken) {
-      return { ok: false, message: firebaseAuthResult.message || loginFailureMessage }
+      return {
+        ok: false,
+        message: firebaseAuthResult.locked
+          ? loginLockoutMessage
+          : loginFailureMessage,
+      }
+    }
+
+    const identityResult = await resolveIdentityFromAuthTokens({ idToken: firebaseAuthResult.idToken })
+    if (!identityResult.ok) {
+      return { ok: false, message: identityResult.message || 'Unable to verify token.' }
+    }
+
+    const resolvedRoles = Array.isArray(identityResult.roles)
+      ? identityResult.roles.map((role) => String(role || '').trim().toLowerCase()).filter(Boolean)
+      : []
+    if (resolvedRoles.includes('admin')) {
+      return { ok: false, message: 'Use /admin/login to access the Admin Portal.' }
+    }
+
+    if (!identityResult.emailVerified) {
+      const verificationResult = await issueEmailVerificationLink(normalizedEmail)
+      if (!verificationResult.ok) {
+        return {
+          ok: false,
+          message: verificationResult.message || 'Unable to send verification email right now.',
+        }
+      }
+      setEmailVerificationEmail(normalizedEmail)
+      setAuthMode('email-verification')
+      return {
+        ok: false,
+        verificationPending: true,
+        message: 'A verification link has been sent to your email. Please verify your email address to activate your account.',
+      }
+    }
+
+    let accountSettings = readScopedAccountSettings(normalizedEmail)
+    if (!(accountSettings.twoStepEnabled && accountSettings.verifiedPhoneNumber)) {
+      const workspaceResult = await fetchClientWorkspaceFromBackend({
+        authorizationToken: firebaseAuthResult.idToken,
+      })
+      const workspace = workspaceResult?.ok && workspaceResult?.data?.workspace && typeof workspaceResult.data.workspace === 'object'
+        ? workspaceResult.data.workspace
+        : {}
+      accountSettings = normalizeAccountSettings(workspace.accountSettings || {})
+    }
+    const smsTwoStepEnabled = Boolean(accountSettings.twoStepEnabled && accountSettings.verifiedPhoneNumber)
+
+    if (smsTwoStepEnabled) {
+      const smsOtpResult = await issueSmsOtpChallenge({
+        phoneNumber: accountSettings.verifiedPhoneNumber,
+        purpose: 'mfa',
+        email: firebaseAuthResult.email || normalizedEmail,
+      })
+      if (!smsOtpResult.ok) {
+        return { ok: false, message: smsOtpResult.message || 'Unable to send verification code right now.' }
+      }
+      setOtpChallenge({
+        requestId: Date.now(),
+        purpose: 'client-login',
+        verificationPurpose: 'mfa',
+        transport: 'sms',
+        phoneNumber: accountSettings.verifiedPhoneNumber,
+        email: firebaseAuthResult.email || normalizedEmail,
+        remember: Boolean(remember),
+        role: 'client',
+        firebaseIdToken: firebaseAuthResult.idToken,
+        uid: firebaseAuthResult.uid,
+        previewOtp: smsOtpResult.previewOtp || '',
+        dispatchQueued: true,
+        deliveryError: '',
+      })
+      return { ok: true, requiresOtp: true }
     }
 
     const otpResult = await issueEmailOtp(normalizedEmail, 'client-login')
@@ -3065,28 +4498,37 @@ function App() {
     setOtpChallenge({
       requestId: Date.now(),
       purpose: 'client-login',
+      verificationPurpose: 'client-login',
+      transport: 'email',
       email: firebaseAuthResult.email || normalizedEmail,
       remember: Boolean(remember),
       role: 'client',
       firebaseIdToken: firebaseAuthResult.idToken,
       uid: firebaseAuthResult.uid,
+      previewOtp: otpResult.previewOtp || '',
+      dispatchQueued: otpResult.dispatchQueued !== false,
+      deliveryError: otpResult.deliveryError || '',
     })
     return { ok: true, requiresOtp: true }
   }
 
   const handleAdminLogin = async ({ email, password, remember, ownerPrivateKey }) => {
     const loginFailureMessage = 'Admin email or password incorrect.'
+    const loginLockoutMessage = 'Your account has been temporarily locked due to multiple failed login attempts.'
     const normalizedEmail = email?.trim()?.toLowerCase()
     if (!normalizedEmail || !password) {
       return { ok: false, message: loginFailureMessage }
     }
 
-    const firebaseAuthResult = await issueFirebaseIdTokenForCredentials({
+    const firebaseAuthResult = await authenticatePasswordCredentials({
       email: normalizedEmail,
       password,
     })
     if (!firebaseAuthResult.ok || !firebaseAuthResult.idToken) {
-      return { ok: false, message: firebaseAuthResult.message || loginFailureMessage }
+      return {
+        ok: false,
+        message: firebaseAuthResult.locked ? loginLockoutMessage : loginFailureMessage,
+      }
     }
 
     const otpResult = await issueEmailOtp(normalizedEmail, 'admin-login')
@@ -3102,6 +4544,9 @@ function App() {
       firebaseIdToken: firebaseAuthResult.idToken,
       uid: firebaseAuthResult.uid,
       ownerPrivateKey: String(ownerPrivateKey || '').trim(),
+      previewOtp: otpResult.previewOtp || '',
+      dispatchQueued: otpResult.dispatchQueued !== false,
+      deliveryError: otpResult.deliveryError || '',
     })
     return { ok: true, requiresOtp: true }
   }
@@ -3139,6 +4584,7 @@ function App() {
     setAuthUser(null)
     setImpersonationSession(null)
     setAdminImpersonationSession(null)
+    setPendingGoogleSocialAuth(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
     persistAdminImpersonationSession(null)
@@ -3149,6 +4595,7 @@ function App() {
     localStorage.removeItem('kiaminaAuthUser')
     clearApiAccessToken()
     clearApiSessionId()
+    await clearFirebaseAuthSession()
     setIsLoggingOut(false)
     if (wasAdmin) {
       navigateToAdminLogin({ replace: true })
@@ -3165,6 +4612,7 @@ function App() {
     acknowledgedPermanentDeletion = false,
   } = {}) => {
     const normalizedEmail = String(authUser?.email || '').trim().toLowerCase()
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
     if (!normalizedEmail || currentUserRole !== 'client') {
       return { ok: false, message: 'Unable to delete this account.' }
     }
@@ -3172,29 +4620,56 @@ function App() {
       return { ok: false, message: 'You must acknowledge permanent deletion to continue.' }
     }
 
+    const deletionReason = String(reason || '').trim() || 'Not provided'
+    const deletionReasonDetail = String(reasonOther || '').trim()
+    const retentionResponse = String(retentionIntent || '').trim() || 'Not provided'
+    const canUseBackendDeletion = Boolean(authorizationToken)
+
+    if (canUseBackendDeletion) {
+      try {
+        const deleteUserResponse = await apiFetch('/api/users/me', {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authorizationToken}`,
+          },
+          body: JSON.stringify({
+            reason: deletionReason,
+            reasonOther: deletionReasonDetail,
+            retentionIntent: retentionResponse,
+          }),
+        })
+        if (!deleteUserResponse.ok && deleteUserResponse.status !== 404) {
+          const message = await readErrorMessageFromResponse(deleteUserResponse)
+          return { ok: false, message: message || 'Unable to delete account right now.' }
+        }
+      } catch {
+        return { ok: false, message: 'Unable to delete account right now.' }
+      }
+    }
+
     const accounts = getSavedAccounts()
     const targetAccount = accounts.find((account) => (
       String(account?.email || '').trim().toLowerCase() === normalizedEmail
     ))
-    if (!targetAccount) {
+    if (!targetAccount && !canUseBackendDeletion) {
       return { ok: false, message: 'Account not found.' }
     }
 
-    const nextAccounts = accounts.filter((account) => (
-      String(account?.email || '').trim().toLowerCase() !== normalizedEmail
-    ))
-    localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
+    if (targetAccount) {
+      const nextAccounts = accounts.filter((account) => (
+        String(account?.email || '').trim().toLowerCase() !== normalizedEmail
+      ))
+      localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
+    }
     removeScopedClientArtifacts(normalizedEmail)
 
-    const deletionReason = String(reason || '').trim() || 'Not provided'
-    const deletionReasonDetail = String(reasonOther || '').trim()
-    const retentionResponse = String(retentionIntent || '').trim() || 'Not provided'
     appendAdminActivityLog({
       adminName: 'Client Self-Service',
       adminEmail: normalizedEmail,
       adminLevel: ADMIN_LEVELS.SUPER,
-      action: 'Client account deleted',
-      affectedUser: targetAccount.businessName || targetAccount.fullName || normalizedEmail,
+      action: canUseBackendDeletion ? 'Client account deleted (backend)' : 'Client account deleted',
+      affectedUser: targetAccount?.businessName || targetAccount?.fullName || normalizedEmail,
       details: [
         `Reason: ${deletionReason}${deletionReasonDetail ? ` (${deletionReasonDetail})` : ''}`,
         `Retention response: ${retentionResponse}`,
@@ -3425,22 +4900,71 @@ function App() {
     }
   }, [isAuthenticated, currentUserRole, normalizedScopedClientEmail])
 
-  const handleSignup = async ({ fullName, email, password, confirmPassword, agree }) => {
-    const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
-    if (!fullName.trim() || !email.trim() || !password || !confirmPassword) {
+  const handleSignup = async ({
+    firstName,
+    lastName,
+    otherNames,
+    phoneNumber,
+    companyName,
+    businessType,
+    country,
+    email,
+    password,
+    confirmPassword,
+    agree,
+  }) => {
+    const signupPasswordRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+    const normalizedNameDraft = normalizeClientNameDraft({ firstName, lastName, otherNames })
+    const normalizedFullName = String(normalizedNameDraft.fullName || '').trim()
+    const normalizedPhoneNumber = sanitizeClientPhoneLocalNumber(phoneNumber)
+    const normalizedCompanyName = String(companyName || '').trim()
+    const normalizedBusinessType = String(businessType || '').trim()
+    const normalizedCountry = String(country || '').trim()
+    if (
+      !normalizedFullName
+      || !email.trim()
+      || !normalizedPhoneNumber
+      || !password
+      || !confirmPassword
+    ) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
     if (!signupPasswordRegex.test(password)) {
-      return { ok: false, message: 'Password must include at least one number and one special character.' }
+      return { ok: false, message: 'Password does not meet security requirements.' }
+    }
+    if (!CLIENT_PHONE_LOCAL_NUMBER_REGEX.test(normalizedPhoneNumber)) {
+      return { ok: false, message: 'Phone number must be 10 or 11 digits.' }
     }
     if (password !== confirmPassword) {
-      return { ok: false, message: 'Please complete all required fields.' }
+      return { ok: false, message: 'Passwords do not match.' }
     }
     if (!agree) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
 
+    const existingEmailMethods = await lookupFirebaseSignInMethods(email)
+    if (!existingEmailMethods.ok) {
+      return { ok: false, message: existingEmailMethods.message || 'Unable to verify email availability right now.' }
+    }
+    if (existingEmailMethods.registered) {
+      const supportsGoogle = existingEmailMethods.methods.some((method) => method.includes('google'))
+      return {
+        ok: false,
+        message: supportsGoogle
+          ? 'An account already exists for this email. Sign in with Google or use a different email address.'
+          : 'An account already exists for this email. Sign in instead or use a different email address.',
+      }
+    }
+
     const normalizedEmail = email.trim().toLowerCase()
+    const phoneAvailability = await checkClientPhoneAvailability(normalizedPhoneNumber)
+    if (!phoneAvailability.ok || !phoneAvailability.available) {
+      return {
+        ok: false,
+        message: phoneAvailability.message || 'This phone number is already assigned to another account.',
+      }
+    }
+
     const otpResult = await issueEmailOtp(normalizedEmail, 'signup')
     if (!otpResult.ok) {
       return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
@@ -3450,8 +4974,18 @@ function App() {
       purpose: 'signup',
       email: normalizedEmail,
       remember: true,
+      previewOtp: otpResult.previewOtp || '',
+      dispatchQueued: otpResult.dispatchQueued !== false,
+      deliveryError: otpResult.deliveryError || '',
       pendingSignup: {
-        fullName: fullName.trim(),
+        firstName: normalizedNameDraft.firstName,
+        lastName: normalizedNameDraft.lastName,
+        otherNames: normalizedNameDraft.otherNames,
+        fullName: normalizedFullName,
+        phoneNumber: normalizedPhoneNumber,
+        companyName: normalizedCompanyName,
+        businessType: normalizedBusinessType,
+        country: normalizedCountry,
         email: normalizedEmail,
         password,
         role: 'client',
@@ -3463,6 +4997,7 @@ function App() {
 
   const handleAdminSetupCreateAccount = async ({
     inviteToken,
+    bootstrapOwner,
     fullName,
     email,
     roleInCompany,
@@ -3479,9 +5014,33 @@ function App() {
     confirmPassword,
   }) => {
     const normalizedToken = inviteToken?.trim() || ''
-    const invite = getAdminInviteByToken(normalizedToken)
-    if (!isAdminInvitePending(invite)) {
+    const isOwnerBootstrapFlow = Boolean(bootstrapOwner)
+    const invite = isOwnerBootstrapFlow ? null : getAdminInviteByToken(normalizedToken)
+    if (!isOwnerBootstrapFlow && !isAdminInvitePending(invite)) {
       return { ok: false, message: 'Invitation link is invalid or has expired.' }
+    }
+
+    let invitedAdminLevel = ADMIN_LEVELS.AREA_ACCOUNTANT
+    let invitePermissions = []
+    if (isOwnerBootstrapFlow) {
+      const ownerBootstrapEligibility = await fetchOwnerBootstrapStatus()
+      if (!ownerBootstrapEligibility.ok) {
+        return {
+          ok: false,
+          message: ownerBootstrapEligibility.message || 'Unable to verify owner bootstrap status right now.',
+        }
+      }
+      if (!ownerBootstrapEligibility.canBootstrap) {
+        return {
+          ok: false,
+          message: 'Owner account already exists. Sign in via /admin/login or use a valid invite link.',
+        }
+      }
+      invitedAdminLevel = ADMIN_LEVELS.OWNER
+      invitePermissions = [...FULL_ADMIN_PERMISSION_IDS]
+    } else {
+      invitedAdminLevel = normalizeAdminLevel(invite?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
+      invitePermissions = Array.isArray(invite?.adminPermissions) ? invite.adminPermissions : []
     }
 
     const normalizedEmail = email?.trim()?.toLowerCase() || ''
@@ -3492,7 +5051,6 @@ function App() {
     const normalizedGovernmentIdType = normalizeAdminGovernmentIdType(governmentIdType, normalizedWorkCountry)
     const normalizedGovernmentIdNumber = String(governmentIdNumber || '').trim()
     const normalizedResidentialAddress = String(residentialAddress || '').trim()
-    const invitedAdminLevel = normalizeAdminLevel(invite?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
     const isOwnerInvite = invitedAdminLevel === ADMIN_LEVELS.OWNER
     const normalizedOwnerPrivateKey = String(ownerPrivateKey || '').trim()
     const normalizedConfirmOwnerPrivateKey = String(confirmOwnerPrivateKey || '').trim()
@@ -3526,7 +5084,7 @@ function App() {
     ) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
-    if (normalizedEmail !== invite.email) {
+    if (!isOwnerBootstrapFlow && normalizedEmail !== String(invite?.email || '').trim().toLowerCase()) {
       return { ok: false, message: 'Work email must match your invitation email.' }
     }
     if (normalizedPhoneNumber.replace(/\D/g, '').length < 7) {
@@ -3552,7 +5110,10 @@ function App() {
       purpose: 'admin-setup',
       email: normalizedEmail,
       remember: true,
-      inviteToken: normalizedToken,
+      previewOtp: otpResult.previewOtp || '',
+      dispatchQueued: otpResult.dispatchQueued !== false,
+      deliveryError: otpResult.deliveryError || '',
+      inviteToken: isOwnerBootstrapFlow ? '' : normalizedToken,
       pendingSignup: {
         fullName: fullName.trim(),
         email: normalizedEmail,
@@ -3567,8 +5128,9 @@ function App() {
         ownerPrivateKey: isOwnerInvite ? normalizedOwnerPrivateKey : '',
         password,
         role: 'admin',
+        ownerBootstrap: isOwnerBootstrapFlow,
         adminLevel: invitedAdminLevel,
-        adminPermissions: Array.isArray(invite.adminPermissions) ? invite.adminPermissions : [],
+        adminPermissions: invitePermissions,
         status: 'active',
         createdAt: new Date().toISOString(),
       },
@@ -3582,32 +5144,60 @@ function App() {
 
     const normalizedEmail = String(otpChallenge.email || '').trim().toLowerCase()
     const normalizedPurpose = String(otpChallenge.purpose || 'login').trim().toLowerCase()
+    const normalizedVerificationPurpose = String(
+      otpChallenge.verificationPurpose || otpChallenge.purpose || 'login',
+    ).trim().toLowerCase()
+    const normalizedTransport = String(otpChallenge.transport || 'email').trim().toLowerCase()
     const normalizedCode = String(code || '').trim()
     if (!normalizedEmail || !normalizedCode) {
       return { ok: false, message: 'Incorrect verification code.' }
     }
 
-    try {
-      const verifyResponse = await apiFetch('/api/auth/verify-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: normalizedEmail,
-          purpose: normalizedPurpose,
-          otp: normalizedCode,
-        }),
+    if (normalizedTransport === 'sms') {
+      const smsVerifyResult = await verifySmsOtpChallengeCode({
+        phoneNumber: String(otpChallenge.phoneNumber || '').trim(),
+        purpose: normalizedVerificationPurpose,
+        email: normalizedEmail,
+        otp: normalizedCode,
       })
-      if (!verifyResponse.ok) {
-        const verifyErrorMessage = await readErrorMessageFromResponse(verifyResponse)
-        return { ok: false, message: verifyErrorMessage || 'Incorrect verification code.' }
+      if (!smsVerifyResult.ok) {
+        return { ok: false, message: smsVerifyResult.message || 'Incorrect verification code.' }
       }
-    } catch {
-      return { ok: false, message: 'Unable to verify OTP right now.' }
+    } else {
+      try {
+        const verifyResponse = await apiFetch('/api/auth/verify-otp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: normalizedEmail,
+            purpose: normalizedVerificationPurpose,
+            otp: normalizedCode,
+          }),
+        })
+        if (!verifyResponse.ok) {
+          const verifyErrorMessage = await readErrorMessageFromResponse(verifyResponse)
+          return { ok: false, message: verifyErrorMessage || 'Incorrect verification code.' }
+        }
+      } catch {
+        return { ok: false, message: 'Unable to verify OTP right now.' }
+      }
     }
 
     if (normalizedPurpose === 'signup' || normalizedPurpose === 'admin-setup') {
       const pendingSignup = otpChallenge.pendingSignup
-      if (!pendingSignup?.email || !pendingSignup?.fullName || !pendingSignup?.password) {
+      const pendingSignupNameDraft = normalizeClientNameDraft({
+        firstName: pendingSignup?.firstName,
+        lastName: pendingSignup?.lastName,
+        otherNames: pendingSignup?.otherNames,
+        fullName: pendingSignup?.fullName,
+      })
+      const pendingSignupFullName = String(
+        pendingSignupNameDraft.fullName
+        || pendingSignup?.fullName
+        || [pendingSignup?.firstName, pendingSignup?.otherNames, pendingSignup?.lastName].filter(Boolean).join(' ')
+        || '',
+      ).trim()
+      if (!pendingSignup?.email || !pendingSignupFullName || !pendingSignup?.password) {
         return { ok: false, message: 'Invalid signup challenge payload.' }
       }
       if (normalizedPurpose === 'admin-setup') {
@@ -3634,7 +5224,7 @@ function App() {
       const firebaseSignupResult = await createFirebaseAccountWithCredentials({
         email: pendingSignup.email,
         password: pendingSignup.password,
-        fullName: pendingSignup.fullName,
+        fullName: pendingSignupFullName,
       })
       if (!firebaseSignupResult.ok || !firebaseSignupResult.idToken) {
         return { ok: false, message: firebaseSignupResult.message || 'Unable to create account right now.' }
@@ -3644,16 +5234,76 @@ function App() {
       const registerResult = await registerAuthAccountRecord({
         uid: firebaseSignupResult.uid || '',
         email: pendingSignup.email,
-        fullName: pendingSignup.fullName,
+        fullName: pendingSignupFullName,
         role: fallbackRole,
         provider: 'email-password',
         status: pendingSignup.status || 'active',
-        emailVerified: true,
+        emailVerified: normalizedPurpose === 'admin-setup',
       })
       if (!registerResult.ok) {
         return {
           ok: false,
           message: String(registerResult?.data?.message || 'Unable to register account right now.').trim(),
+        }
+      }
+
+      if (normalizedPurpose === 'signup' && fallbackRole === 'client') {
+        syncProfileToSettings(pendingSignupFullName, pendingSignup.email, pendingSignupNameDraft)
+        setClientWorkspaceCache(pendingSignup.email, {
+          settingsProfile: {
+            ...readScopedSettingsProfile(pendingSignup.email),
+            fullName: pendingSignupFullName,
+            firstName: pendingSignupNameDraft.firstName,
+            lastName: pendingSignupNameDraft.lastName,
+            otherNames: pendingSignupNameDraft.otherNames,
+            email: pendingSignup.email,
+            phone: pendingSignup.phoneNumber || '',
+            phoneCountryCode: '+234',
+            phoneLocalNumber: pendingSignup.phoneNumber || '',
+            businessType: pendingSignup.businessType || '',
+            businessName: pendingSignup.companyName || '',
+            country: pendingSignup.country || '',
+          },
+        })
+        persistOnboardingState({
+          currentStep: 1,
+          completed: false,
+          skipped: false,
+          verificationPending: true,
+          data: {
+            ...defaultOnboardingData,
+            businessType: pendingSignup.businessType || '',
+            businessName: pendingSignup.companyName || '',
+            country: pendingSignup.country || '',
+            primaryContact: pendingSignupFullName,
+          },
+        }, pendingSignup.email)
+
+        const verificationResult = await issueEmailVerificationLink(pendingSignup.email)
+        if (!verificationResult.ok) {
+          return {
+            ok: false,
+            message: verificationResult.message || 'Unable to send verification email right now.',
+          }
+        }
+
+        appendClientActivityLog(pendingSignup.email, {
+          actorName: pendingSignupFullName || 'Client User',
+          actorRole: 'client',
+          action: 'Client account created',
+          details: 'Client completed signup and verification email was issued.',
+        })
+
+        setOtpChallenge(null)
+        setPasswordResetEmail('')
+        setEmailVerificationEmail(pendingSignup.email)
+        setAuthMode('email-verification')
+        showToast('success', 'A verification link has been sent to your email address.')
+        return {
+          ok: true,
+          verificationPending: true,
+          email: pendingSignup.email,
+          message: 'A verification link has been sent to your email. Please verify your email address to activate your account.',
         }
       }
 
@@ -3674,8 +5324,9 @@ function App() {
       const issuedSessionId = String(loginSessionResult?.data?.session?.sessionId || '').trim()
 
       const hydratedProfile = await hydrateAuthenticatedUserFromBackend({
+        fallbackUid: firebaseSignupResult.uid || '',
         fallbackEmail: pendingSignup.email,
-        fallbackFullName: pendingSignup.fullName,
+        fallbackFullName: pendingSignupFullName,
         fallbackRole,
         authorizationToken: firebaseSignupResult.idToken,
       })
@@ -3697,9 +5348,15 @@ function App() {
 
       persistAuthUser(user, true)
       setApiAccessToken(firebaseSignupResult.idToken, { remember: true })
-      syncProfileToSettings(user.fullName, user.email)
+      syncProfileToSettings(user.fullName, user.email, pendingSignupNameDraft)
 
       if (user.role === 'client') {
+        await persistClientProfileNamesToBackend({
+          authorizationToken: firebaseSignupResult.idToken,
+          firstName: pendingSignupNameDraft.firstName,
+          lastName: pendingSignupNameDraft.lastName,
+          otherNames: pendingSignupNameDraft.otherNames,
+        })
         persistOnboardingState({
           currentStep: 1,
           completed: false,
@@ -3708,7 +5365,7 @@ function App() {
           data: {
             ...defaultOnboardingData,
             businessName: '',
-            primaryContact: user.fullName,
+            primaryContact: user.fullName || pendingSignupFullName,
           },
         }, user.email)
         appendClientActivityLog(user.email, {
@@ -3719,11 +5376,12 @@ function App() {
         })
       }
 
-      if (normalizedPurpose === 'admin-setup' && otpChallenge.inviteToken) {
+      if (normalizedPurpose === 'admin-setup') {
         try {
-          const profileStorageKey = `kiaminaAdminProfile:${pendingSignup.email?.trim()?.toLowerCase()}`
+          const normalizedAdminEmail = String(pendingSignup.email || '').trim().toLowerCase()
+          const profileStorageKey = `kiaminaAdminProfile:${normalizedAdminEmail}`
           localStorage.setItem(profileStorageKey, JSON.stringify({
-            fullName: pendingSignup.fullName || '',
+            fullName: pendingSignupFullName,
             roleInCompany: pendingSignup.roleInCompany || '',
             department: pendingSignup.department || '',
             phoneNumber: pendingSignup.phoneNumber || '',
@@ -3733,19 +5391,65 @@ function App() {
             governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || '',
             residentialAddress: pendingSignup.residentialAddress || '',
           }))
+
+          const existingAccounts = getSavedAccounts()
+          const existingAdminIndex = existingAccounts.findIndex((account) => (
+            String(account?.email || '').trim().toLowerCase() === normalizedAdminEmail
+          ))
+          const nextAdminAccount = normalizeAdminAccount({
+            ...(existingAdminIndex >= 0 ? existingAccounts[existingAdminIndex] : {}),
+            uid: String(user?.uid || firebaseSignupResult.uid || '').trim(),
+            fullName: pendingSignupFullName,
+            email: normalizedAdminEmail,
+            role: 'admin',
+            status: 'active',
+            roleInCompany: pendingSignup.roleInCompany || '',
+            department: pendingSignup.department || '',
+            phoneNumber: pendingSignup.phoneNumber || '',
+            workCountry: pendingSignup.workCountry || 'Nigeria',
+            governmentIdType: pendingSignup.governmentIdType || '',
+            governmentIdNumber: pendingSignup.governmentIdNumber || '',
+            governmentIdVerifiedAt: pendingSignup.governmentIdVerifiedAt || '',
+            residentialAddress: pendingSignup.residentialAddress || '',
+            ownerPrivateKey: String(pendingSignup.ownerPrivateKey || '').trim(),
+            adminLevel: normalizeAdminLevel(pendingSignup.adminLevel || ADMIN_LEVELS.SUPER),
+            adminPermissions: Array.isArray(pendingSignup.adminPermissions)
+              ? pendingSignup.adminPermissions
+              : FULL_ADMIN_PERMISSION_IDS,
+          })
+          const nextAccounts = [...existingAccounts]
+          if (existingAdminIndex >= 0) {
+            nextAccounts[existingAdminIndex] = nextAdminAccount
+          } else {
+            nextAccounts.push(nextAdminAccount)
+          }
+          localStorage.setItem('kiaminaAccounts', JSON.stringify(nextAccounts))
         } catch {
           // no-op
         }
-        const invites = getSavedAdminInvites()
-        const inviteIndex = invites.findIndex((invite) => invite.token === otpChallenge.inviteToken)
-        if (inviteIndex !== -1) {
-          const nextInvites = [...invites]
-          nextInvites[inviteIndex] = normalizeAdminInvite({
-            ...nextInvites[inviteIndex],
-            status: 'accepted',
-            acceptedAt: new Date().toISOString(),
+
+        if (otpChallenge.inviteToken) {
+          const invites = getSavedAdminInvites()
+          const inviteIndex = invites.findIndex((invite) => invite.token === otpChallenge.inviteToken)
+          if (inviteIndex !== -1) {
+            const nextInvites = [...invites]
+            nextInvites[inviteIndex] = normalizeAdminInvite({
+              ...nextInvites[inviteIndex],
+              status: 'accepted',
+              acceptedAt: new Date().toISOString(),
+            })
+            saveAdminInvites(nextInvites)
+          }
+        }
+
+        if (pendingSignup?.ownerBootstrap) {
+          setOwnerBootstrapStatus({
+            loading: false,
+            checked: true,
+            canBootstrap: false,
+            adminAccountCount: Math.max(1, Number(ownerBootstrapStatus.adminAccountCount || 0)),
+            message: 'Owner bootstrap is disabled because an admin account already exists.',
           })
-          saveAdminInvites(nextInvites)
         }
       }
 
@@ -3772,7 +5476,7 @@ function App() {
         role: fallbackRole,
         provider: 'email-password',
         status: 'active',
-        emailVerified: true,
+        emailVerified: Boolean(identityResult.emailVerified),
       })
       if (!registerResult.ok) {
         return {
@@ -3799,6 +5503,7 @@ function App() {
       const issuedSessionId = String(loginSessionResult?.data?.session?.sessionId || '').trim()
 
       const hydratedProfile = await hydrateAuthenticatedUserFromBackend({
+        fallbackUid: identityResult.uid || '',
         fallbackEmail: resolvedEmail,
         fallbackFullName: resolvedEmail.split('@')[0],
         fallbackRole,
@@ -3838,10 +5543,43 @@ function App() {
   const handleResendOtp = async () => {
     if (!otpChallenge?.email) return { ok: false }
     await new Promise((resolve) => window.setTimeout(resolve, getNetworkAwareDurationMs('search')))
-    const otpResult = await issueEmailOtp(otpChallenge.email, otpChallenge.purpose || 'login')
+    const transport = String(otpChallenge.transport || 'email').trim().toLowerCase()
+    if (transport === 'sms') {
+      const smsOtpResult = await issueSmsOtpChallenge({
+        phoneNumber: otpChallenge.phoneNumber,
+        purpose: otpChallenge.verificationPurpose || 'mfa',
+        email: otpChallenge.email,
+      })
+      if (!smsOtpResult.ok) {
+        return { ok: false, message: smsOtpResult.message || 'Unable to send verification code right now.' }
+      }
+      setOtpChallenge((previous) => {
+        if (!previous) return previous
+        return {
+          ...previous,
+          requestId: Date.now(),
+          previewOtp: smsOtpResult.previewOtp || '',
+          dispatchQueued: true,
+          deliveryError: '',
+        }
+      })
+      return { ok: true, message: smsOtpResult.message || 'A new verification code has been sent.' }
+    }
+
+    const otpResult = await issueEmailOtp(otpChallenge.email, otpChallenge.verificationPurpose || otpChallenge.purpose || 'login')
     if (!otpResult.ok) {
       return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
     }
+    setOtpChallenge((previous) => {
+      if (!previous) return previous
+      return {
+        ...previous,
+        requestId: Date.now(),
+        previewOtp: otpResult.previewOtp || '',
+        dispatchQueued: otpResult.dispatchQueued !== false,
+        deliveryError: otpResult.deliveryError || '',
+      }
+    })
     return { ok: true, message: otpResult.message || 'A new OTP has been sent.' }
   }
 
@@ -3852,7 +5590,7 @@ function App() {
   const handleRequestPasswordReset = async (email) => {
     const normalizedEmail = email?.trim()?.toLowerCase()
     if (!normalizedEmail) {
-      return { ok: false, message: 'Please complete all required fields.' }
+      return { ok: false, message: 'Please enter a valid email address.' }
     }
 
     const resetResult = await issuePasswordResetLink(normalizedEmail)
@@ -3863,27 +5601,128 @@ function App() {
     return {
       ok: true,
       email: normalizedEmail,
-      message: resetResult.message || 'Password reset link sent. Please check your email.',
+      message: 'If an account exists for this email, a password reset link has been sent.',
     }
   }
 
-  const handleUpdatePassword = async ({ email, password, confirmPassword }) => {
-    const normalizedEmail = email?.trim()?.toLowerCase()
-    if (!normalizedEmail || !password || !confirmPassword) {
+  const handleChangePassword = async ({
+    currentPassword = '',
+    newPassword = '',
+    confirmPassword = '',
+  } = {}) => {
+    const normalizedCurrentPassword = String(currentPassword || '')
+    const normalizedNewPassword = String(newPassword || '')
+    const normalizedConfirmPassword = String(confirmPassword || '')
+    if (!normalizedCurrentPassword || !normalizedNewPassword || !normalizedConfirmPassword) {
+      return { ok: false, message: 'Please complete all required fields.' }
+    }
+    if (normalizedNewPassword !== normalizedConfirmPassword) {
+      return { ok: false, message: 'Passwords do not match.' }
+    }
+
+    const strengthRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+    if (!strengthRegex.test(normalizedNewPassword)) {
+      return { ok: false, message: 'Password does not meet security requirements.' }
+    }
+
+    try {
+      const response = await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentPassword: normalizedCurrentPassword,
+          newPassword: normalizedNewPassword,
+        }),
+      })
+      if (!response.ok) {
+        const message = await readErrorMessageFromResponse(response)
+        return { ok: false, message: message || 'Unable to update your password right now.' }
+      }
+      const payload = await response.json().catch(() => ({}))
+      return {
+        ok: true,
+        message: String(payload?.message || '').trim() || 'Your password has been updated successfully.',
+      }
+    } catch {
+      return { ok: false, message: 'Unable to update your password right now.' }
+    }
+  }
+
+  const handleResolvePasswordResetCode = async (oobCode) => {
+    const result = await inspectPasswordResetCode(oobCode)
+    if (result.ok && result.email) {
+      setPasswordResetEmail(result.email)
+    }
+    return result
+  }
+
+  const handleUpdatePassword = async ({ oobCode, password, confirmPassword }) => {
+    if (!oobCode || !password || !confirmPassword) {
       return { ok: false, message: 'Please complete all required fields.' }
     }
     if (password !== confirmPassword) {
-      return { ok: false, message: 'Please complete all required fields.' }
+      return { ok: false, message: 'Passwords do not match.' }
     }
 
-    const strengthRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+    const strengthRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
     if (!strengthRegex.test(password)) {
-      return { ok: false, message: 'Password must include at least one number and one special character.' }
+      return { ok: false, message: 'Password does not meet security requirements.' }
     }
 
+    const result = await completePasswordResetWithCode(oobCode, password)
+    if (!result.ok) {
+      return { ok: false, message: result.message || 'Reset link is invalid or expired.' }
+    }
+
+    setPasswordResetEmail('')
+    setAuthMode('login')
+    showToast('success', result.message || 'Your password has been updated successfully. You can now sign in.')
+    return { ok: true, message: result.message || 'Your password has been updated successfully. You can now sign in.' }
+  }
+
+  const handleResendVerificationEmail = async (email) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase()
+    if (!normalizedEmail) {
+      return { ok: false, message: 'Please enter a valid email address.' }
+    }
+
+    const result = await issueEmailVerificationLink(normalizedEmail)
+    if (!result.ok) {
+      return { ok: false, message: result.message || 'Unable to send verification email right now.' }
+    }
+
+    setEmailVerificationEmail(normalizedEmail)
     return {
-      ok: false,
-      message: 'Password updates are completed through the reset link sent to your email.',
+      ok: true,
+      email: normalizedEmail,
+      message: 'A verification link has been sent to your email. Please verify your email address to activate your account.',
+    }
+  }
+
+  const handleVerifyEmailAddress = async (oobCode) => {
+    const inspectionResult = await inspectEmailVerificationCode(oobCode)
+    if (!inspectionResult.ok) {
+      return {
+        ok: false,
+        email: '',
+        message: inspectionResult.message || 'Verification link expired. Please request a new one.',
+      }
+    }
+
+    const verificationResult = await applyEmailVerificationCode(oobCode)
+    if (!verificationResult.ok) {
+      return {
+        ok: false,
+        email: inspectionResult.email || '',
+        message: verificationResult.message || 'Verification link expired. Please request a new one.',
+      }
+    }
+
+    setEmailVerificationEmail(inspectionResult.email || '')
+    return {
+      ok: true,
+      email: inspectionResult.email || '',
+      message: verificationResult.message || 'Email verified successfully.',
     }
   }
 
@@ -4013,6 +5852,7 @@ function App() {
     setShowAuth(false)
     setShowAdminLogin(false)
     setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
     setImpersonationSession(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
@@ -4093,6 +5933,7 @@ function App() {
     setShowAuth(false)
     setShowAdminLogin(false)
     setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
     setImpersonationSession(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
@@ -4141,6 +5982,13 @@ function App() {
       adminEmail: authUser.email.toLowerCase(),
       adminName: authUser.fullName || 'Admin User',
       clientEmail: pendingImpersonationClient.email.toLowerCase(),
+      clientUid: String(
+        pendingImpersonationClient.uid
+        || getSavedAccounts().find((account) => (
+          String(account?.email || '').trim().toLowerCase() === pendingImpersonationClient.email.toLowerCase()
+        ))?.uid
+        || '',
+      ).trim(),
       clientName: pendingImpersonationClient.primaryContact || pendingImpersonationClient.businessName || 'Client',
       businessName: pendingImpersonationClient.businessName || 'Client Account',
       cri: pendingImpersonationClient.cri || '',
@@ -4215,19 +6063,17 @@ function App() {
     if (!isImpersonatingClient || !scopedClientEmail) return
     const input = window.prompt('Enter corrected CRI', impersonationSession?.cri || '')
     if (!input) return
-    const settingsKey = getScopedStorageKey('settingsFormData', scopedClientEmail)
-    const existing = (() => {
-      try {
-        return JSON.parse(localStorage.getItem(settingsKey) || '{}')
-      } catch {
-        return {}
-      }
-    })()
+    const workspaceCache = getClientWorkspaceCache(scopedClientEmail) || {}
+    const existing = workspaceCache.settingsProfile && typeof workspaceCache.settingsProfile === 'object'
+      ? workspaceCache.settingsProfile
+      : {}
     const next = {
       ...existing,
       cri: input.trim(),
     }
-    localStorage.setItem(settingsKey, JSON.stringify(next))
+    setClientWorkspaceCache(scopedClientEmail, {
+      settingsProfile: next,
+    })
     setImpersonationSession((prev) => {
       if (!prev) return prev
       const updated = { ...prev, cri: input.trim(), lastActivityAt: Date.now() }
@@ -4301,6 +6147,22 @@ function App() {
         action: 'Updated notification preferences',
         details: 'Client updated notification settings.',
       },
+      'Password reset link sent. Please check your email.': {
+        action: 'Requested password reset',
+        details: 'Client requested a secure password reset link from account settings.',
+      },
+      'Your password has been updated successfully.': {
+        action: 'Updated password',
+        details: 'Client changed their account password from account settings.',
+      },
+      'Two-step verification enabled.': {
+        action: 'Enabled two-step verification',
+        details: 'Client enabled SMS verification for sensitive account actions.',
+      },
+      'Two-step verification turned off.': {
+        action: 'Disabled two-step verification',
+        details: 'Client disabled SMS verification for sensitive account actions.',
+      },
       'Documents uploaded successfully.': {
         action: 'Uploaded documents',
         details: 'Client uploaded one or more documents.',
@@ -4319,6 +6181,10 @@ function App() {
       'Verification submitted successfully.': 'Admin submitted verification on behalf of client while in impersonation mode.',
       'Submitted. Awaiting approval.': 'Admin submitted verification on behalf of client while in impersonation mode.',
       'Notification preferences updated.': 'Admin updated notification settings while in impersonation mode.',
+      'Password reset link sent. Please check your email.': 'Admin triggered a password reset link while in impersonation mode.',
+      'Your password has been updated successfully.': 'Admin changed the client password while in impersonation mode.',
+      'Two-step verification enabled.': 'Admin enabled two-step verification while in impersonation mode.',
+      'Two-step verification turned off.': 'Admin disabled two-step verification while in impersonation mode.',
       'Documents uploaded successfully.': 'Admin uploaded document on behalf of client.',
     }
     const details = detailsByMessage[message] || `Admin ${impersonationSession?.adminName || authUser?.fullName || 'Admin User'} action in client view: ${message}`
@@ -4341,6 +6207,12 @@ function App() {
         && previous.govIdVerificationStatus === normalizedDocs.govIdVerificationStatus
         && previous.govIdClarityStatus === normalizedDocs.govIdClarityStatus
         && previous.businessReg === normalizedDocs.businessReg
+        && previous.businessRegFileCacheKey === normalizedDocs.businessRegFileCacheKey
+        && previous.businessRegMimeType === normalizedDocs.businessRegMimeType
+        && Number(previous.businessRegSize || 0) === Number(normalizedDocs.businessRegSize || 0)
+        && previous.businessRegUploadedAt === normalizedDocs.businessRegUploadedAt
+        && previous.businessRegVerificationStatus === normalizedDocs.businessRegVerificationStatus
+        && previous.businessRegSubmittedAt === normalizedDocs.businessRegSubmittedAt
       ) {
         return previous
       }
@@ -4351,24 +6223,88 @@ function App() {
     }
   }
 
-  const handleSettingsProfileChange = (nextProfile = {}) => {
-    const normalizedProfile = normalizeSettingsProfile(nextProfile)
-    setSettingsProfileSnapshot((previous) => {
+  const handleAccountSettingsChange = (nextSettings = {}) => {
+    const normalizedSettings = normalizeAccountSettings(nextSettings)
+    const targetEmail = String(scopedClientEmail || normalizedSettings.recoveryEmail || '').trim().toLowerCase()
+    if (targetEmail) {
+      const workspaceCache = getClientWorkspaceCache(targetEmail) || {}
+      const existingSettings = workspaceCache.accountSettings && typeof workspaceCache.accountSettings === 'object'
+        ? workspaceCache.accountSettings
+        : {}
+      setClientWorkspaceCache(targetEmail, {
+        accountSettings: {
+          ...existingSettings,
+          ...(nextSettings && typeof nextSettings === 'object' ? nextSettings : {}),
+          ...normalizedSettings,
+        },
+      })
+      persistScopedAccountSettings(targetEmail, normalizedSettings)
+    }
+    setAccountSettingsSnapshot((previous) => {
       if (
-        previous.fullName === normalizedProfile.fullName
-        && previous.firstName === normalizedProfile.firstName
-        && previous.lastName === normalizedProfile.lastName
-        && previous.otherNames === normalizedProfile.otherNames
-        && previous.email === normalizedProfile.email
-        && previous.phone === normalizedProfile.phone
-        && previous.address === normalizedProfile.address
-        && previous.businessType === normalizedProfile.businessType
-        && previous.country === normalizedProfile.country
+        previous.twoStepEnabled === normalizedSettings.twoStepEnabled
+        && previous.twoStepMethod === normalizedSettings.twoStepMethod
+        && previous.verifiedPhoneNumber === normalizedSettings.verifiedPhoneNumber
+        && previous.recoveryEmail === normalizedSettings.recoveryEmail
+        && previous.enabledAt === normalizedSettings.enabledAt
+        && previous.lastVerifiedAt === normalizedSettings.lastVerifiedAt
       ) {
+        return previous
+      }
+      return normalizedSettings
+    })
+  }
+
+  const handleSettingsProfileChange = async (nextProfile = {}) => {
+    const normalizedProfile = normalizeSettingsProfile(nextProfile)
+    const targetEmail = String(scopedClientEmail || normalizedProfile.email || '').trim().toLowerCase()
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+
+    if (!isImpersonatingClient && currentUserRole === 'client' && authorizationToken) {
+      const profileResult = await persistClientProfileToBackend({
+        authorizationToken,
+        profile: nextProfile,
+      })
+      if (!profileResult.ok) {
+        return {
+          ok: false,
+          message: profileResult.message || 'Unable to save profile right now.',
+        }
+      }
+      if (targetEmail) {
+        const signature = JSON.stringify(buildClientProfilePayloadForBackend(nextProfile))
+        clientProfileSyncSignaturesRef.current.set(targetEmail, signature)
+      }
+    }
+
+    if (targetEmail) {
+      const workspaceCache = getClientWorkspaceCache(targetEmail) || {}
+      const existingSettings = workspaceCache.settingsProfile && typeof workspaceCache.settingsProfile === 'object'
+        ? workspaceCache.settingsProfile
+        : {}
+      setClientWorkspaceCache(targetEmail, {
+        settingsProfile: {
+          ...existingSettings,
+          ...(nextProfile && typeof nextProfile === 'object' ? nextProfile : {}),
+          ...normalizedProfile,
+        },
+      })
+    }
+    setSettingsProfileSnapshot((previous) => {
+      const previousSignature = JSON.stringify(normalizeSettingsProfile(previous))
+      const nextSignature = JSON.stringify(normalizedProfile)
+      if (previousSignature === nextSignature) {
         return previous
       }
       return normalizedProfile
     })
+    if (typeof setCompanyName === 'function') {
+      setCompanyName(String(nextProfile?.businessName || '').trim())
+    }
+    if (typeof setClientFirstName === 'function') {
+      setClientFirstName(normalizedProfile.firstName || 'Client')
+    }
+    return { ok: true, profile: normalizedProfile }
   }
 
   const handleSkipOnboarding = () => {
@@ -4409,48 +6345,48 @@ function App() {
     setVerificationDocsSnapshot(finalVerificationProgress.docs)
     persistScopedVerificationDocs(scopedClientEmail, finalVerificationProgress.docs)
 
-    try {
-      const settingsKey = getScopedStorageKey('settingsFormData', scopedClientEmail)
-      const saved = localStorage.getItem(settingsKey) || (scopedClientEmail ? localStorage.getItem('settingsFormData') : null)
-      const existing = saved ? JSON.parse(saved) : {}
-      const effectiveFullName = isImpersonatingClient
-        ? (impersonationSession?.clientName || existing.fullName || '')
-        : (authUser?.fullName || existing.fullName || '')
-      const existingNameParts = resolveSettingsProfileNameParts(existing)
-      const merged = {
-        ...existing,
-        fullName: effectiveFullName,
-        firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
-        lastName: existingNameParts.lastName || (
-          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
-            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
-            : ''
-        ),
-        otherNames: existingNameParts.otherNames || (
-          String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
-            ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
-            : ''
-        ),
-        email: scopedClientEmail || existing.email || '',
-        businessType: finalData.businessType,
-        businessName: finalData.businessName,
-        country: finalData.country,
-        industry: finalData.industry,
-        industryOther: finalData.industryOther,
-        cacNumber: finalData.cacNumber,
-        tin: finalData.tin,
-        reportingCycle: finalData.reportingCycle,
-        startMonth: finalData.startMonth,
-        currency: finalData.currency,
-        language: finalData.language,
-      }
-      localStorage.setItem(settingsKey, JSON.stringify(merged))
-      const normalizedProfile = normalizeSettingsProfile(merged)
-      setCompanyName(merged.businessName?.trim() || '')
-      setClientFirstName(normalizedProfile.firstName || 'Client')
-    } catch {
-      // no-op
+    const workspaceCache = getClientWorkspaceCache(scopedClientEmail) || {}
+    const existing = workspaceCache.settingsProfile && typeof workspaceCache.settingsProfile === 'object'
+      ? workspaceCache.settingsProfile
+      : {}
+    const effectiveFullName = isImpersonatingClient
+      ? (impersonationSession?.clientName || existing.fullName || '')
+      : (authUser?.fullName || existing.fullName || '')
+    const existingNameParts = resolveSettingsProfileNameParts(existing)
+    const merged = {
+      ...existing,
+      fullName: effectiveFullName,
+      firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
+      lastName: existingNameParts.lastName || (
+        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
+          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
+          : ''
+      ),
+      otherNames: existingNameParts.otherNames || (
+        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
+          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
+          : ''
+      ),
+      email: scopedClientEmail || existing.email || '',
+      businessType: finalData.businessType,
+      businessName: finalData.businessName,
+      country: finalData.country,
+      industry: finalData.industry,
+      industryOther: finalData.industryOther,
+      cacNumber: finalData.cacNumber,
+      tin: finalData.tin,
+      reportingCycle: finalData.reportingCycle,
+      startMonth: finalData.startMonth,
+      currency: finalData.currency,
+      language: finalData.language,
     }
+    setClientWorkspaceCache(scopedClientEmail, {
+      settingsProfile: merged,
+    })
+    const normalizedProfile = normalizeSettingsProfile(merged)
+    setSettingsProfileSnapshot(normalizedProfile)
+    setCompanyName(merged.businessName?.trim() || '')
+    setClientFirstName(normalizedProfile.firstName || 'Client')
 
     const defaultLandingPage = isImpersonatingClient
       ? 'dashboard'
@@ -4520,6 +6456,173 @@ function App() {
     setSalesClassOptions((prev) => normalizeClassOptions([...prev, normalized]))
   }
 
+  const collectBackendDocumentIds = (file = {}) => {
+    const ids = new Set()
+    const registerId = (value) => {
+      const normalized = String(value || '').trim()
+      if (normalized) ids.add(normalized)
+    }
+
+    registerId(file.backendDocumentId)
+    ;(Array.isArray(file.versions) ? file.versions : []).forEach((version = {}) => {
+      registerId(version.backendDocumentId)
+      const snapshot = version.fileSnapshot && typeof version.fileSnapshot === 'object'
+        ? version.fileSnapshot
+        : {}
+      registerId(snapshot.backendDocumentId)
+    })
+
+    return Array.from(ids)
+  }
+
+  const collectFileCacheKeys = (file = {}) => {
+    const keys = new Set()
+    const registerKey = (value) => {
+      const normalized = String(value || '').trim()
+      if (normalized) keys.add(normalized)
+    }
+
+    registerKey(file.fileCacheKey)
+    ;(Array.isArray(file.versions) ? file.versions : []).forEach((version = {}) => {
+      registerKey(version.fileCacheKey)
+      const snapshot = version.fileSnapshot && typeof version.fileSnapshot === 'object'
+        ? version.fileSnapshot
+        : {}
+      registerKey(snapshot.fileCacheKey)
+    })
+
+    return Array.from(keys)
+  }
+
+  const ensureClientDocumentAvailable = async (file = {}) => {
+    const normalizedOwnerEmail = String(
+      normalizedScopedClientEmail
+      || scopedClientEmail
+      || authUser?.email
+      || '',
+    ).trim().toLowerCase()
+    const normalizedFileId = String(file?.fileId || '').trim()
+    const normalizedCacheKey = String(
+      file?.fileCacheKey
+      || buildFileCacheKey({
+        ownerEmail: normalizedOwnerEmail,
+        fileId: normalizedFileId,
+      }),
+    ).trim()
+    const filePatch = normalizedCacheKey && normalizedCacheKey !== String(file?.fileCacheKey || '').trim()
+      ? { fileCacheKey: normalizedCacheKey }
+      : {}
+
+    if (file?.rawFile instanceof Blob) {
+      return {
+        ok: true,
+        blob: file.rawFile,
+        filePatch,
+        message: '',
+      }
+    }
+
+    if (normalizedCacheKey) {
+      const cachedBlob = await getCachedFileBlob(normalizedCacheKey)
+      if (cachedBlob instanceof Blob) {
+        return {
+          ok: true,
+          blob: cachedBlob,
+          filePatch,
+          message: '',
+        }
+      }
+    }
+
+    const backendDocumentId = String(file?.backendDocumentId || '').trim()
+    if (!backendDocumentId) {
+      return {
+        ok: false,
+        blob: null,
+        filePatch,
+        message: 'This file is unavailable for preview or download.',
+      }
+    }
+
+    const downloadResult = await downloadDocumentBlobFromBackend(backendDocumentId)
+    if (!downloadResult.ok || !(downloadResult.blob instanceof Blob)) {
+      return {
+        ok: false,
+        blob: null,
+        filePatch,
+        message: downloadResult.message || 'Unable to download this file right now.',
+      }
+    }
+
+    if (normalizedCacheKey) {
+      await putCachedFileBlob(normalizedCacheKey, downloadResult.blob, {
+        filename: file?.filename || downloadResult.fileName || 'document',
+        mimeType: downloadResult.contentType,
+      })
+    }
+
+    return {
+      ok: true,
+      blob: downloadResult.blob,
+      filePatch,
+      message: '',
+    }
+  }
+
+  const deleteClientDocumentArtifacts = async (targetFiles = []) => {
+    const files = Array.isArray(targetFiles) ? targetFiles : [targetFiles]
+    const backendDocumentIds = Array.from(new Set(files.flatMap((file) => collectBackendDocumentIds(file))))
+    const cacheKeys = Array.from(new Set(files.flatMap((file) => collectFileCacheKeys(file))))
+
+    const deleteResults = await Promise.allSettled(
+      backendDocumentIds.map((documentId) => deleteDocumentFromBackend(documentId)),
+    )
+    const failedDeletes = []
+    deleteResults.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        failedDeletes.push(backendDocumentIds[index])
+        return
+      }
+      if (!result.value?.ok && Number(result.value?.status || 0) !== 404) {
+        failedDeletes.push(backendDocumentIds[index])
+      }
+    })
+
+    if (failedDeletes.length > 0) {
+      return {
+        ok: false,
+        message: 'Unable to delete one or more backend files. Please retry.',
+      }
+    }
+
+    await Promise.allSettled(cacheKeys.map((cacheKey) => deleteCachedFileBlob(cacheKey)))
+    return {
+      ok: true,
+      message: '',
+    }
+  }
+
+  const uploadClientDocumentAsset = async ({
+    file,
+    category = 'other',
+    className = '',
+    metadata = {},
+    tags = [],
+  } = {}) => {
+    if (!scopedClientUid) {
+      throw new Error('The client account is missing a backend UID. Sign in again and retry.')
+    }
+
+    return uploadDocumentToBackend({
+      file,
+      ownerUserId: scopedClientUid,
+      category,
+      className,
+      metadata,
+      tags,
+    })
+  }
+
   const handleUpload = async ({
     category,
     folderName,
@@ -4564,122 +6667,174 @@ function App() {
         || authUser?.email
         || ''
       ).trim().toLowerCase()
+      if (!scopedClientUid) {
+        return { ok: false, message: 'The client account is missing a backend UID. Sign in again and retry.' }
+      }
       const createdAtIso = new Date().toISOString()
       const createdAtDisplay = formatClientDocumentTimestamp(createdAtIso)
       const folderId = `F-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`
       const folderToken = folderId.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-8)
       const buildFileReference = (index) => `${selectedConfig.prefix}-${folderToken}-${String(index + 1).padStart(3, '0')}`
 
-      const files = await Promise.all(uploadedItems.map(async (item, index) => {
-        const metadata = resolveFileDetails(item)
-        const classValue = String(metadata?.class || '').replace(/\s+/g, ' ').trim()
-        const classId = buildClassId(classValue)
-        const confidentialityLevel = metadata?.confidentialityLevel || 'Standard'
-        const processingPriority = metadata?.processingPriority || 'Normal'
-        const internalNotes = (metadata?.internalNotes || '').trim()
-        const vendorName = (metadata?.vendorName || '').trim()
-        const paymentMethod = String(metadata?.paymentMethod || '').trim()
-        const invoice = String(metadata?.invoice || '').trim()
-        const invoiceNumber = String(metadata?.invoiceNumber || '').trim()
-        const fileCreatedAtIso = new Date().toISOString()
-        const uploadSource = item.uploadSource || 'browse-file'
-        const fileId = buildFileReference(index)
-        const fileCacheKey = buildFileCacheKey({ ownerEmail, fileId })
-        if (item.rawFile instanceof Blob && fileCacheKey) {
-          await putCachedFileBlob(fileCacheKey, item.rawFile, { filename: item.name })
-        }
-        const previewUrl = item.previewUrl || (item.rawFile ? URL.createObjectURL(item.rawFile) : null)
-        const uploadSourceLabel = uploadSource === 'drag-drop'
-          ? 'Drag & Drop'
-          : uploadSource === 'browse-folder'
-            ? 'Browse Folder'
-            : 'Browse Files'
-        const baseFile = {
-          folderId,
-          folderName: folderName.trim(),
-          filename: item.name,
-          extension: item.extension || (item.name?.split('.').pop()?.toUpperCase() || 'FILE'),
-          status: 'Pending Review',
-          class: classValue,
-          classId,
-          className: classValue,
-          expenseClass: category === 'expenses' ? classValue : '',
-          salesClass: category === 'sales' ? classValue : '',
-          fileCacheKey,
-          previewUrl,
-          ...(category === 'expenses' ? { paymentMethod } : {}),
-          ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
-        }
+      const files = []
+      const uploadedBackendFiles = []
+      try {
+        for (let index = 0; index < uploadedItems.length; index += 1) {
+          const item = uploadedItems[index]
+          if (!(item?.rawFile instanceof Blob)) {
+            throw new Error(`"${item?.name || 'Document'}" is missing its file payload.`)
+          }
 
-        return {
-          id: `${folderId}-FILE-${String(index + 1).padStart(3, '0')}`,
-          folderId,
-          folderName: folderName.trim(),
-          fileId,
-          fileCacheKey,
-          filename: item.name,
-          extension: baseFile.extension,
-          status: 'Pending Review',
-          user: ownerName,
-          date: createdAtDisplay,
-          createdAtIso: fileCreatedAtIso,
-          updatedAtIso: fileCreatedAtIso,
-          deletedAtIso: null,
-          isDeleted: false,
-          isLocked: false,
-          lockedAtIso: null,
-          approvedBy: '',
-          approvedAtIso: null,
-          rejectedBy: '',
-          rejectedAtIso: null,
-          rejectionReason: '',
-          unlockedBy: '',
-          unlockedAtIso: null,
-          unlockReason: '',
-          class: classValue,
-          classId,
-          className: classValue,
-          expenseClass: category === 'expenses' ? classValue : '',
-          salesClass: category === 'sales' ? classValue : '',
-          vendorName,
-          confidentialityLevel,
-          processingPriority,
-          internalNotes,
-          ...(category === 'expenses' ? { paymentMethod } : {}),
-          ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
-          previewUrl,
-          rawFile: item.rawFile || null,
-          uploadSource,
-          uploadInfo: {
-            originalUploadedAtIso: fileCreatedAtIso,
-            originalUploadSource: uploadSource,
-            originalUploadedBy: ownerName,
-            device: 'Web Browser',
-            ipAddress: '--',
-            lastModifiedAtIso: fileCreatedAtIso,
-            replacements: [],
-            totalVersions: 1,
-          },
-          versions: [
-            createVersionEntry({
-              versionNumber: 1,
-              action: 'Uploaded',
-              performedBy: ownerName,
-              timestamp: fileCreatedAtIso,
-              notes: `Initial upload via ${uploadSourceLabel}.`,
-              fileSnapshot: baseFile,
-            }),
-          ],
-          activityLog: [
-            createFileActivityEntry({
-              actionType: 'upload',
-              description: `File uploaded via ${uploadSourceLabel}.`,
-              performedBy: ownerName,
-              timestamp: fileCreatedAtIso,
-            }),
-          ],
+          const metadata = resolveFileDetails(item)
+          const classValue = String(metadata?.class || '').replace(/\s+/g, ' ').trim()
+          const classId = buildClassId(classValue)
+          const confidentialityLevel = metadata?.confidentialityLevel || 'Standard'
+          const processingPriority = metadata?.processingPriority || 'Normal'
+          const internalNotes = (metadata?.internalNotes || '').trim()
+          const vendorName = (metadata?.vendorName || '').trim()
+          const paymentMethod = String(metadata?.paymentMethod || '').trim()
+          const invoice = String(metadata?.invoice || '').trim()
+          const invoiceNumber = String(metadata?.invoiceNumber || '').trim()
+          const fileCreatedAtIso = new Date().toISOString()
+          const uploadSource = item.uploadSource || 'browse-file'
+          const fileId = buildFileReference(index)
+          const fileCacheKey = buildFileCacheKey({ ownerEmail, fileId })
+          const backendDocument = await uploadClientDocumentAsset({
+            file: item.rawFile,
+            category,
+            className: classValue,
+            metadata: {
+              folderId,
+              folderName: folderName.trim(),
+              fileId,
+              ownerName,
+              ownerEmail,
+              uploadSource,
+              confidentialityLevel,
+              processingPriority,
+              internalNotes,
+              vendorName,
+              paymentMethod,
+              invoice,
+              invoiceNumber,
+            },
+          })
+
+          uploadedBackendFiles.push({
+            backendDocumentId: backendDocument?.id || '',
+            fileCacheKey,
+          })
+
+          if (fileCacheKey) {
+            await putCachedFileBlob(fileCacheKey, item.rawFile, { filename: item.name })
+          }
+
+          const previewUrl = item.previewUrl || URL.createObjectURL(item.rawFile)
+          const uploadSourceLabel = uploadSource === 'drag-drop'
+            ? 'Drag & Drop'
+            : uploadSource === 'browse-folder'
+              ? 'Browse Folder'
+              : 'Browse Files'
+          const baseFile = {
+            folderId,
+            folderName: folderName.trim(),
+            fileId,
+            filename: item.name,
+            extension: item.extension || (item.name?.split('.').pop()?.toUpperCase() || 'FILE'),
+            status: 'Pending Review',
+            class: classValue,
+            classId,
+            className: classValue,
+            expenseClass: category === 'expenses' ? classValue : '',
+            salesClass: category === 'sales' ? classValue : '',
+            fileCacheKey,
+            backendDocumentId: backendDocument?.id || '',
+            backendStorageProvider: backendDocument?.storageProvider || '',
+            backendStoragePath: backendDocument?.storagePath || '',
+            previewUrl,
+            ...(category === 'expenses' ? { paymentMethod } : {}),
+            ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
+          }
+
+          files.push({
+            id: `${folderId}-FILE-${String(index + 1).padStart(3, '0')}`,
+            folderId,
+            folderName: folderName.trim(),
+            fileId,
+            fileCacheKey,
+            filename: item.name,
+            extension: baseFile.extension,
+            status: 'Pending Review',
+            user: ownerName,
+            date: createdAtDisplay,
+            createdAtIso: fileCreatedAtIso,
+            updatedAtIso: fileCreatedAtIso,
+            deletedAtIso: null,
+            isDeleted: false,
+            isLocked: false,
+            lockedAtIso: null,
+            approvedBy: '',
+            approvedAtIso: null,
+            rejectedBy: '',
+            rejectedAtIso: null,
+            rejectionReason: '',
+            unlockedBy: '',
+            unlockedAtIso: null,
+            unlockReason: '',
+            class: classValue,
+            classId,
+            className: classValue,
+            expenseClass: category === 'expenses' ? classValue : '',
+            salesClass: category === 'sales' ? classValue : '',
+            vendorName,
+            confidentialityLevel,
+            processingPriority,
+            internalNotes,
+            ...(category === 'expenses' ? { paymentMethod } : {}),
+            ...(category === 'sales' ? { invoice, invoiceNumber } : {}),
+            backendDocumentId: backendDocument?.id || '',
+            backendStorageProvider: backendDocument?.storageProvider || '',
+            backendStoragePath: backendDocument?.storagePath || '',
+            previewUrl,
+            rawFile: item.rawFile,
+            uploadSource,
+            uploadInfo: {
+              originalUploadedAtIso: fileCreatedAtIso,
+              originalUploadSource: uploadSource,
+              originalUploadedBy: ownerName,
+              device: 'Web Browser',
+              ipAddress: '--',
+              lastModifiedAtIso: fileCreatedAtIso,
+              replacements: [],
+              totalVersions: 1,
+            },
+            versions: [
+              createVersionEntry({
+                versionNumber: 1,
+                action: 'Uploaded',
+                performedBy: ownerName,
+                timestamp: fileCreatedAtIso,
+                notes: `Initial upload via ${uploadSourceLabel}.`,
+                fileSnapshot: baseFile,
+              }),
+            ],
+            activityLog: [
+              createFileActivityEntry({
+                actionType: 'upload',
+                description: `File uploaded via ${uploadSourceLabel}.`,
+                performedBy: ownerName,
+                timestamp: fileCreatedAtIso,
+              }),
+            ],
+          })
         }
-      }))
+      } catch (error) {
+        await deleteClientDocumentArtifacts(uploadedBackendFiles)
+        return {
+          ok: false,
+          message: String(error?.message || 'Unable to upload documents right now.'),
+        }
+      }
 
       if (category === 'expenses') {
         const classValues = files.map((file) => file.class).filter(Boolean)
@@ -4847,6 +7002,9 @@ function App() {
             downloadBusinessName={downloadBusinessName}
             showToast={showClientToast}
             onRecordUploadHistory={appendFileUploadHistory}
+            onEnsureFileAvailable={ensureClientDocumentAvailable}
+            onDeleteBackendDocuments={deleteClientDocumentArtifacts}
+            onUploadDocumentToBackend={uploadClientDocumentAsset}
             globalSearchTerm={dashboardSearchTerm}
             onGlobalSearchTermChange={setDashboardSearchTerm}
           />
@@ -4866,6 +7024,7 @@ function App() {
           isImpersonatingClient={isImpersonatingClient}
           impersonationBusinessName={impersonationBusinessName}
           showToast={showClientToast}
+          onDeleteBackendDocuments={deleteClientDocumentArtifacts}
           globalSearchTerm={dashboardSearchTerm}
           onGlobalSearchTermChange={setDashboardSearchTerm}
         />
@@ -4918,6 +7077,17 @@ function App() {
             downloadBusinessName={downloadBusinessName}
             onOpenFileLocation={(categoryId, folderId) => handleOpenFolderRoute(categoryId, folderId)}
             showToast={showClientToast}
+            onEnsureFileAvailable={ensureClientDocumentAvailable}
+            globalSearchTerm={dashboardSearchTerm}
+            onGlobalSearchTermChange={setDashboardSearchTerm}
+          />
+        )
+      case 'resolved-documents':
+        return (
+          <ClientResolvedDocumentsPage
+            clientEmail={normalizedScopedClientEmail}
+            downloadBusinessName={downloadBusinessName}
+            showToast={showClientToast}
             globalSearchTerm={dashboardSearchTerm}
             onGlobalSearchTermChange={setDashboardSearchTerm}
           />
@@ -4956,9 +7126,16 @@ function App() {
             identityApprovedByAdmin={identityVerificationApprovedByAdmin}
             businessApprovedByAdmin={businessVerificationApprovedByAdmin}
             clientTeamRole={isImpersonatingClient ? 'owner' : (authUser?.clientTeamRole || 'owner')}
+            initialSettingsProfile={settingsProfileSnapshot}
+            initialVerificationDocs={verificationDocsSnapshot}
+            initialAccountSettings={accountSettingsSnapshot}
             onSettingsProfileChange={handleSettingsProfileChange}
             onVerificationDocsChange={handleSettingsVerificationDocsChange}
+            onAccountSettingsChange={handleAccountSettingsChange}
             verificationLockEnforced={isClientVerificationLocked}
+            canManageAccountSecurity={!isImpersonatingClient && !isAdminView}
+            onRequestPasswordResetLink={issuePasswordResetLink}
+            onChangePassword={handleChangePassword}
             canDeleteAccount={!isImpersonatingClient && !isAdminView}
             onDeleteAccount={handleDeleteClientAccount}
           />
@@ -4986,18 +7163,26 @@ function App() {
     : null
   const adminLoginOtpChallenge = otpChallenge?.purpose === 'admin-login' ? otpChallenge : null
   const adminSetupOtpChallenge = otpChallenge?.purpose === 'admin-setup' ? otpChallenge : null
+  const shouldShowAdminSetupScreen = Boolean(isAdminSetupRouteActive && !isAuthenticated)
 
   const needsOnboarding = isAuthenticated
     && (isImpersonatingClient || !isAdminView)
     && !onboardingState.completed
     && !onboardingState.skipped
+  const shouldShowAuthenticatedClientPublicSite = Boolean(
+    isAuthenticated
+    && !isAdminView
+    && !isImpersonatingClient
+    && !needsOnboarding
+    && isPublicSiteView,
+  )
   const shouldShowDashboardBootstrapLoader = Boolean(
     isDashboardBootstrapLoading
     && isAuthenticated
     && isAdminView
     && !showAuth
     && !showAdminLogin
-    && !adminSetupToken
+    && !isAdminSetupRouteActive
     && !isClientDashboardOverviewLoading
   )
 
@@ -5103,9 +7288,10 @@ function App() {
         </div>
       )}
 
-      {adminSetupToken ? (
+      {shouldShowAdminSetupScreen ? (
         <AdminAccountSetup
           invite={activeAdminInvite}
+          ownerBootstrapStatus={ownerBootstrapStatus}
           otpChallenge={adminSetupOtpChallenge}
           onCreateAccount={handleAdminSetupCreateAccount}
           onVerifyOtp={handleVerifyOtp}
@@ -5130,8 +7316,14 @@ function App() {
             onLogin={handleLogin}
             onSignup={handleSignup}
             onSocialLogin={handleSocialLogin}
+            pendingSocialPrompt={authMode === 'signup' ? pendingGoogleSocialAuth : null}
+            onCancelSocialNamePrompt={() => setPendingGoogleSocialAuth(null)}
             onRequestPasswordReset={handleRequestPasswordReset}
+            onResolvePasswordResetCode={handleResolvePasswordResetCode}
             onUpdatePassword={handleUpdatePassword}
+            onResendVerificationEmail={handleResendVerificationEmail}
+            onVerifyEmailAddress={handleVerifyEmailAddress}
+            verificationEmail={emailVerificationEmail}
             passwordResetEmail={passwordResetEmail}
             setPasswordResetEmail={setPasswordResetEmail}
             otpChallenge={clientOtpChallenge}
@@ -5146,8 +7338,20 @@ function App() {
             onGetStarted={() => handlePublicGetStarted()}
             onLogin={() => navigateToAuth('login')}
             onOpenAdminPortal={() => navigateToAdminLogin()}
+            isAuthenticated={false}
+            onOpenDashboard={() => handleSetActivePage('dashboard')}
           />
         )
+      ) : shouldShowAuthenticatedClientPublicSite ? (
+        <PreliminaryCorporateSite
+          activePage={publicSitePage}
+          onNavigatePage={(pageId) => navigateToPublicSitePage(pageId)}
+          onGetStarted={() => handleSetActivePage('dashboard')}
+          onLogin={() => handleSetActivePage('dashboard')}
+          onOpenAdminPortal={() => navigateToAdminLogin()}
+          isAuthenticated
+          onOpenDashboard={() => handleSetActivePage('dashboard')}
+        />
       ) : needsOnboarding ? (
         <ClientOnboardingExperience
           currentStep={onboardingState.currentStep}
@@ -5250,6 +7454,7 @@ function App() {
               companyName={companyName}
               businessCountry={clientBusinessCountry}
               isBusinessVerified={isBusinessVerificationComplete}
+              onOpenHomePage={() => navigateToPublicSitePage('home')}
               onLogout={handleLogout}
               isMobileOpen={isMobileSidebarOpen}
               onCloseMobile={() => setIsMobileSidebarOpen(false)}

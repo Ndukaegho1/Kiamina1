@@ -60,23 +60,6 @@ const REGION_ITEMS = [
   { id: 'australia', label: 'Australia', flag: '/img/flag-australia.svg' },
 ]
 
-const REGION_LOOKUP = {
-  NG: 'nigeria',
-  NIGERIA: 'nigeria',
-  CA: 'canada',
-  CANADA: 'canada',
-  US: 'united-states',
-  USA: 'united-states',
-  UNITEDSTATES: 'united-states',
-  UNITEDSTATESOFAMERICA: 'united-states',
-  GB: 'united-kingdom',
-  UK: 'united-kingdom',
-  UNITEDKINGDOM: 'united-kingdom',
-  GREATBRITAIN: 'united-kingdom',
-  AU: 'australia',
-  AUSTRALIA: 'australia',
-}
-
 const REGION_ID_SET = new Set(REGION_ITEMS.map((item) => item.id))
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -562,13 +545,6 @@ function HeroPanel({ pageKey, scrollY = 0, children }) {
   )
 }
 
-const normalizeLookupToken = (value = '') => String(value || '').replace(/[^a-z0-9]/gi, '').toUpperCase()
-
-const mapCountryToRegionId = (value = '') => {
-  const normalizedValue = normalizeLookupToken(value)
-  return REGION_LOOKUP[normalizedValue] || ''
-}
-
 const inferRegionFromClientSignals = () => {
   if (typeof window === 'undefined') return 'nigeria'
 
@@ -693,6 +669,8 @@ function PreliminaryCorporateSite({
   onGetStarted,
   onLogin,
   onOpenAdminPortal,
+  isAuthenticated = false,
+  onOpenDashboard,
 }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [regionsOpen, setRegionsOpen] = useState(false)
@@ -800,29 +778,9 @@ function PreliminaryCorporateSite({
       setIsRegionResolved(true)
     }
 
-    const resolveRegion = async () => {
-      const fallbackRegionId = inferRegionFromClientSignals()
-      try {
-        const response = await fetch('https://ipapi.co/json/')
-        if (!response.ok) {
-          applyRegion(fallbackRegionId)
-          return
-        }
-
-        const payload = await response.json()
-        const regionFromIp = mapCountryToRegionId(
-          payload?.country_name
-          || payload?.country
-          || payload?.country_code
-          || '',
-        )
-        applyRegion(regionFromIp || fallbackRegionId)
-      } catch {
-        applyRegion(fallbackRegionId)
-      }
-    }
-
-    void resolveRegion()
+    // Avoid direct browser-side geolocation calls that are frequently blocked by
+    // third-party CORS and rate limits in local development.
+    applyRegion(inferRegionFromClientSignals())
     return () => {
       isCancelled = true
     }
@@ -2594,18 +2552,24 @@ function PreliminaryCorporateSite({
           </nav>
 
           <div className="hidden items-center gap-2 xl:flex">
-            <button
-              type="button"
-              onClick={() => handleEngageService({
-                sourcePage: resolvedPage,
-                sourceId: 'header-get-started',
-                sourceLabel: 'Header Get Started',
-              })}
-              className={primaryButtonClass}
-            >
-              Get Started
-            </button>
-            <button type="button" onClick={onLogin} className={secondaryButtonClass}>Login</button>
+            {isAuthenticated ? (
+              <button type="button" onClick={onOpenDashboard} className={primaryButtonClass}>Dashboard</button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => handleEngageService({
+                    sourcePage: resolvedPage,
+                    sourceId: 'header-get-started',
+                    sourceLabel: 'Header Get Started',
+                  })}
+                  className={primaryButtonClass}
+                >
+                  Get Started
+                </button>
+                <button type="button" onClick={onLogin} className={secondaryButtonClass}>Login</button>
+              </>
+            )}
           </div>
 
           <button
@@ -2634,18 +2598,24 @@ function PreliminaryCorporateSite({
                 </button>
               ))}
               <div className="mt-2 grid gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleEngageService({
-                    sourcePage: resolvedPage,
-                    sourceId: 'mobile-get-started',
-                    sourceLabel: 'Mobile Get Started',
-                  })}
-                  className={primaryButtonClass}
-                >
-                  Get Started
-                </button>
-                <button type="button" onClick={onLogin} className={secondaryButtonClass}>Login</button>
+                {isAuthenticated ? (
+                  <button type="button" onClick={onOpenDashboard} className={primaryButtonClass}>Dashboard</button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => handleEngageService({
+                        sourcePage: resolvedPage,
+                        sourceId: 'mobile-get-started',
+                        sourceLabel: 'Mobile Get Started',
+                      })}
+                      className={primaryButtonClass}
+                    >
+                      Get Started
+                    </button>
+                    <button type="button" onClick={onLogin} className={secondaryButtonClass}>Login</button>
+                  </>
+                )}
               </div>
             </div>
           </div>

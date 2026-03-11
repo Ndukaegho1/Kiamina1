@@ -26,7 +26,7 @@ const documentSchema = new mongoose.Schema(
     },
     storageProvider: {
       type: String,
-      enum: ["firebase", "s3", "local", "unknown"],
+      enum: ["mongodb", "firebase", "s3", "local", "unknown"],
       default: "unknown"
     },
     storagePath: {

@@ -134,6 +134,37 @@ export const recordAuthLoginSession = async ({
   return response
 }
 
+export const fetchSocialAuthAccountStatus = async ({
+  idToken = '',
+  provider = 'google',
+} = {}) => (
+  postJson('/api/auth/social-account-status', {
+    idToken: String(idToken || '').trim(),
+    provider: String(provider || 'google').trim().toLowerCase(),
+  })
+)
+
+export const syncAuthenticatedUserToBackend = async ({
+  authorizationToken = '',
+  uid = '',
+  email = '',
+  displayName = '',
+  roles = [],
+} = {}) => (
+  postJson('/api/users/sync-from-auth', {
+    uid: String(uid || '').trim(),
+    email: String(email || '').trim().toLowerCase(),
+    displayName: String(displayName || '').trim(),
+    roles: Array.isArray(roles)
+      ? roles
+        .map((role) => String(role || '').trim().toLowerCase())
+        .filter(Boolean)
+      : [],
+  }, {
+    authorizationToken: String(authorizationToken || '').trim(),
+  })
+)
+
 export const persistClientOnboardingToBackend = async ({
   authorizationToken = '',
   email = '',

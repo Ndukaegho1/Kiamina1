@@ -27,7 +27,7 @@ This folder contains a microservice-ready backend structure using:
 5. Each service owns its own Mongo database (`kiamina_auth`, `kiamina_users`, etc.).
 6. Add Upstash rate limiting and queue integrations where needed.
 7. Add Arcjet checks on internet-facing routes in the gateway and auth flows.
-8. Enforce RBAC at service level (owner vs admin operations).
+8. Service-level RBAC is enforced (owner vs admin operations); continue layering finer permission scopes by admin level.
 9. Deploy each service independently on Render.
 
 ## Local run
@@ -87,6 +87,10 @@ Gateway auth policy:
   - `POST /api/v1/auth/send-password-reset-link`
   - `POST /api/v1/auth/verify-otp`
   - `POST /api/v1/auth/verify-token`
+  - `POST /api/v1/notifications/support/public/tickets`
+  - `GET /api/v1/notifications/support/public/tickets`
+  - `GET /api/v1/notifications/support/public/tickets/:ticketId/messages`
+  - `POST /api/v1/notifications/support/public/tickets/:ticketId/messages`
 - Protected:
   - Any other `/api/v1/auth/*` route not listed above
   - All `/api/v1/users/*`
@@ -136,6 +140,8 @@ Then call:
 - `POST /auth/register-account`
 - `POST /auth/login-session`
 - `POST /auth/logout-session`
+- `DELETE /auth/account`
+- `DELETE /auth/account/:uid` (owner/superadmin only)
 - `POST /auth/refresh-token`
 - `POST /auth/send-otp`
 - `POST /auth/send-password-reset-link`
@@ -144,6 +150,7 @@ Then call:
 - `POST /auth/verify-sms-otp`
 - `POST /auth/verify-token`
 - `GET /users/me`
+- `DELETE /users/me` (cascades user profile + owned documents/records + auth account)
 - `PATCH /users/me/profile`
 - `GET /users/me/client-dashboard`
 - `GET /users/me/client-dashboard/overview`
@@ -157,7 +164,9 @@ Then call:
 - `POST /documents/upload` (multipart field: `file`)
 - `GET /documents/owner/:ownerUserId`
 - `GET /documents/owner/:ownerUserId/summary`
+- `DELETE /documents/owner/:ownerUserId` (self or privileged admin)
 - `GET /documents/:id/download-url`
+- `GET /documents/:id/download`
 - `POST /documents/records`
 - `POST /documents/records/import` (multipart field: `file`)
 - `GET /documents/records`
@@ -172,6 +181,10 @@ Then call:
 - `PATCH /notifications/support/tickets/:ticketId`
 - `GET /notifications/support/tickets/:ticketId/messages`
 - `POST /notifications/support/tickets/:ticketId/messages`
+- `POST /notifications/support/public/tickets` (anonymous session-based)
+- `GET /notifications/support/public/tickets?sessionId=...` (anonymous session-based)
+- `GET /notifications/support/public/tickets/:ticketId/messages?sessionId=...` (anonymous session-based)
+- `POST /notifications/support/public/tickets/:ticketId/messages` (anonymous session-based)
 - `POST /notifications/chatbot/sessions`
 - `GET /notifications/chatbot/sessions`
 - `GET /notifications/chatbot/sessions/:sessionId`
@@ -197,10 +210,7 @@ Postman contract notes:
 
 Documents service:
 
-- `GOOGLE_APPLICATION_CREDENTIALS` or `FIREBASE_SERVICE_ACCOUNT_JSON`
-- `FIREBASE_STORAGE_BUCKET`
 - `DOCUMENT_UPLOAD_MAX_MB` (default `15`)
-- `SIGNED_URL_EXPIRES_MINUTES` (default `30`)
 - `DELETE_STORAGE_OBJECT_ON_RECORD_DELETE` (default `true`)
 
 Notifications service:
@@ -217,6 +227,8 @@ Notifications service:
 
 Users service:
 
+- `AUTH_SERVICE_URL`
+- `AUTH_SERVICE_TIMEOUT_MS`
 - `NOTIFICATIONS_SERVICE_URL`
 - `NOTIFICATIONS_SERVICE_TIMEOUT_MS`
 - `NOTIFICATIONS_SERVICE_EVENT_TOKEN` (must match notifications `REALTIME_EVENTS_SERVICE_TOKEN`)

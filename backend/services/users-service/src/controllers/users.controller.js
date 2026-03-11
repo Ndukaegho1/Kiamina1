@@ -1,6 +1,8 @@
 import {
   deleteUser,
+  deleteUserForUid,
   ensureUserFromActor,
+  getClientPhoneAvailability,
   getClientManagementClientByUidForAdmin,
   listClientManagementClientsForAdmin,
   getAdminDashboardByUid,
@@ -17,7 +19,11 @@ import {
   syncUserFromAuth,
   updateUser
 } from "../services/users.service.js";
-import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
+import {
+  getRequestActor,
+  isAdminActor,
+  isElevatedAdminActor
+} from "../utils/request-actor.js";
 import {
   buildAdminClientManagementUpdatePayload,
   buildAdminDashboardUpdatePayload,
@@ -28,6 +34,30 @@ import {
   validateAdminClientManagementListQuery,
   validateSyncFromAuthPayload
 } from "../validation/users.validation.js";
+
+const resolveAccountDeletionReason = (source, fallback = "account-deleted") => {
+  const payload = source && typeof source === "object" ? source : {};
+  const rawReason =
+    payload.reason ||
+    payload.retentionIntent ||
+    payload.reasonOther ||
+    fallback;
+  const normalized = String(rawReason || "").trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized.slice(0, 120);
+};
+
+export const getPublicPhoneAvailability = async (req, res, next) => {
+  try {
+    const phoneNumber = String(req.query?.phoneNumber || req.query?.phone || "").trim();
+    const result = await getClientPhoneAvailability({ phoneNumber });
+    return res.status(result.available ? 200 : 409).json(result);
+  } catch (error) {
+    return next(error);
+  }
+};
 
 export const syncFromAuth = async (req, res, next) => {
   try {
@@ -88,6 +118,37 @@ export const getMe = async (req, res, next) => {
     }
 
     return res.status(200).json(user);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const removeMe = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    const reason = resolveAccountDeletionReason(req.body, "account-deleted");
+    const deleted = await deleteUserForUid({
+      uid: actor.uid,
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      reason
+    });
+    if (!deleted?.user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json({
+      message: "User deleted successfully.",
+      uid: actor.uid,
+      cascade: deleted.cascade || {}
+    });
   } catch (error) {
     return next(error);
   }
@@ -382,6 +443,49 @@ export const patchAdminClientManagementClient = async (req, res, next) => {
   }
 };
 
+export const deleteAdminClientManagementClient = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can delete client accounts." });
+    }
+    if (!isElevatedAdminActor(actor)) {
+      return res.status(403).json({ message: "Only owner or superadmin users can delete client accounts." });
+    }
+
+    const uid = String(req.params.uid || "").trim();
+    if (!uid) {
+      return res.status(400).json({ message: "uid is required." });
+    }
+
+    const reason = resolveAccountDeletionReason(req.body, "admin-client-account-deleted");
+    const deleted = await deleteUserForUid({
+      uid,
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      reason
+    });
+    if (!deleted?.user) {
+      return res.status(404).json({ message: "Client account not found" });
+    }
+
+    return res.status(200).json({
+      message: "Client account deleted successfully.",
+      uid: deleted.user.uid,
+      cascade: deleted.cascade || {}
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const getMeAdminDashboard = async (req, res, next) => {
   try {
     const actor = getRequestActor(req);
@@ -541,15 +645,27 @@ export const removeById = async (req, res, next) => {
     if (!isAdminActor(actor)) {
       return res.status(403).json({ message: "Only admin users can delete accounts." });
     }
+    if (!isElevatedAdminActor(actor)) {
+      return res.status(403).json({ message: "Only owner or superadmin users can delete other accounts." });
+    }
 
-    const deleted = await deleteUser(req.params.id);
-    if (!deleted) {
+    const reason = resolveAccountDeletionReason(req.body, "admin-account-deleted");
+    const deleted = await deleteUser({
+      id: req.params.id,
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      reason
+    });
+    if (!deleted?.user) {
       return res.status(404).json({ message: "User not found" });
     }
 
     return res.status(200).json({
       message: "User deleted successfully.",
-      id: deleted.id
+      id: deleted.user.id,
+      uid: deleted.user.uid,
+      cascade: deleted.cascade || {}
     });
   } catch (error) {
     return next(error);

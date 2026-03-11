@@ -1,7 +1,8 @@
 import {
   countUsers,
-  deleteUserById,
+  deleteUserByUid,
   findUserByEmail,
+  findUserByClientPhone,
   findUserById,
   findUserByUid,
   listUsers,
@@ -24,8 +25,34 @@ const CLIENT_MANAGEMENT_SORT_FIELDS = Object.freeze({
   verificationStatus: "verification.status"
 });
 
-export const syncUserFromAuth = async ({ uid, email, displayName, roles }) =>
-  upsertUserFromAuth({ uid, email, displayName, roles });
+export const syncUserFromAuth = async ({ uid, email, displayName, roles }) => {
+  const normalizedUid = String(uid || "").trim();
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const existingUser =
+    (normalizedUid ? await findUserByUid(normalizedUid) : null) ||
+    (normalizedEmail ? await findUserByEmail(normalizedEmail) : null);
+
+  const user = await upsertUserFromAuth({ uid, email, displayName, roles });
+
+  if (user && !existingUser && isClientUser(user)) {
+    void emitUsersRealtimeEvent({
+      eventType: "admin.client-management.updated",
+      actorUid: user.uid,
+      actorEmail: user.email,
+      actorRoles: Array.isArray(user.roles) ? user.roles : [CLIENT_ROLE],
+      audienceUserIds: [user.uid],
+      audienceRoles: ADMIN_EVENT_ROLES,
+      payload: {
+        uid: user.uid,
+        status: user.status || "active",
+        verificationStatus: user.verification?.status || "pending",
+        assignedToUid: String(user.clientWorkspace?.statusControl?.assignedToUid || "").trim()
+      }
+    });
+  }
+
+  return user;
+};
 
 export const getMeByUid = async (uid) => findUserByUid(uid);
 
@@ -33,7 +60,7 @@ export const getUserById = async (id) => findUserById(id);
 
 export const updateUser = async ({ id, payload }) => updateUserById(id, payload);
 
-export const deleteUser = async (id) => deleteUserById(id);
+const SUPPORTED_PHONE_COUNTRY_CODES = ["+234", "+44", "+61", "+1"];
 
 const toTitleCaseWords = (value = "") =>
   String(value || "")
@@ -86,6 +113,379 @@ const toLowerRoles = (roles = []) =>
 
 const isClientUser = (user = {}) =>
   toLowerRoles(user.roles).includes(CLIENT_ROLE);
+
+const createHttpError = (status, message, details = null) => {
+  const error = new Error(message);
+  error.status = status;
+  if (details && typeof details === "object") {
+    error.details = details;
+  }
+  return error;
+};
+
+const sanitizePhoneDigits = (value = "") =>
+  String(value || "").replace(/\D/g, "");
+
+const PHONE_LOCAL_NUMBER_PATTERN = /^\d{10,11}$/;
+
+const normalizeLocalPhoneDigits = (value = "") => {
+  const rawDigits = sanitizePhoneDigits(value);
+  if (!PHONE_LOCAL_NUMBER_PATTERN.test(rawDigits)) {
+    return {
+      rawDigits,
+      localDigits: "",
+      valid: false
+    };
+  }
+  return {
+    rawDigits,
+    localDigits:
+      rawDigits.length === 11 && rawDigits.startsWith("0")
+        ? rawDigits.slice(1)
+        : rawDigits,
+    valid: true
+  };
+};
+
+const resolvePhoneCountryCodeFromRaw = (value = "") => {
+  const raw = String(value || "").trim();
+  if (!raw.startsWith("+")) {
+    return "";
+  }
+
+  const supportedMatch = SUPPORTED_PHONE_COUNTRY_CODES
+    .slice()
+    .sort((left, right) => right.length - left.length)
+    .find((code) => raw.startsWith(code));
+  if (supportedMatch) {
+    return supportedMatch;
+  }
+
+  const fallbackMatch = raw.match(/^\+\d{1,4}/);
+  return fallbackMatch ? fallbackMatch[0] : "";
+};
+
+const normalizePhoneIdentity = ({
+  phoneCountryCode = "",
+  phoneLocalNumber = "",
+  phone = "",
+  fallbackCountryCode = "+234"
+} = {}) => {
+  const explicitCountryCode = String(phoneCountryCode || "").trim();
+  const localPhoneInfo = normalizeLocalPhoneDigits(phoneLocalNumber);
+  const localDigits = localPhoneInfo.localDigits;
+  const rawPhone = String(phone || "").trim();
+
+  if (localPhoneInfo.rawDigits) {
+    if (!localPhoneInfo.valid) {
+      return {
+        phoneCountryCode: explicitCountryCode || fallbackCountryCode,
+        phoneLocalNumber: "",
+        compactPhone: "",
+        displayPhone: "",
+        variants: [],
+        valid: false,
+        rawDigits: localPhoneInfo.rawDigits
+      };
+    }
+    const resolvedCountryCode = explicitCountryCode || fallbackCountryCode;
+    const compactPhone = `${resolvedCountryCode}${localDigits}`.replace(/\s+/g, "");
+    const displayPhone = `${resolvedCountryCode} ${localDigits}`.trim();
+    const legacyCompactPhone =
+      localPhoneInfo.rawDigits && localPhoneInfo.rawDigits !== localDigits
+        ? `${resolvedCountryCode}${localPhoneInfo.rawDigits}`.replace(/\s+/g, "")
+        : "";
+    const legacyDisplayPhone =
+      localPhoneInfo.rawDigits && localPhoneInfo.rawDigits !== localDigits
+        ? `${resolvedCountryCode} ${localPhoneInfo.rawDigits}`.trim()
+        : "";
+    return {
+      phoneCountryCode: resolvedCountryCode,
+      phoneLocalNumber: localDigits,
+      compactPhone,
+      displayPhone,
+      variants: [...new Set([compactPhone, displayPhone, legacyCompactPhone, legacyDisplayPhone].filter(Boolean))],
+      valid: true,
+      rawDigits: localPhoneInfo.rawDigits
+    };
+  }
+
+  if (!rawPhone) {
+    return {
+      phoneCountryCode: explicitCountryCode || fallbackCountryCode,
+      phoneLocalNumber: "",
+      compactPhone: "",
+      displayPhone: "",
+      variants: [],
+      valid: true,
+      rawDigits: ""
+    };
+  }
+
+  const compactRawPhone = rawPhone.replace(/\s+/g, "");
+  const compactRawDigits = sanitizePhoneDigits(compactRawPhone);
+  const resolvedCountryCode =
+    explicitCountryCode || resolvePhoneCountryCodeFromRaw(rawPhone) || fallbackCountryCode;
+  const countryDigits = sanitizePhoneDigits(resolvedCountryCode);
+  const derivedLocalPhoneInfo = normalizeLocalPhoneDigits(
+    countryDigits && compactRawDigits.startsWith(countryDigits)
+      ? compactRawDigits.slice(countryDigits.length)
+      : compactRawDigits
+  );
+  const derivedLocalDigits = derivedLocalPhoneInfo.localDigits;
+  if (!derivedLocalPhoneInfo.valid) {
+    return {
+      phoneCountryCode: resolvedCountryCode,
+      phoneLocalNumber: "",
+      compactPhone: "",
+      displayPhone: "",
+      variants: [],
+      valid: false,
+      rawDigits: derivedLocalPhoneInfo.rawDigits
+    };
+  }
+  const compactPhone = derivedLocalDigits ? `${resolvedCountryCode}${derivedLocalDigits}` : "";
+  const displayPhone = derivedLocalDigits ? `${resolvedCountryCode} ${derivedLocalDigits}`.trim() : "";
+  const legacyCompactPhone =
+    derivedLocalPhoneInfo.rawDigits && derivedLocalPhoneInfo.rawDigits !== derivedLocalDigits
+      ? `${resolvedCountryCode}${derivedLocalPhoneInfo.rawDigits}`.replace(/\s+/g, "")
+      : "";
+  const legacyDisplayPhone =
+    derivedLocalPhoneInfo.rawDigits && derivedLocalPhoneInfo.rawDigits !== derivedLocalDigits
+      ? `${resolvedCountryCode} ${derivedLocalPhoneInfo.rawDigits}`.trim()
+      : "";
+
+  return {
+    phoneCountryCode: resolvedCountryCode,
+    phoneLocalNumber: derivedLocalDigits,
+    compactPhone,
+    displayPhone,
+    variants: [...new Set([compactRawPhone, compactPhone, displayPhone, legacyCompactPhone, legacyDisplayPhone].filter(Boolean))],
+    valid: true,
+    rawDigits: derivedLocalPhoneInfo.rawDigits
+  };
+};
+
+const assertClientPhoneAvailable = async ({
+  uid = "",
+  phoneCountryCode = "",
+  phoneLocalNumber = "",
+  phone = ""
+} = {}) => {
+  const normalizedPhone = normalizePhoneIdentity({
+    phoneCountryCode,
+    phoneLocalNumber,
+    phone
+  });
+
+  const attemptedPhoneInput = Boolean(
+    String(phoneCountryCode || "").trim()
+      || String(phoneLocalNumber || "").trim()
+      || String(phone || "").trim()
+  );
+
+  if (attemptedPhoneInput && !normalizedPhone.valid) {
+    throw createHttpError(400, "Phone number must be 10 or 11 digits.");
+  }
+
+  if (!normalizedPhone.phoneLocalNumber) {
+    return normalizedPhone;
+  }
+
+  const existingUser = await findUserByClientPhone({
+    excludeUid: uid,
+    phoneCountryCode: normalizedPhone.phoneCountryCode,
+    phoneLocalNumber: normalizedPhone.phoneLocalNumber,
+    phoneVariants: normalizedPhone.variants
+  });
+  if (existingUser) {
+    throw createHttpError(409, "This phone number is already assigned to another account.");
+  }
+
+  return normalizedPhone;
+};
+
+export const getClientPhoneAvailability = async ({ phoneNumber = "" } = {}) => {
+  const normalizedPhone = normalizePhoneIdentity({ phone: phoneNumber });
+  if (!normalizedPhone.valid || !normalizedPhone.phoneLocalNumber) {
+    return {
+      available: false,
+      phoneNumber: "",
+      message: "Phone number must be 10 or 11 digits."
+    };
+  }
+
+  const existingUser = await findUserByClientPhone({
+    phoneCountryCode: normalizedPhone.phoneCountryCode,
+    phoneLocalNumber: normalizedPhone.phoneLocalNumber,
+    phoneVariants: normalizedPhone.variants
+  });
+
+  return {
+    available: !existingUser,
+    phoneNumber: normalizedPhone.compactPhone || normalizedPhone.displayPhone,
+    message: existingUser
+      ? "This phone number is already assigned to another account."
+      : "Phone number is available."
+  };
+};
+
+const requestServiceJson = async ({
+  url,
+  method = "GET",
+  headers = {},
+  body = null,
+  timeoutMs = 6000
+}) => {
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    abortController.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method,
+      headers,
+      body,
+      signal: abortController.signal
+    });
+    const data = await response.json().catch(() => null);
+    const message = String(data?.message || "").trim();
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+      message
+    };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return {
+        ok: false,
+        status: 0,
+        data: null,
+        message: "request-timeout"
+      };
+    }
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      message: String(error?.message || "network-request-failed")
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
+const purgeDocumentsForOwner = async ({
+  ownerUserId,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = []
+}) => {
+  if (!ownerUserId) {
+    return {
+      attempted: false,
+      skipped: true,
+      reason: "missing-owner-user-id"
+    };
+  }
+
+  if (!env.documentsServiceUrl) {
+    return {
+      attempted: false,
+      skipped: true,
+      reason: "documents-service-url-not-configured"
+    };
+  }
+
+  const response = await requestServiceJson({
+    url: `${env.documentsServiceUrl}/api/v1/documents/owner/${encodeURIComponent(ownerUserId)}`,
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-id": String(actorUid || ownerUserId),
+      "x-user-email": String(actorEmail || ""),
+      "x-user-roles": Array.isArray(actorRoles) ? actorRoles.join(",") : ""
+    },
+    timeoutMs: env.documentsServiceTimeoutMs
+  });
+
+  if (!response.ok) {
+    const statusCode = response.status || 502;
+    const statusMessage = statusCode === 403 ? "not-authorized-to-purge-documents" : "documents-purge-failed";
+    throw createHttpError(statusCode, response.message || statusMessage, {
+      ownerUserId,
+      statusCode,
+      reason: response.message || statusMessage
+    });
+  }
+
+  return {
+    attempted: true,
+    skipped: false,
+    ownerUserId,
+    deletedDocuments: Number(response.data?.deletedDocuments || 0),
+    deletedAccountingRecords: Number(response.data?.deletedAccountingRecords || 0),
+    deletedStorageObjects: Number(response.data?.deletedStorageObjects || 0),
+    failedStorageObjectDeletes: Number(response.data?.failedStorageObjectDeletes || 0)
+  };
+};
+
+const deleteAuthAccountForUid = async ({
+  targetUid,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = [],
+  reason = "account-deleted"
+}) => {
+  if (!targetUid || !env.authServiceUrl) {
+    return {
+      attempted: false,
+      skipped: true,
+      reason: !targetUid ? "missing-target-uid" : "auth-service-url-not-configured"
+    };
+  }
+
+  const normalizedTargetUid = String(targetUid).trim();
+  const normalizedActorUid = String(actorUid || normalizedTargetUid).trim();
+  const normalizedReason = String(reason || "").trim() || "account-deleted";
+  const actorIsTarget = normalizedActorUid === normalizedTargetUid;
+  const path = actorIsTarget
+    ? "/api/v1/auth/account"
+    : `/api/v1/auth/account/${encodeURIComponent(normalizedTargetUid)}`;
+
+  const response = await requestServiceJson({
+    url: `${env.authServiceUrl}${path}`,
+    method: "DELETE",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-id": normalizedActorUid,
+      "x-user-email": String(actorEmail || ""),
+      "x-user-roles": Array.isArray(actorRoles) ? actorRoles.join(",") : ""
+    },
+    body: JSON.stringify({
+      reason: normalizedReason
+    }),
+    timeoutMs: env.authServiceTimeoutMs
+  });
+
+  if (!response.ok && response.status !== 404) {
+    throw createHttpError(response.status || 502, response.message || "auth-account-deletion-failed", {
+      targetUid: normalizedTargetUid,
+      statusCode: response.status || 502,
+      reason: response.message || "auth-account-deletion-failed"
+    });
+  }
+
+  return {
+    attempted: true,
+    skipped: false,
+    targetUid: normalizedTargetUid,
+    deleted: response.status === 404 ? false : Boolean(response.data?.deleted !== false),
+    revokedSessionCount: Number(response.data?.revokedSessionCount || 0)
+  };
+};
 
 const normalizeSearchTerm = (value = "") => String(value || "").trim();
 const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -231,6 +631,113 @@ const emitUsersRealtimeEvent = async ({
   } catch (error) {
     console.error("users-service realtime emit warning:", error.message);
   }
+};
+
+const normalizeDeletionReason = (value = "", fallback = "account-deleted") => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized.slice(0, 120);
+};
+
+const deleteUserCascadeForTargetUid = async ({
+  targetUid,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = [],
+  reason = "account-deleted"
+}) => {
+  const normalizedTargetUid = String(targetUid || "").trim();
+  if (!normalizedTargetUid) {
+    throw createHttpError(400, "Target uid is required for deletion.");
+  }
+
+  const existingUser = await findUserByUid(normalizedTargetUid);
+  if (!existingUser) {
+    return null;
+  }
+
+  const normalizedReason = normalizeDeletionReason(reason, "account-deleted");
+  const cascadeResult = {
+    user: null,
+    cascade: {
+      documents: null,
+      auth: null
+    }
+  };
+
+  cascadeResult.cascade.documents = await purgeDocumentsForOwner({
+    ownerUserId: normalizedTargetUid,
+    actorUid: actorUid || normalizedTargetUid,
+    actorEmail,
+    actorRoles
+  });
+
+  cascadeResult.cascade.auth = await deleteAuthAccountForUid({
+    targetUid: normalizedTargetUid,
+    actorUid: actorUid || normalizedTargetUid,
+    actorEmail,
+    actorRoles,
+    reason: normalizedReason
+  });
+
+  const deletedUser = await deleteUserByUid(normalizedTargetUid);
+  if (!deletedUser) {
+    throw createHttpError(409, "Account deletion conflict. Please retry.");
+  }
+  cascadeResult.user = deletedUser;
+
+  void emitUsersRealtimeEvent({
+    eventType: "user.account.deleted",
+    actorUid: actorUid || normalizedTargetUid,
+    actorEmail,
+    actorRoles,
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid: normalizedTargetUid,
+      email: deletedUser.email || "",
+      reason: normalizedReason
+    }
+  });
+
+  return cascadeResult;
+};
+
+export const deleteUserForUid = async ({
+  uid,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = [],
+  reason = "account-deleted"
+}) =>
+  deleteUserCascadeForTargetUid({
+    targetUid: uid,
+    actorUid,
+    actorEmail,
+    actorRoles,
+    reason
+  });
+
+export const deleteUser = async ({
+  id,
+  actorUid = "",
+  actorEmail = "",
+  actorRoles = [],
+  reason = "admin-account-deleted"
+}) => {
+  const existingUser = await findUserById(id);
+  if (!existingUser) {
+    return null;
+  }
+
+  return deleteUserCascadeForTargetUid({
+    targetUid: existingUser.uid,
+    actorUid,
+    actorEmail,
+    actorRoles,
+    reason
+  });
 };
 
 const fetchDocumentSummaryByOwner = async ({ ownerUserId, actorEmail = "", actorRoles = [] }) => {
@@ -442,7 +949,16 @@ export const updateClientProfileByUid = async ({
     payload["clientProfile.phoneLocalNumber"] !== undefined
       ? payload["clientProfile.phoneLocalNumber"]
       : existingUser.clientProfile?.phoneLocalNumber || "";
-  const composedPhone = phoneLocalNumber ? `${phoneCountryCode} ${phoneLocalNumber}`.trim() : "";
+  const rawPhoneValue =
+    payload["clientProfile.phone"] !== undefined
+      ? payload["clientProfile.phone"]
+      : existingUser.clientProfile?.phone || "";
+  const normalizedPhone = await assertClientPhoneAvailable({
+    uid,
+    phoneCountryCode,
+    phoneLocalNumber,
+    phone: rawPhoneValue
+  });
 
   const nextPayload = {
     ...payload,
@@ -451,9 +967,9 @@ export const updateClientProfileByUid = async ({
     "clientProfile.otherNames": normalizedOtherNames,
     "clientProfile.fullName": fullName,
     displayName: fullName || existingUser.displayName || "",
-    "clientProfile.phoneCountryCode": phoneCountryCode,
-    "clientProfile.phoneLocalNumber": phoneLocalNumber,
-    "clientProfile.phone": composedPhone
+    "clientProfile.phoneCountryCode": normalizedPhone.phoneCountryCode,
+    "clientProfile.phoneLocalNumber": normalizedPhone.phoneLocalNumber,
+    "clientProfile.phone": normalizedPhone.displayPhone
   };
 
   const businessName =
@@ -477,6 +993,71 @@ export const updateClientProfileByUid = async ({
   nextPayload["clientDashboard.companyName"] = businessName;
   nextPayload["clientDashboard.businessCountry"] = businessCountry;
   nextPayload["clientDashboard.baseCurrency"] = baseCurrency;
+  nextPayload["clientWorkspace.updatedAt"] = new Date();
+  nextPayload["clientWorkspace.settingsProfile.firstName"] = normalizedFirstName;
+  nextPayload["clientWorkspace.settingsProfile.lastName"] = normalizedLastName;
+  nextPayload["clientWorkspace.settingsProfile.otherNames"] = normalizedOtherNames;
+  nextPayload["clientWorkspace.settingsProfile.fullName"] = fullName;
+  nextPayload["clientWorkspace.settingsProfile.email"] = existingUser.email || actorEmail || "";
+  nextPayload["clientWorkspace.settingsProfile.phoneCountryCode"] = normalizedPhone.phoneCountryCode;
+  nextPayload["clientWorkspace.settingsProfile.phoneLocalNumber"] = normalizedPhone.phoneLocalNumber;
+  nextPayload["clientWorkspace.settingsProfile.phone"] = normalizedPhone.displayPhone;
+  nextPayload["clientWorkspace.settingsProfile.roleInCompany"] =
+    nextPayload["clientProfile.roleInCompany"] !== undefined
+      ? nextPayload["clientProfile.roleInCompany"]
+      : existingUser.clientProfile?.roleInCompany || "";
+  nextPayload["clientWorkspace.settingsProfile.address1"] =
+    nextPayload["clientProfile.address1"] !== undefined
+      ? nextPayload["clientProfile.address1"]
+      : existingUser.clientProfile?.address1 || "";
+  nextPayload["clientWorkspace.settingsProfile.address2"] =
+    nextPayload["clientProfile.address2"] !== undefined
+      ? nextPayload["clientProfile.address2"]
+      : existingUser.clientProfile?.address2 || "";
+  nextPayload["clientWorkspace.settingsProfile.city"] =
+    nextPayload["clientProfile.city"] !== undefined
+      ? nextPayload["clientProfile.city"]
+      : existingUser.clientProfile?.city || "";
+  nextPayload["clientWorkspace.settingsProfile.postalCode"] =
+    nextPayload["clientProfile.postalCode"] !== undefined
+      ? nextPayload["clientProfile.postalCode"]
+      : existingUser.clientProfile?.postalCode || "";
+  nextPayload["clientWorkspace.settingsProfile.addressCountry"] =
+    nextPayload["clientProfile.addressCountry"] !== undefined
+      ? nextPayload["clientProfile.addressCountry"]
+      : existingUser.clientProfile?.addressCountry || "Nigeria";
+  nextPayload["clientWorkspace.settingsProfile.businessType"] = businessType;
+  nextPayload["clientWorkspace.settingsProfile.businessName"] = businessName;
+  nextPayload["clientWorkspace.settingsProfile.country"] = businessCountry;
+  nextPayload["clientWorkspace.settingsProfile.currency"] = baseCurrency;
+  nextPayload["clientWorkspace.settingsProfile.language"] =
+    nextPayload["clientProfile.language"] !== undefined
+      ? nextPayload["clientProfile.language"]
+      : existingUser.clientProfile?.language || "English";
+  nextPayload["clientWorkspace.settingsProfile.industry"] =
+    nextPayload["entityProfile.industry"] !== undefined
+      ? nextPayload["entityProfile.industry"]
+      : existingUser.entityProfile?.industry || "";
+  nextPayload["clientWorkspace.settingsProfile.industryOther"] =
+    nextPayload["entityProfile.industryOther"] !== undefined
+      ? nextPayload["entityProfile.industryOther"]
+      : existingUser.entityProfile?.industryOther || "";
+  nextPayload["clientWorkspace.settingsProfile.cacNumber"] =
+    nextPayload["entityProfile.cacNumber"] !== undefined
+      ? nextPayload["entityProfile.cacNumber"]
+      : existingUser.entityProfile?.cacNumber || "";
+  nextPayload["clientWorkspace.settingsProfile.tin"] =
+    nextPayload["entityProfile.tin"] !== undefined
+      ? nextPayload["entityProfile.tin"]
+      : existingUser.entityProfile?.tin || "";
+  nextPayload["clientWorkspace.settingsProfile.reportingCycle"] =
+    nextPayload["entityProfile.reportingCycle"] !== undefined
+      ? nextPayload["entityProfile.reportingCycle"]
+      : existingUser.entityProfile?.reportingCycle || "";
+  nextPayload["clientWorkspace.settingsProfile.startMonth"] =
+    nextPayload["entityProfile.startMonth"] !== undefined
+      ? nextPayload["entityProfile.startMonth"]
+      : existingUser.entityProfile?.startMonth || "";
 
   const profileStepCompleted = deriveProfileStepCompleted({
     firstName: normalizedFirstName,

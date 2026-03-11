@@ -10,6 +10,7 @@ export const ADMIN_PAGE_IDS = [
   'admin-client-profile',
   'admin-client-documents',
   'admin-client-upload-history',
+  'admin-client-resolved-documents',
   'admin-work-hours',
   'admin-insights',
   'admin-activity',

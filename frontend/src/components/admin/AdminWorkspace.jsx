@@ -8,6 +8,7 @@ import {
   AdminClientProfilePage,
   AdminClientDocumentsPage,
   AdminClientUploadHistoryPage,
+  AdminClientResolvedDocumentsPage,
   AdminDocumentReviewCenter,
   AdminSupportLeadsPage,
   AdminTrashPage,
@@ -34,6 +35,7 @@ import {
   filterClientsForAdminScope,
   getAssignedClientEmailSetForAdmin,
 } from './adminAssignments'
+import { subscribeToRealtimeEvents } from '../../utils/clientBackendBridge'
 
 const defaultAdminNotifications = []
 
@@ -62,6 +64,19 @@ const safeParseJson = (rawValue, fallback) => {
   } catch {
     return fallback
   }
+}
+
+const formatAdminRealtimeTimestamp = (value = '') => {
+  const parsed = Date.parse(value || '')
+  const sourceDate = Number.isFinite(parsed) ? new Date(parsed) : new Date()
+  return sourceDate.toLocaleString('en-US', {
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  })
 }
 
 const isAdminAccount = (account = {}) => {
@@ -440,7 +455,12 @@ function AdminWorkspace({
     if (!selectedClientContext?.email) return
     if (canAdminAccessClientScope(currentAdminAccount || {}, selectedClientContext.email)) return
     setSelectedClientContext(null)
-    if (activePage === 'admin-client-profile' || activePage === 'admin-client-documents' || activePage === 'admin-client-upload-history') {
+    if (
+      activePage === 'admin-client-profile'
+      || activePage === 'admin-client-documents'
+      || activePage === 'admin-client-upload-history'
+      || activePage === 'admin-client-resolved-documents'
+    ) {
       setActivePage('admin-clients')
     }
   }, [activePage, currentAdminAccount, selectedClientContext, setActivePage])
@@ -506,6 +526,60 @@ function AdminWorkspace({
     slowRuntimeVisibleRef.current = isSlowRuntimeOverlayVisible
   }, [isSlowRuntimeOverlayVisible])
 
+  useEffect(() => {
+    if (!currentAdminEmail) return
+    const subscription = subscribeToRealtimeEvents({
+      scope: 'all',
+      topics: ['support', 'chatbot', 'notifications', 'users'],
+      onEvent: (event = {}) => {
+        const eventType = String(event?.eventType || '').trim().toLowerCase()
+        if (!eventType) return
+        const payload = event?.payload && typeof event.payload === 'object' ? event.payload : {}
+
+        let message = ''
+        if (eventType.startsWith('support.ticket.')) {
+          message = eventType.endsWith('.created')
+            ? 'New support ticket created.'
+            : 'Support ticket updated.'
+        } else if (eventType === 'support.message.created') {
+          message = 'New support message received.'
+        } else if (eventType.startsWith('chatbot.')) {
+          message = 'Chatbot conversation updated.'
+        } else if (eventType.startsWith('notifications.')) {
+          message = String(payload?.message || 'Notification activity updated.').trim()
+        } else if (eventType === 'admin.client-management.updated') {
+          message = 'Client management data was updated.'
+        } else if (eventType.startsWith('client.')) {
+          message = 'Client workspace activity updated.'
+        }
+
+        const fallbackMessage = message || `${eventType} event received.`
+        const eventId = String(event?.eventId || `${eventType}-${Date.now()}-${Math.floor(Math.random() * 1000)}`)
+        const nextNotification = {
+          id: eventId,
+          message: fallbackMessage,
+          timestamp: formatAdminRealtimeTimestamp(event?.createdAt),
+          read: false,
+          type: eventType,
+        }
+
+        setAdminNotifications((prev) => {
+          const deduped = [nextNotification, ...prev.filter((item) => item.id !== eventId)]
+          return deduped.slice(0, 30)
+        })
+
+        window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+        if (eventType === 'admin.client-management.updated') {
+          window.dispatchEvent(new Event('kiamina:admin-client-management-sync'))
+        }
+      },
+    })
+
+    return () => {
+      subscription.close()
+    }
+  }, [currentAdminEmail])
+
   useEffect(() => () => {
     if (adminSearchTimeoutRef.current) {
       window.clearTimeout(adminSearchTimeoutRef.current)
@@ -555,6 +629,7 @@ function AdminWorkspace({
             onOpenClientProfile={openClientContext}
             onOpenClientDocuments={openClientContext}
             onOpenClientUploadHistory={openClientContext}
+            onOpenClientResolvedDocuments={openClientContext}
           />
         )
       case 'admin-client-profile':
@@ -582,6 +657,16 @@ function AdminWorkspace({
           <AdminClientUploadHistoryPage
             client={selectedClientContext}
             setActivePage={setActivePage}
+            currentAdminAccount={currentAdminAccount}
+          />
+        )
+      case 'admin-client-resolved-documents':
+        return (
+          <AdminClientResolvedDocumentsPage
+            client={selectedClientContext}
+            setActivePage={setActivePage}
+            showToast={showToast}
+            onAdminActionLog={onAdminActionLog}
             currentAdminAccount={currentAdminAccount}
           />
         )

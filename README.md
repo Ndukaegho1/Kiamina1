@@ -75,6 +75,12 @@ npm install
 npm run dev
 ```
 
+Create env file first:
+
+```bash
+cp frontend/.env.example frontend/.env.local
+```
+
 Build and preview:
 
 ```bash
@@ -85,7 +91,9 @@ npm run preview
 ### Notes
 
 - Dev app runs via Vite.
-- The app is designed to run without a backend for many flows, but some admin/security operations expect APIs (see API section).
+- Backend APIs are the primary path for auth, workspace sync, and admin client management.
+- Local demo auth bypass seeding has been removed from `App.jsx`.
+- Client/admin auth flows now require Firebase token issuance + backend session/OTP verification.
 
 ## 4) App Entry And Routing Model
 
@@ -400,7 +408,7 @@ Admin levels:
 
 Each level has default permissions and can also have explicit customized permission sets.
 
-Server-side enforcement is still required for real production APIs; current frontend enforces role/permission checks in UI and local flows.
+Server-side RBAC is enforced on protected/admin APIs (gateway identity + service-level role checks), while frontend still applies additional UI-level permission guards.
 
 ## 10) Persistence Model (Storage Keys)
 
@@ -469,6 +477,9 @@ Auth header behavior:
 
 ### Auth/OTP
 
+- `DELETE /api/v1/users/me`
+  - body (optional): `{ reason, reasonOther, retentionIntent }`
+  - behavior: cascades users-service profile + documents-service owner data + auth-service account/session
 - `POST /api/v1/auth/send-otp`
   - body: `{ email, otp, purpose }`
 - `POST /api/v1/auth/send-password-reset-link`
@@ -570,17 +581,16 @@ src/
 
 ## 15) Known Limitations And Notes
 
-- This is a frontend-first implementation; many workflows use local persistence.
-- OTP for client/admin login/signup uses a local demo fallback if backend email endpoint is unavailable.
+- Workspace sync is backend-first with local cache fallback for offline continuity.
+- OTP and password-reset delivery can be made strict with `VITE_STRICT_BACKEND_DELIVERY=true`.
 - Admin login-email change requires backend SMS OTP endpoints (no local fallback).
 - Notification dispatch depends on backend email endpoint success.
-- `npm run lint` expects an ESLint flat config (`eslint.config.js`); ESLint is installed but config file is currently missing.
-- Build may show existing chunk-size and CSS minification warnings from current codebase.
+- Large dependency bundles (`pdfjs-dist`, `firebase`, office parsers) are split into vendor chunks by Vite build config.
 
 ## 16) Suggested Next Steps
 
-1. Add backend persistence for accounts/documents/tickets (replace localStorage as source of truth).
-2. Enforce RBAC on server APIs (not only in frontend guards).
+1. Finish backend persistence for remaining admin-only local drafts/trash recovery payloads.
+2. Expand backend RBAC from role-level checks to fine-grained permission scopes per admin level.
 3. Add automated tests (unit + integration + e2e).
 4. Add schema migration/versioning for local storage payloads.
 5. Add CI checks for lint/typecheck/build/test.

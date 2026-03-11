@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ArrowLeft, CheckCircle2, Loader2 } from 'lucide-react'
 import {
   ADMIN_LEVELS,
@@ -40,6 +40,7 @@ const formatPhoneNumber = (countryCode = '+234', number = '') => {
 
 function AdminAccountSetup({
   invite,
+  ownerBootstrapStatus,
   otpChallenge,
   onCreateAccount,
   onVerifyOtp,
@@ -47,9 +48,18 @@ function AdminAccountSetup({
   onCancelOtp,
   onReturnToAdminLogin,
 }) {
+  const inviteEmail = String(invite?.email || '').trim()
+  const hasInviteToken = Boolean(String(invite?.token || '').trim())
+  const canBootstrapOwner = Boolean(ownerBootstrapStatus?.canBootstrap)
+  const isOwnerBootstrapMode = !hasInviteToken && canBootstrapOwner
+  const isOwnerBootstrapStatusLoading = !hasInviteToken && (
+    Boolean(ownerBootstrapStatus?.loading)
+    || !Boolean(ownerBootstrapStatus?.checked)
+  )
+
   const [setupForm, setSetupForm] = useState({
     fullName: '',
-    email: invite?.email || '',
+    email: inviteEmail,
     roleInCompany: '',
     department: '',
     phoneCountryCode: '+234',
@@ -75,10 +85,13 @@ function AdminAccountSetup({
   const normalizedWorkCountry = normalizeAdminVerificationCountry(setupForm.workCountry)
   const govIdTypeOptions = getAdminGovIdTypeOptions(normalizedWorkCountry)
 
-  const isInviteValid = isAdminInvitePending(invite)
-  const inviteAdminLevel = normalizeAdminLevel(invite?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
+  const isInviteValid = hasInviteToken ? isAdminInvitePending(invite) : false
+  const inviteAdminLevel = isOwnerBootstrapMode
+    ? ADMIN_LEVELS.OWNER
+    : normalizeAdminLevel(invite?.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT)
   const isOwnerInvite = inviteAdminLevel === ADMIN_LEVELS.OWNER
   const invitePermissions = useMemo(() => {
+    if (isOwnerBootstrapMode) return ['Full System Access']
     if (!invite) return []
     if (inviteAdminLevel === ADMIN_LEVELS.OWNER || inviteAdminLevel === ADMIN_LEVELS.SUPER) {
       return ['Full System Access']
@@ -87,7 +100,12 @@ function AdminAccountSetup({
     return permissionIds
       .map((permissionId) => ADMIN_PERMISSION_DEFINITIONS.find((permission) => permission.id === permissionId)?.label)
       .filter(Boolean)
-  }, [invite, inviteAdminLevel])
+  }, [invite, inviteAdminLevel, isOwnerBootstrapMode])
+
+  useEffect(() => {
+    if (!inviteEmail) return
+    setSetupForm((previous) => ({ ...previous, email: inviteEmail }))
+  }, [inviteEmail])
 
   const resetIdentityVerificationState = () => {
     setIdentityVerificationState({ status: '', message: '' })
@@ -140,7 +158,7 @@ function AdminAccountSetup({
 
   const submitSetup = async (event) => {
     event.preventDefault()
-    if (!invite?.token) return
+    if (!hasInviteToken && !isOwnerBootstrapMode) return
     if (!isOwnerInvite && identityVerificationState.status !== 'verified') {
       setErrorMessage('Submit identity verification before creating account.')
       return
@@ -163,7 +181,8 @@ function AdminAccountSetup({
     setErrorMessage('')
     setIsSubmitting(true)
     const result = await onCreateAccount({
-      inviteToken: invite.token,
+      inviteToken: hasInviteToken ? invite.token : '',
+      bootstrapOwner: isOwnerBootstrapMode,
       fullName: setupForm.fullName,
       email: setupForm.email,
       roleInCompany: setupForm.roleInCompany,
@@ -185,7 +204,7 @@ function AdminAccountSetup({
     setIsSubmitting(false)
   }
 
-  if (!isInviteValid) {
+  if (hasInviteToken && !isInviteValid) {
     return (
       <div
         className="min-h-screen bg-[#F4F6FB] flex items-center justify-center px-4 py-10"
@@ -214,6 +233,66 @@ function AdminAccountSetup({
     )
   }
 
+  if (!hasInviteToken && isOwnerBootstrapStatusLoading) {
+    return (
+      <div
+        className="min-h-screen bg-[#F4F6FB] flex items-center justify-center px-4 py-10"
+        style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}
+      >
+        <div className="w-full max-w-lg bg-white border border-border-light rounded-xl shadow-card p-8">
+          <div className="flex items-center justify-center mb-6">
+            <KiaminaLogo className="h-12 w-auto" />
+          </div>
+
+          <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Account Setup</h1>
+          <p className="text-sm text-text-secondary text-center mt-3">Checking owner bootstrap eligibility...</p>
+
+          <div className="mt-7 flex justify-center">
+            <button
+              type="button"
+              onClick={onReturnToAdminLogin}
+              className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors inline-flex items-center gap-2"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Return to Admin Login
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (!hasInviteToken && !isOwnerBootstrapMode) {
+    const ownerBootstrapMessage = String(ownerBootstrapStatus?.message || '').trim()
+      || 'Owner setup is no longer available because an admin account already exists. Use /admin/login or a valid invite link.'
+    return (
+      <div
+        className="min-h-screen bg-[#F4F6FB] flex items-center justify-center px-4 py-10"
+        style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}
+      >
+        <div className="w-full max-w-lg bg-white border border-border-light rounded-xl shadow-card p-8">
+          <div className="flex items-center justify-center mb-6">
+            <KiaminaLogo className="h-12 w-auto" />
+          </div>
+
+          <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Account Setup</h1>
+          <p className="text-sm text-error text-center mt-3">{ownerBootstrapMessage}</p>
+
+          <div className="mt-7 flex justify-center">
+            <button
+              type="button"
+              onClick={onReturnToAdminLogin}
+              className="h-10 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors inline-flex items-center gap-2"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Return to Admin Login
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       className="min-h-screen bg-[#F4F6FB] flex items-center justify-center px-4 py-10"
@@ -225,11 +304,15 @@ function AdminAccountSetup({
         </div>
 
         <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Account Setup</h1>
-        <p className="text-sm text-text-secondary text-center mt-2 mb-6">Complete your invited admin profile.</p>
+        <p className="text-sm text-text-secondary text-center mt-2 mb-6">
+          {isOwnerBootstrapMode
+            ? 'Create the first owner admin account for this workspace.'
+            : 'Complete your invited admin profile.'}
+        </p>
 
         <div className="rounded-lg border border-border-light bg-[#FAFBFF] p-4 mb-6">
           <p className="text-xs uppercase tracking-wide text-text-muted">Assigned Role</p>
-          <p className="text-sm font-semibold text-text-primary mt-1">{getAdminLevelLabel(invite.adminLevel)}</p>
+          <p className="text-sm font-semibold text-text-primary mt-1">{getAdminLevelLabel(inviteAdminLevel)}</p>
           <div className="mt-3">
             <p className="text-xs uppercase tracking-wide text-text-muted">Granted Permissions</p>
             <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -265,7 +348,11 @@ function AdminAccountSetup({
               onChange={(event) => setSetupForm((prev) => ({ ...prev, email: event.target.value }))}
               className="w-full h-11 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
             />
-            <p className="text-xs text-text-muted mt-1">This must match the invited email address.</p>
+            <p className="text-xs text-text-muted mt-1">
+              {isOwnerBootstrapMode
+                ? 'This email will become the primary owner admin login.'
+                : 'This must match the invited email address.'}
+            </p>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

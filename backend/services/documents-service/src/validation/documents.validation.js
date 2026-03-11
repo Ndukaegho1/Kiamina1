@@ -2,7 +2,8 @@ import Joi from "joi";
 
 const CATEGORIES = ["expenses", "sales", "bank-statements", "other"];
 const STATUSES = ["processing", "to-review", "ready"];
-const STORAGE_PROVIDERS = ["firebase", "s3", "local", "unknown"];
+const STORAGE_PROVIDERS = ["mongodb", "firebase", "s3", "local", "unknown"];
+const STORAGE_PROVIDERS_TEXT = STORAGE_PROVIDERS.join(", ");
 
 const normalizeString = (value) => String(value ?? "").trim();
 const normalizeSource = (body) =>
@@ -138,7 +139,7 @@ const classNameUpdateSchema = Joi.string().trim().allow("").max(120).messages({
   "string.max": "className must be at most 120 characters"
 });
 const storageProviderSchema = Joi.string().trim().lowercase().valid(...STORAGE_PROVIDERS).messages({
-  "any.only": "storageProvider must be one of: firebase, s3, local, unknown"
+  "any.only": `storageProvider must be one of: ${STORAGE_PROVIDERS_TEXT}`
 });
 const storagePathSchema = Joi.string().trim().allow("").max(500).messages({
   "string.max": "storagePath must be at most 500 characters"
@@ -253,7 +254,7 @@ export const buildDocumentUpdatePayload = (body) => {
     const storageProvider = normalizeString(source.storageProvider).toLowerCase();
     const { error } = storageProviderSchema.validate(storageProvider);
     if (error) {
-      errors.push("storageProvider must be one of: firebase, s3, local, unknown");
+      errors.push(`storageProvider must be one of: ${STORAGE_PROVIDERS_TEXT}`);
     } else {
       payload.storageProvider = storageProvider;
     }

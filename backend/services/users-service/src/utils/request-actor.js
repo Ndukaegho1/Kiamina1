@@ -1,4 +1,5 @@
 const ADMIN_ROLES = new Set(["admin", "owner", "superadmin"]);
+const ELEVATED_ADMIN_ROLES = new Set(["owner", "superadmin"]);
 
 const parseRoles = (value) => {
   if (Array.isArray(value)) {
@@ -31,3 +32,6 @@ export const getRequestActor = (req) => {
 
 export const isAdminActor = (actor) =>
   actor.roles.some((role) => ADMIN_ROLES.has(role));
+
+export const isElevatedAdminActor = (actor) =>
+  actor.roles.some((role) => ELEVATED_ADMIN_ROLES.has(role));

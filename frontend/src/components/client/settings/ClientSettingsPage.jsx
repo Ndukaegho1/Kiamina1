@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   LayoutDashboard,
   DollarSign,
@@ -42,6 +42,8 @@ import {
   persistClientNotificationSettings,
   readClientNotificationSettings,
 } from '../../../utils/clientNotificationPreferences'
+import { apiFetch } from '../../../utils/apiClient'
+import { buildFileCacheKey, putCachedFileBlob } from '../../../utils/fileCache'
 
 const SETTINGS_REDIRECT_SECTION_KEY = 'kiaminaClientSettingsRedirectSection'
 const GOVERNMENT_ID_TYPE_OPTIONS = ['NIN', "Voter's Card", 'International Passport', "Driver's Licence"]
@@ -66,6 +68,7 @@ const ACCOUNT_DELETE_RETENTION_OPTIONS = [
   'I may return later',
   'I want to delete permanently now',
 ]
+const PHONE_LOCAL_NUMBER_REGEX = /^\d{10,11}$/
 const CLIENT_IN_APP_NOTIFICATION_OPTIONS = [
   {
     key: 'inAppEnabled',
@@ -141,6 +144,32 @@ const CLIENT_NOTIFICATION_EDITABLE_KEYS = [
   ...CLIENT_IN_APP_NOTIFICATION_OPTIONS.map((item) => item.key),
   ...CLIENT_EMAIL_NOTIFICATION_OPTIONS.map((item) => item.key),
 ]
+const PASSWORD_SECURITY_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+const DEFAULT_ACCOUNT_SETTINGS = Object.freeze({
+  twoStepEnabled: false,
+  twoStepMethod: '',
+  verifiedPhoneNumber: '',
+  recoveryEmail: '',
+  enabledAt: '',
+  lastVerifiedAt: '',
+})
+const normalizeAccountSettingsState = (payload = {}) => {
+  const twoStepEnabled = Boolean(payload?.twoStepEnabled || payload?.smsMfaEnabled)
+  return {
+    twoStepEnabled,
+    twoStepMethod: twoStepEnabled
+      ? 'sms'
+      : String(payload?.twoStepMethod || '').trim().toLowerCase(),
+    verifiedPhoneNumber: String(
+      payload?.verifiedPhoneNumber
+      || payload?.phoneNumber
+      || '',
+    ).replace(/\s+/g, '').trim(),
+    recoveryEmail: String(payload?.recoveryEmail || payload?.email || '').trim().toLowerCase(),
+    enabledAt: String(payload?.enabledAt || '').trim(),
+    lastVerifiedAt: String(payload?.lastVerifiedAt || payload?.enabledAt || '').trim(),
+  }
+}
 const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
   const raw = String(value || '').trim()
   const matchingOption = PHONE_COUNTRY_CODE_OPTIONS.find((option) => raw.startsWith(option.value))
@@ -163,7 +192,7 @@ const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
 }
 const formatPhoneNumber = (code = '+234', number = '') => {
   const normalizedCode = String(code || '').trim() || '+234'
-  const normalizedNumber = String(number || '').trim()
+  const normalizedNumber = normalizePhoneLocalNumber(number)
   if (!normalizedNumber) return ''
   return `${normalizedCode} ${normalizedNumber}`.trim()
 }
@@ -182,6 +211,12 @@ const toTitleCaseValue = (value = '') => (
     .join(' ')
 )
 const sanitizeDigitsOnly = (value = '') => String(value || '').replace(/\D/g, '')
+const sanitizePhoneInputDigits = (value = '') => sanitizeDigitsOnly(value).slice(0, 11)
+const normalizePhoneLocalNumber = (value = '') => {
+  const digits = sanitizePhoneInputDigits(value)
+  if (!PHONE_LOCAL_NUMBER_REGEX.test(digits)) return ''
+  return digits.length === 11 && digits.startsWith('0') ? digits.slice(1) : digits
+}
 const sanitizeAlphaNumeric = (value = '') => String(value || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase()
 const splitFullName = (value = '') => {
   const parts = String(value || '').trim().split(/\s+/).filter(Boolean)
@@ -308,14 +343,22 @@ function SettingsPage({
   identityApprovedByAdmin = false,
   businessApprovedByAdmin = false,
   clientTeamRole = 'owner',
+  initialSettingsProfile = {},
+  initialVerificationDocs = {},
+  initialAccountSettings = {},
   onSettingsProfileChange,
   onVerificationDocsChange,
+  onAccountSettingsChange,
   verificationLockEnforced = false,
+  canManageAccountSecurity = false,
+  onRequestPasswordResetLink,
+  onChangePassword,
   canDeleteAccount = false,
   onDeleteAccount,
 }) {
   const [activeSection, setActiveSection] = useState('user-profile')
   const [editMode, setEditMode] = useState({
+    'account-settings': false,
     'user-profile': false,
     'notifications': false,
     'identity': false,
@@ -336,6 +379,37 @@ function SettingsPage({
   const companyLogoKey = getScopedClientKey('companyLogo')
   const teamMembersKey = getScopedClientKey('clientTeamMembers')
   const teamInvitesKey = getScopedClientKey('clientTeamInvites')
+  const legacySettingsStorageEnabled = String(
+    import.meta.env.VITE_ENABLE_LEGACY_SETTINGS_STORAGE_CACHE || '',
+  ).trim().toLowerCase() === 'true'
+
+  const readLegacyJson = (key, fallbackValue) => {
+    if (!legacySettingsStorageEnabled || typeof localStorage === 'undefined') return fallbackValue
+    try {
+      const saved = localStorage.getItem(key)
+      if (!saved) return fallbackValue
+      const parsed = JSON.parse(saved)
+      return parsed ?? fallbackValue
+    } catch {
+      return fallbackValue
+    }
+  }
+  const writeLegacyJson = (key, value) => {
+    if (!legacySettingsStorageEnabled || typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem(key, JSON.stringify(value))
+    } catch {
+      // no-op
+    }
+  }
+  const writeLegacyString = (key, value) => {
+    if (!legacySettingsStorageEnabled || typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem(key, String(value || ''))
+    } catch {
+      // no-op
+    }
+  }
 
   // Initialize form data from localStorage
   const getInitialFormData = () => {
@@ -366,37 +440,60 @@ function SettingsPage({
       postalCode: '',
       addressCountry: 'Nigeria',
     }
-    const saved = localStorage.getItem(settingsStorageKey || 'settingsFormData')
-    if (!saved) return fallbackData
-    try {
-      const parsed = JSON.parse(saved)
-      const merged = {
-        ...fallbackData,
-        ...(parsed && typeof parsed === 'object' ? parsed : {}),
-      }
-      const fallbackCode = String(merged.phoneCountryCode || '+234').trim() || '+234'
-      const storedPhoneValue = merged.phoneLocalNumber || merged.phone
-      const phoneParts = resolvePhoneParts(storedPhoneValue, fallbackCode)
-      const parsedNameParts = splitFullName(merged.fullName)
-      const resolvedFirstName = String(merged.firstName || parsedNameParts.firstName || '').trim()
-      const resolvedLastName = String(merged.lastName || parsedNameParts.lastName || '').trim()
-      const resolvedOtherNames = String(merged.otherNames || parsedNameParts.otherNames || '').trim()
-      const normalizedFinancialYearStart = normalizeFinancialBoundaryDate(merged.startMonth, 'start')
-      const normalizedFinancialYearEnd = normalizeFinancialBoundaryDate(merged.reportingCycle, 'end')
-      return {
-        ...merged,
-        firstName: resolvedFirstName,
-        lastName: resolvedLastName,
-        otherNames: resolvedOtherNames,
-        fullName: [resolvedFirstName, resolvedOtherNames, resolvedLastName].filter(Boolean).join(' ').trim(),
-        phoneCountryCode: phoneParts.code,
-        phone: phoneParts.number,
-        phoneLocalNumber: phoneParts.number,
-        startMonth: normalizedFinancialYearStart || merged.startMonth || '',
-        reportingCycle: normalizedFinancialYearEnd || merged.reportingCycle || '',
-      }
-    } catch {
-      return fallbackData
+    const settingsProfile = initialSettingsProfile && typeof initialSettingsProfile === 'object'
+      ? initialSettingsProfile
+      : {}
+    const legacyProfile = readLegacyJson(settingsStorageKey || 'settingsFormData', {})
+    const parsed = legacySettingsStorageEnabled ? legacyProfile : settingsProfile
+    const normalizeField = (value = '') => String(value || '').trim()
+    const merged = {
+      ...fallbackData,
+      ...(parsed && typeof parsed === 'object' ? parsed : {}),
+      email: normalizeField(settingsProfile?.email || parsed?.email || clientEmail).toLowerCase(),
+      firstName: normalizeField(settingsProfile?.firstName || parsed?.firstName),
+      lastName: normalizeField(settingsProfile?.lastName || parsed?.lastName),
+      otherNames: normalizeField(settingsProfile?.otherNames || parsed?.otherNames),
+      fullName: normalizeField(settingsProfile?.fullName || parsed?.fullName),
+      phone: normalizeField(settingsProfile?.phone || parsed?.phone),
+      roleInCompany: normalizeField(settingsProfile?.roleInCompany || parsed?.roleInCompany),
+      businessType: normalizeField(settingsProfile?.businessType || parsed?.businessType),
+      businessName: normalizeField(settingsProfile?.businessName || parsed?.businessName),
+      country: normalizeField(settingsProfile?.country || parsed?.country),
+      currency: normalizeField(settingsProfile?.currency || parsed?.currency || 'NGN'),
+      language: normalizeField(settingsProfile?.language || parsed?.language || 'English'),
+      industry: normalizeField(settingsProfile?.industry || parsed?.industry),
+      industryOther: normalizeField(settingsProfile?.industryOther || parsed?.industryOther),
+      tin: normalizeField(settingsProfile?.tin || parsed?.tin),
+      reportingCycle: normalizeField(settingsProfile?.reportingCycle || parsed?.reportingCycle),
+      startMonth: normalizeField(settingsProfile?.startMonth || parsed?.startMonth),
+      address1: normalizeField(settingsProfile?.address1 || settingsProfile?.address || parsed?.address1 || parsed?.address),
+      address2: normalizeField(settingsProfile?.address2 || parsed?.address2),
+      city: normalizeField(settingsProfile?.city || parsed?.city),
+      postalCode: normalizeField(settingsProfile?.postalCode || parsed?.postalCode),
+      addressCountry: normalizeField(settingsProfile?.addressCountry || parsed?.addressCountry || settingsProfile?.country || parsed?.country || 'Nigeria'),
+      cacNumber: normalizeField(settingsProfile?.cacNumber || parsed?.cacNumber),
+      cri: normalizeField(settingsProfile?.cri || parsed?.cri),
+    }
+    const fallbackCode = String(merged.phoneCountryCode || '+234').trim() || '+234'
+    const storedPhoneValue = merged.phoneLocalNumber || merged.phone
+    const phoneParts = resolvePhoneParts(storedPhoneValue, fallbackCode)
+    const parsedNameParts = splitFullName(merged.fullName)
+    const resolvedFirstName = String(merged.firstName || parsedNameParts.firstName || '').trim()
+    const resolvedLastName = String(merged.lastName || parsedNameParts.lastName || '').trim()
+    const resolvedOtherNames = String(merged.otherNames || parsedNameParts.otherNames || '').trim()
+    const normalizedFinancialYearStart = normalizeFinancialBoundaryDate(merged.startMonth, 'start')
+    const normalizedFinancialYearEnd = normalizeFinancialBoundaryDate(merged.reportingCycle, 'end')
+    return {
+      ...merged,
+      firstName: resolvedFirstName,
+      lastName: resolvedLastName,
+      otherNames: resolvedOtherNames,
+      fullName: [resolvedFirstName, resolvedOtherNames, resolvedLastName].filter(Boolean).join(' ').trim(),
+      phoneCountryCode: phoneParts.code,
+      phone: phoneParts.number,
+      phoneLocalNumber: phoneParts.number,
+      startMonth: normalizedFinancialYearStart || merged.startMonth || '',
+      reportingCycle: normalizedFinancialYearEnd || merged.reportingCycle || '',
     }
   }
 
@@ -407,8 +504,11 @@ function SettingsPage({
   const [notifications, setNotifications] = useState(readNotificationPreferences)
   const [notificationDraft, setNotificationDraft] = useState(readNotificationPreferences)
   const [verificationDocs, setVerificationDocs] = useState(() => {
-    const saved = localStorage.getItem(verificationDocsKey) || localStorage.getItem('verificationDocs')
-    const parsed = saved ? JSON.parse(saved) : {}
+    const backendDocs = initialVerificationDocs && typeof initialVerificationDocs === 'object'
+      ? initialVerificationDocs
+      : {}
+    const legacyDocs = readLegacyJson(verificationDocsKey, readLegacyJson('verificationDocs', {}))
+    const parsed = legacySettingsStorageEnabled ? legacyDocs : backendDocs
     return {
       govId: null,
       govIdType: '',
@@ -417,6 +517,10 @@ function SettingsPage({
       govIdVerificationStatus: '',
       govIdClarityStatus: '',
       businessReg: null,
+      businessRegFileCacheKey: '',
+      businessRegMimeType: '',
+      businessRegSize: 0,
+      businessRegUploadedAt: '',
       businessRegVerificationStatus: '',
       businessRegSubmittedAt: '',
       ...parsed,
@@ -440,6 +544,22 @@ function SettingsPage({
     retentionIntent: '',
     acknowledgedPermanentDeletion: false,
   })
+  const [accountSettings, setAccountSettings] = useState(() => normalizeAccountSettingsState(initialAccountSettings))
+  const [isSendingPasswordResetLink, setIsSendingPasswordResetLink] = useState(false)
+  const [isChangingPassword, setIsChangingPassword] = useState(false)
+  const [passwordChangeForm, setPasswordChangeForm] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  })
+  const [securityChallenge, setSecurityChallenge] = useState({
+    open: false,
+    mode: '',
+    otp: '',
+    isSending: false,
+    isVerifying: false,
+    expiresAt: '',
+  })
 
   const toTrimmedValue = (value) => String(value || '').trim()
   const buildClientFullName = (payload = {}) => {
@@ -447,6 +567,35 @@ function SettingsPage({
     const lastName = toTrimmedValue(payload.lastName)
     const otherNames = toTrimmedValue(payload.otherNames)
     return [firstName, otherNames, lastName].filter(Boolean).join(' ').trim()
+  }
+  const normalizeCriValue = (value = '') => {
+    const normalized = toTrimmedValue(value).toUpperCase()
+    if (!normalized) return ''
+    if (normalized.startsWith('CRI-')) return normalized
+    if (normalized.startsWith('CRI')) {
+      const suffix = normalized.slice(3).replace(/^[\s:-]+/, '').replace(/[^A-Z0-9-]/g, '')
+      return suffix ? `CRI-${suffix}` : ''
+    }
+    const suffix = normalized.replace(/[^A-Z0-9-]/g, '')
+    return suffix ? `CRI-${suffix}` : ''
+  }
+  const resolveFallbackCri = (seed = '') => {
+    const token = toTrimmedValue(seed).replace(/[^A-Za-z0-9]/g, '').slice(-6).toUpperCase()
+    return token ? `CRI-${token}` : 'CRI-0000'
+  }
+  const sanitizeFilenameSegment = (value = '', fallback = 'Client') => {
+    const cleaned = toTrimmedValue(value)
+      .replace(/[<>:"/\\|?*\u0000-\u001F]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return cleaned || fallback
+  }
+  const resolveFilenameExtension = (filename = '') => {
+    const normalized = toTrimmedValue(filename)
+    const extensionIndex = normalized.lastIndexOf('.')
+    if (extensionIndex <= 0 || extensionIndex === normalized.length - 1) return ''
+    const extensionToken = normalized.slice(extensionIndex + 1).replace(/[^A-Za-z0-9]/g, '').toLowerCase()
+    return extensionToken ? `.${extensionToken}` : ''
   }
   const normalizeClientRole = (value = '') => {
     const normalized = toTrimmedValue(value).toLowerCase()
@@ -535,6 +684,14 @@ function SettingsPage({
   }
 
   const resolvedClientEmail = toTrimmedValue(clientEmail || formData.email || scopedStorageSuffix).toLowerCase()
+  const resolvedClientCri = normalizeCriValue(formData.cri || draftData.cri) || resolveFallbackCri(resolvedClientEmail || formData.businessName)
+  const resolvedClientDisplayName = sanitizeFilenameSegment(
+    buildClientFullName(formData) || clientName || formData.businessName || resolvedClientEmail.split('@')[0],
+    'Client',
+  )
+  const buildBusinessVerificationDocumentFilename = (sourceFilename = '') => (
+    `${resolvedClientDisplayName} ${resolvedClientCri} Business Verification Document${resolveFilenameExtension(sourceFilename)}`
+  )
   const companyId = buildCompanyId(resolvedClientEmail || formData.businessName)
   const ownerDisplayName = toTrimmedValue(clientName || buildClientFullName(formData) || 'Primary Owner')
   const ownerMemberId = `TM-OWNER-${companyId}`
@@ -551,30 +708,18 @@ function SettingsPage({
   }, companyId)
 
   const [teamMembers, setTeamMembers] = useState(() => {
-    const saved = localStorage.getItem(teamMembersKey)
-    if (!saved) return initialOwnerMember ? [initialOwnerMember] : []
-    try {
-      const parsed = JSON.parse(saved)
-      const normalized = (Array.isArray(parsed) ? parsed : [])
-        .map((member) => normalizeTeamMemberRecord(member, companyId))
-        .filter(Boolean)
-      if (normalized.length === 0 && initialOwnerMember) return [initialOwnerMember]
-      return normalized
-    } catch {
-      return initialOwnerMember ? [initialOwnerMember] : []
-    }
+    const parsed = readLegacyJson(teamMembersKey, [])
+    const normalized = (Array.isArray(parsed) ? parsed : [])
+      .map((member) => normalizeTeamMemberRecord(member, companyId))
+      .filter(Boolean)
+    if (normalized.length === 0 && initialOwnerMember) return [initialOwnerMember]
+    return normalized
   })
   const [teamInvites, setTeamInvites] = useState(() => {
-    const saved = localStorage.getItem(teamInvitesKey)
-    if (!saved) return []
-    try {
-      const parsed = JSON.parse(saved)
-      return (Array.isArray(parsed) ? parsed : [])
-        .map((invite) => normalizeInviteRecord(invite, companyId))
-        .filter((invite) => invite.email && invite.token)
-    } catch {
-      return []
-    }
+    const parsed = readLegacyJson(teamInvitesKey, [])
+    return (Array.isArray(parsed) ? parsed : [])
+      .map((invite) => normalizeInviteRecord(invite, companyId))
+      .filter((invite) => invite.email && invite.token)
   })
 
   const normalizedProfileForVerification = {
@@ -585,6 +730,90 @@ function SettingsPage({
     businessType: toTrimmedValue(formData.businessType),
     country: toTrimmedValue(formData.country || formData.addressCountry),
   }
+  const buildSettingsProfilePayload = (source = {}) => {
+    const normalizedSource = source && typeof source === 'object' ? source : {}
+    return {
+      ...normalizedSource,
+      fullName: buildClientFullName(normalizedSource),
+      email: toTrimmedValue(normalizedSource.email).toLowerCase(),
+      phone: formatPhoneNumber(normalizedSource.phoneCountryCode, normalizedSource.phone),
+      address: toTrimmedValue(normalizedSource.address1),
+      businessType: toTrimmedValue(normalizedSource.businessType),
+      country: toTrimmedValue(normalizedSource.country || normalizedSource.addressCountry),
+      reportingCycle: normalizeFinancialBoundaryDate(normalizedSource.reportingCycle, 'end'),
+      startMonth: normalizeFinancialBoundaryDate(normalizedSource.startMonth, 'start'),
+      phoneCountryCode: toTrimmedValue(normalizedSource.phoneCountryCode || '+234') || '+234',
+      phoneLocalNumber: toTrimmedValue(normalizedSource.phone),
+    }
+  }
+  const buildSecurityPhoneNumber = (source = {}) => {
+    const countryCode = toTrimmedValue(source.phoneCountryCode || '+234') || '+234'
+    const localNumber = normalizePhoneLocalNumber(source.phone || source.phoneLocalNumber || '')
+    if (!localNumber) return ''
+    return `${countryCode}${localNumber}`.replace(/\s+/g, '')
+  }
+  const hasProfileField = (source, field) => Object.prototype.hasOwnProperty.call(source || {}, field)
+  const buildIncomingSettingsFormPatch = (source = {}) => {
+    const normalizedSource = source && typeof source === 'object' ? source : {}
+    const next = {}
+    const hasNameField = (
+      hasProfileField(normalizedSource, 'firstName')
+      || hasProfileField(normalizedSource, 'lastName')
+      || hasProfileField(normalizedSource, 'otherNames')
+      || hasProfileField(normalizedSource, 'fullName')
+    )
+    const hasPhoneField = hasProfileField(normalizedSource, 'phone')
+
+    if (hasNameField) {
+      next.firstName = toTrimmedValue(normalizedSource.firstName)
+      next.lastName = toTrimmedValue(normalizedSource.lastName)
+      next.otherNames = toTrimmedValue(normalizedSource.otherNames)
+      next.fullName = buildClientFullName(normalizedSource) || toTrimmedValue(normalizedSource.fullName)
+    }
+    if (hasProfileField(normalizedSource, 'email') || clientEmail) {
+      next.email = toTrimmedValue(normalizedSource.email || clientEmail).toLowerCase()
+    }
+    if (hasPhoneField) {
+      const phoneParts = resolvePhoneParts(normalizedSource.phone || '')
+      next.phone = phoneParts.number
+      next.phoneCountryCode = phoneParts.code || '+234'
+      next.phoneLocalNumber = phoneParts.number
+    }
+    if (hasProfileField(normalizedSource, 'address1') || hasProfileField(normalizedSource, 'address')) {
+      next.address1 = toTrimmedValue(normalizedSource.address1 || normalizedSource.address)
+    }
+    if (hasProfileField(normalizedSource, 'address2')) next.address2 = toTrimmedValue(normalizedSource.address2)
+    if (hasProfileField(normalizedSource, 'city')) next.city = toTrimmedValue(normalizedSource.city)
+    if (hasProfileField(normalizedSource, 'postalCode')) next.postalCode = toTrimmedValue(normalizedSource.postalCode)
+    if (hasProfileField(normalizedSource, 'addressCountry') || hasProfileField(normalizedSource, 'country')) {
+      next.addressCountry = toTrimmedValue(normalizedSource.addressCountry || normalizedSource.country || 'Nigeria')
+    }
+    if (hasProfileField(normalizedSource, 'roleInCompany')) next.roleInCompany = toTrimmedValue(normalizedSource.roleInCompany)
+    if (hasProfileField(normalizedSource, 'businessType')) next.businessType = toTrimmedValue(normalizedSource.businessType)
+    if (hasProfileField(normalizedSource, 'businessName')) next.businessName = toTrimmedValue(normalizedSource.businessName)
+    if (hasProfileField(normalizedSource, 'country')) next.country = toTrimmedValue(normalizedSource.country)
+    if (hasProfileField(normalizedSource, 'currency')) next.currency = toTrimmedValue(normalizedSource.currency || 'NGN')
+    if (hasProfileField(normalizedSource, 'language')) next.language = toTrimmedValue(normalizedSource.language || 'English')
+    if (hasProfileField(normalizedSource, 'industry')) next.industry = toTrimmedValue(normalizedSource.industry)
+    if (hasProfileField(normalizedSource, 'industryOther')) next.industryOther = toTrimmedValue(normalizedSource.industryOther)
+    if (hasProfileField(normalizedSource, 'tin')) next.tin = toTrimmedValue(normalizedSource.tin)
+    if (hasProfileField(normalizedSource, 'reportingCycle')) {
+      next.reportingCycle = normalizeFinancialBoundaryDate(normalizedSource.reportingCycle, 'end')
+    }
+    if (hasProfileField(normalizedSource, 'startMonth')) {
+      next.startMonth = normalizeFinancialBoundaryDate(normalizedSource.startMonth, 'start')
+    }
+    if (hasProfileField(normalizedSource, 'cacNumber')) next.cacNumber = toTrimmedValue(normalizedSource.cacNumber)
+    if (hasProfileField(normalizedSource, 'cri')) next.cri = toTrimmedValue(normalizedSource.cri)
+
+    return next
+  }
+  const initialSettingsProfileSyncSignature = JSON.stringify(buildIncomingSettingsFormPatch(initialSettingsProfile))
+  const lastAppliedSettingsProfileSyncSignatureRef = useRef('')
+  const initialVerificationDocsSyncSignature = JSON.stringify(initialVerificationDocs || {})
+  const lastAppliedVerificationDocsSyncSignatureRef = useRef('')
+  const initialAccountSettingsSyncSignature = JSON.stringify(normalizeAccountSettingsState(initialAccountSettings))
+  const lastAppliedAccountSettingsSyncSignatureRef = useRef('')
   const normalizedBusinessType = toTrimmedValue(formData.businessType).toLowerCase()
   const isIndividualBusinessType = normalizedBusinessType === 'individual'
   const profileStepCompleted = Boolean(
@@ -658,6 +887,13 @@ function SettingsPage({
   const hasNotificationChanges = CLIENT_NOTIFICATION_EDITABLE_KEYS.some((key) => (
     Boolean(notificationDraft[key]) !== Boolean(notifications[key])
   ))
+  const resolvedSecurityPhoneNumber = buildSecurityPhoneNumber(draftData)
+  const verifiedSecurityPhoneMismatch = Boolean(
+    accountSettings.twoStepEnabled
+    && accountSettings.verifiedPhoneNumber
+    && resolvedSecurityPhoneNumber
+    && accountSettings.verifiedPhoneNumber !== resolvedSecurityPhoneNumber,
+  )
 
   useEffect(() => {
     setLogoFile(companyLogo || null)
@@ -666,6 +902,72 @@ function SettingsPage({
   useEffect(() => {
     setPhotoFile(profilePhoto || null)
   }, [profilePhoto])
+
+  useEffect(() => {
+    const profile = initialSettingsProfile && typeof initialSettingsProfile === 'object'
+      ? initialSettingsProfile
+      : null
+    if (!profile) return
+    const nextFromBackend = buildIncomingSettingsFormPatch(profile)
+    if (Object.keys(nextFromBackend).length === 0) return
+    if (lastAppliedSettingsProfileSyncSignatureRef.current === initialSettingsProfileSyncSignature) return
+    lastAppliedSettingsProfileSyncSignatureRef.current = initialSettingsProfileSyncSignature
+
+    setFormData((previous) => {
+      const hasChanges = Object.entries(nextFromBackend).some(([key, value]) => previous?.[key] !== value)
+      if (!hasChanges) return previous
+      return {
+        ...previous,
+        ...nextFromBackend,
+      }
+    })
+    if (!Object.values(editMode).some(Boolean)) {
+      setDraftData((previous) => {
+        const hasChanges = Object.entries(nextFromBackend).some(([key, value]) => previous?.[key] !== value)
+        if (!hasChanges) return previous
+        return {
+          ...previous,
+          ...nextFromBackend,
+        }
+      })
+    }
+  }, [initialSettingsProfile, initialSettingsProfileSyncSignature])
+
+  useEffect(() => {
+    const docs = initialVerificationDocs && typeof initialVerificationDocs === 'object'
+      ? initialVerificationDocs
+      : null
+    if (!docs) return
+    if (lastAppliedVerificationDocsSyncSignatureRef.current === initialVerificationDocsSyncSignature) return
+    lastAppliedVerificationDocsSyncSignatureRef.current = initialVerificationDocsSyncSignature
+    setVerificationDocs((previous) => {
+      const hasChanges = Object.entries(docs).some(([key, value]) => previous?.[key] !== value)
+      if (!hasChanges) return previous
+      return {
+        ...previous,
+        ...docs,
+      }
+    })
+  }, [initialVerificationDocs, initialVerificationDocsSyncSignature])
+
+  useEffect(() => {
+    const nextAccountSettings = normalizeAccountSettingsState(initialAccountSettings)
+    if (lastAppliedAccountSettingsSyncSignatureRef.current === initialAccountSettingsSyncSignature) return
+    lastAppliedAccountSettingsSyncSignatureRef.current = initialAccountSettingsSyncSignature
+    setAccountSettings((previous) => {
+      if (
+        previous.twoStepEnabled === nextAccountSettings.twoStepEnabled
+        && previous.twoStepMethod === nextAccountSettings.twoStepMethod
+        && previous.verifiedPhoneNumber === nextAccountSettings.verifiedPhoneNumber
+        && previous.recoveryEmail === nextAccountSettings.recoveryEmail
+        && previous.enabledAt === nextAccountSettings.enabledAt
+        && previous.lastVerifiedAt === nextAccountSettings.lastVerifiedAt
+      ) {
+        return previous
+      }
+      return nextAccountSettings
+    })
+  }, [initialAccountSettings, initialAccountSettingsSyncSignature])
 
   useEffect(() => {
     const normalizedSettings = normalizeClientNotificationSettings(readClientNotificationSettings(clientEmail || ''))
@@ -678,7 +980,7 @@ function SettingsPage({
     try {
       const pendingSection = sessionStorage.getItem(SETTINGS_REDIRECT_SECTION_KEY)
       if (!pendingSection) return
-      if (pendingSection === 'user-profile' || pendingSection === 'identity' || pendingSection === 'team-management') {
+      if (pendingSection === 'user-profile' || pendingSection === 'account-settings' || pendingSection === 'identity' || pendingSection === 'team-management') {
         setActiveSection(pendingSection)
       }
       sessionStorage.removeItem(SETTINGS_REDIRECT_SECTION_KEY)
@@ -691,19 +993,6 @@ function SettingsPage({
     if (typeof onVerificationDocsChange !== 'function') return
     onVerificationDocsChange(verificationDocs)
   }, [onVerificationDocsChange, verificationDocs])
-
-  useEffect(() => {
-    if (typeof onSettingsProfileChange !== 'function') return
-    onSettingsProfileChange(normalizedProfileForVerification)
-  }, [
-    normalizedProfileForVerification.address,
-    normalizedProfileForVerification.businessType,
-    normalizedProfileForVerification.country,
-    normalizedProfileForVerification.email,
-    normalizedProfileForVerification.fullName,
-    normalizedProfileForVerification.phone,
-    onSettingsProfileChange,
-  ])
 
   useEffect(() => {
     if (!verificationLockEnforced) return
@@ -760,11 +1049,11 @@ function SettingsPage({
   }, [companyId, ownerDisplayName, ownerFallbackEmail, ownerFallbackName, ownerMemberId, resolvedClientEmail])
 
   useEffect(() => {
-    localStorage.setItem(teamMembersKey, JSON.stringify(teamMembers))
+    writeLegacyJson(teamMembersKey, teamMembers)
   }, [teamMembers, teamMembersKey])
 
   useEffect(() => {
-    localStorage.setItem(teamInvitesKey, JSON.stringify(teamInvites.map((invite) => normalizeInviteRecord(invite, companyId))))
+    writeLegacyJson(teamInvitesKey, teamInvites.map((invite) => normalizeInviteRecord(invite, companyId)))
   }, [companyId, teamInvites, teamInvitesKey])
 
   useEffect(() => {
@@ -857,6 +1146,7 @@ function SettingsPage({
 
   const navItems = [
     { id: 'user-profile', label: 'User Profile', icon: User },
+    { id: 'account-settings', label: 'Account Settings', icon: Settings },
     { id: 'notifications', label: 'Notification Settings', icon: Bell },
     { id: 'identity', label: 'Identity Verification', icon: Shield },
     { id: 'team-management', label: 'Team Management', icon: Users },
@@ -890,7 +1180,7 @@ function SettingsPage({
         return sanitizeLettersOnly(rawValue)
       }
       if (field === 'phone') {
-        return sanitizeDigitsOnly(rawValue)
+        return sanitizePhoneInputDigits(rawValue)
       }
       if (field === 'cacNumber') {
         return sanitizeAlphaNumeric(rawValue)
@@ -953,13 +1243,33 @@ function SettingsPage({
   const scrollToFirstInvalidField = (newErrors) => {
     const firstInvalidField = Object.keys(newErrors)[0]
     if (!firstInvalidField) return
-    setTimeout(() => {
-      const el = document.getElementById(`settings-${firstInvalidField}`)
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        if (typeof el.focus === 'function') el.focus()
-      }
-    }, 0)
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById(`settings-${firstInvalidField}`)
+        if (!el) return
+
+        const prefersReducedMotion = typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        const rect = el.getBoundingClientRect()
+        const viewportHeight = typeof window.innerHeight === 'number' ? window.innerHeight : 0
+        const shouldScroll = rect.top < 96 || rect.bottom > Math.max(0, viewportHeight - 32)
+
+        if (shouldScroll) {
+          el.scrollIntoView({
+            behavior: prefersReducedMotion ? 'auto' : 'smooth',
+            block: 'nearest',
+          })
+        }
+
+        if (typeof el.focus === 'function' && document.activeElement !== el) {
+          try {
+            el.focus({ preventScroll: true })
+          } catch {
+            el.focus()
+          }
+        }
+      })
+    })
   }
 
   const validateProfile = (data) => {
@@ -970,6 +1280,8 @@ function SettingsPage({
     if (!hasValue(data.phone)) newErrors.phone = 'This field is required.'
     if (hasValue(data.phone) && !/^\d+$/.test(String(data.phone || ''))) {
       newErrors.phone = 'Phone number can only contain numbers.'
+    } else if (hasValue(data.phone) && !PHONE_LOCAL_NUMBER_REGEX.test(sanitizePhoneInputDigits(data.phone))) {
+      newErrors.phone = 'Phone number must be 10 or 11 digits.'
     }
     if (!hasValue(data.address1)) newErrors.address1 = 'This field is required.'
     return newErrors
@@ -1016,7 +1328,7 @@ function SettingsPage({
     return newErrors
   }
 
-  const saveSection = (section, validateFn, lockableFields = []) => {
+  const saveSection = async (section, validateFn, lockableFields = []) => {
     const newErrors = validateFn(draftData)
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors)
@@ -1030,7 +1342,7 @@ function SettingsPage({
       firstName: toTitleCaseValue(sanitizeLettersOnly(draftData.firstName)),
       lastName: toTitleCaseValue(sanitizeLettersOnly(draftData.lastName)),
       otherNames: toTitleCaseValue(sanitizeLettersOnly(draftData.otherNames)),
-      phone: sanitizeDigitsOnly(draftData.phone),
+      phone: sanitizePhoneInputDigits(draftData.phone),
       cacNumber: sanitizeAlphaNumeric(draftData.cacNumber),
       startMonth: normalizeFinancialBoundaryDate(draftData.startMonth, 'start'),
       reportingCycle: normalizeFinancialBoundaryDate(draftData.reportingCycle, 'end'),
@@ -1043,12 +1355,19 @@ function SettingsPage({
       phoneCountryCode: updatedData.phoneCountryCode || '+234',
       phoneLocalNumber: updatedData.phone || '',
     }
+    if (typeof onSettingsProfileChange === 'function') {
+      const saveResult = await onSettingsProfileChange(buildSettingsProfilePayload(persistedData))
+      if (saveResult?.ok === false) {
+        showToast('error', saveResult.message || 'Unable to save your profile right now.')
+        return false
+      }
+    }
     setFormData({
       ...updatedData,
       phoneCountryCode: persistedData.phoneCountryCode,
       phoneLocalNumber: persistedData.phoneLocalNumber,
     })
-    localStorage.setItem(settingsStorageKey || 'settingsFormData', JSON.stringify(persistedData))
+    writeLegacyJson(settingsStorageKey || 'settingsFormData', persistedData)
     if (typeof setCompanyName === 'function') {
       setCompanyName(updatedData.businessName?.trim() || '')
     }
@@ -1068,8 +1387,8 @@ function SettingsPage({
     return true
   }
 
-  const handleSaveProfile = () => {
-    saveSection('user-profile', validateProfile, ['firstName', 'lastName', 'otherNames', 'email'])
+  const handleSaveProfile = async () => {
+    await saveSection('user-profile', validateProfile, ['firstName', 'lastName', 'otherNames', 'email'])
   }
 
   const handleSaveNotifications = () => {
@@ -1106,7 +1425,7 @@ function SettingsPage({
         govIdVerifiedAt: '',
         govIdVerificationStatus: 'verifying',
       }
-      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+      writeLegacyJson(verificationDocsKey, next)
       return next
     })
 
@@ -1124,7 +1443,7 @@ function SettingsPage({
           govIdVerifiedAt: '',
           govIdVerificationStatus: 'failed',
         }
-        localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+        writeLegacyJson(verificationDocsKey, next)
         return next
       })
       setIsIdentitySubmitting(false)
@@ -1138,7 +1457,7 @@ function SettingsPage({
         govIdVerifiedAt: new Date().toISOString(),
         govIdVerificationStatus: 'verified',
       }
-      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+      writeLegacyJson(verificationDocsKey, next)
       return next
     })
     setIsIdentitySubmitting(false)
@@ -1172,36 +1491,40 @@ function SettingsPage({
         businessRegVerificationStatus: 'submitted',
         businessRegSubmittedAt: new Date().toISOString(),
       }
-      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+      writeLegacyJson(verificationDocsKey, next)
       return next
     })
     showToast('success', 'Submitted. Awaiting approval.')
   }
 
-  const handleSaveBusiness = () => {
+  const handleSaveBusiness = async () => {
     const requiresRegistrationNumber = draftData.businessType === 'Business' || draftData.businessType === 'Non-Profit'
     const lockableFields = requiresRegistrationNumber ? ['cacNumber', 'businessName'] : ['businessName']
-    const didSave = saveSection('business-profile', validateBusiness, lockableFields)
+    const didSave = await saveSection('business-profile', validateBusiness, lockableFields)
     if (didSave && String(draftData.businessType || '').trim().toLowerCase() === 'individual') {
       setVerificationDocs((prev) => {
         const next = {
           ...prev,
           businessReg: '',
+          businessRegFileCacheKey: '',
+          businessRegMimeType: '',
+          businessRegSize: 0,
+          businessRegUploadedAt: '',
           businessRegVerificationStatus: '',
           businessRegSubmittedAt: '',
         }
-        localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+        writeLegacyJson(verificationDocsKey, next)
         return next
       })
     }
   }
 
-  const handleSaveTax = () => {
-    saveSection('tax-details', validateTax, ['tin'])
+  const handleSaveTax = async () => {
+    await saveSection('tax-details', validateTax, ['tin'])
   }
 
-  const handleSaveAddress = () => {
-    saveSection('registered-address', validateAddress)
+  const handleSaveAddress = async () => {
+    await saveSection('registered-address', validateAddress)
   }
 
   const verifyGovernmentIdClarity = (file) => new Promise((resolve) => {
@@ -1263,7 +1586,7 @@ function SettingsPage({
             govIdVerificationStatus: 'failed',
             govIdClarityStatus: 'not-clear',
           }
-          localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+          writeLegacyJson(verificationDocsKey, next)
           return next
         })
         showToast('error', clarityResult.message)
@@ -1278,7 +1601,7 @@ function SettingsPage({
           govIdVerificationStatus: 'pending',
           govIdClarityStatus: 'clear',
         }
-        localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+        writeLegacyJson(verificationDocsKey, next)
         return next
       })
       showToast('success', clarityResult.message)
@@ -1302,6 +1625,46 @@ function SettingsPage({
       return
     }
 
+    if (docType === 'businessReg') {
+      const renamedBusinessRegFilename = buildBusinessVerificationDocumentFilename(file.name)
+      const fileId = `BIZREG-${Date.now()}-${Math.floor(Math.random() * 1000)}`
+      const fileCacheKey = buildFileCacheKey({
+        ownerEmail: resolvedClientEmail || formData.email || scopedStorageSuffix,
+        fileId,
+      })
+      if (!fileCacheKey) {
+        showToast('error', 'Unable to save this document reference.')
+        resetInput()
+        return
+      }
+      const cached = await putCachedFileBlob(fileCacheKey, file, {
+        filename: renamedBusinessRegFilename,
+        mimeType: file.type,
+        size: file.size,
+      })
+      if (!cached) {
+        showToast('error', 'Unable to store this document. Try again.')
+        resetInput()
+        return
+      }
+      setVerificationDocs((prev) => {
+        const next = {
+          ...prev,
+          businessReg: renamedBusinessRegFilename,
+          businessRegFileCacheKey: fileCacheKey,
+          businessRegMimeType: String(file.type || 'application/octet-stream').trim(),
+          businessRegSize: Number(file.size || 0),
+          businessRegUploadedAt: new Date().toISOString(),
+          businessRegVerificationStatus: '',
+          businessRegSubmittedAt: '',
+        }
+        writeLegacyJson(verificationDocsKey, next)
+        return next
+      })
+      resetInput()
+      return
+    }
+
     setVerificationDocs((prev) => {
       const next = {
         ...prev,
@@ -1311,7 +1674,7 @@ function SettingsPage({
         next.businessRegVerificationStatus = ''
         next.businessRegSubmittedAt = ''
       }
-      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+      writeLegacyJson(verificationDocsKey, next)
       return next
     })
     resetInput()
@@ -1339,7 +1702,7 @@ function SettingsPage({
     image.onload = () => {
       setLogoFile(objectUrl)
       setCompanyLogo(objectUrl)
-      localStorage.setItem(companyLogoKey, objectUrl)
+      writeLegacyString(companyLogoKey, objectUrl)
       showToast('success', 'Company logo updated successfully.')
       input.value = ''
     }
@@ -1357,7 +1720,7 @@ function SettingsPage({
       const objectUrl = URL.createObjectURL(file)
       setPhotoFile(objectUrl)
       setProfilePhoto(objectUrl)
-      localStorage.setItem(profilePhotoKey, objectUrl)
+      writeLegacyString(profilePhotoKey, objectUrl)
     }
   }
 
@@ -1507,6 +1870,188 @@ function SettingsPage({
     showToast('success', 'Team member removed.')
   }
 
+  const persistAccountSettings = (nextSettings = {}) => {
+    const normalizedSettings = normalizeAccountSettingsState({
+      ...DEFAULT_ACCOUNT_SETTINGS,
+      ...accountSettings,
+      ...(nextSettings && typeof nextSettings === 'object' ? nextSettings : {}),
+      recoveryEmail: resolvedClientEmail || accountSettings.recoveryEmail || '',
+    })
+    setAccountSettings(normalizedSettings)
+    if (typeof onAccountSettingsChange === 'function') {
+      onAccountSettingsChange(normalizedSettings)
+    }
+    return normalizedSettings
+  }
+
+  const resetSecurityChallenge = () => {
+    setSecurityChallenge({
+      open: false,
+      mode: '',
+      otp: '',
+      isSending: false,
+      isVerifying: false,
+      expiresAt: '',
+    })
+  }
+
+  const closeSecurityChallenge = () => {
+    if (securityChallenge.isSending || securityChallenge.isVerifying) return
+    resetSecurityChallenge()
+  }
+
+  const readResponseMessage = async (response) => {
+    const payload = await response.json().catch(() => ({}))
+    return String(payload?.message || payload?.error || '').trim()
+  }
+
+  const startSecurityChallenge = async (mode = '') => {
+    if (!canManageAccountSecurity) {
+      showToast('error', 'Account security actions are available only in your direct client session.')
+      return false
+    }
+    if (!resolvedClientEmail) {
+      showToast('error', 'A valid account email is required before you continue.')
+      return false
+    }
+    if (!resolvedSecurityPhoneNumber) {
+      showToast('error', 'Add a valid phone number in User Profile before using two-step verification.')
+      setActiveSection('user-profile')
+      return false
+    }
+
+    setSecurityChallenge({
+      open: true,
+      mode,
+      otp: '',
+      isSending: true,
+      isVerifying: false,
+      expiresAt: '',
+    })
+
+    try {
+      const response = await apiFetch('/api/auth/send-sms-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phoneNumber: resolvedSecurityPhoneNumber,
+          purpose: 'mfa',
+          email: resolvedClientEmail,
+        }),
+      })
+      if (!response.ok) {
+        const message = await readResponseMessage(response)
+        showToast('error', message || 'Unable to send a verification code right now.')
+        resetSecurityChallenge()
+        return false
+      }
+
+      const payload = await response.json().catch(() => ({}))
+      setSecurityChallenge({
+        open: true,
+        mode,
+        otp: '',
+        isSending: false,
+        isVerifying: false,
+        expiresAt: String(payload?.expiresAt || '').trim(),
+      })
+      showToast('success', 'Verification code sent to your saved phone number.')
+      return true
+    } catch {
+      showToast('error', 'Unable to send a verification code right now.')
+      resetSecurityChallenge()
+      return false
+    }
+  }
+
+  const handlePasswordResetAction = async () => {
+    if (!canManageAccountSecurity) {
+      showToast('error', 'Password changes are available only in your direct client session.')
+      return
+    }
+    if (!resolvedClientEmail) {
+      showToast('error', 'A valid account email is required before you continue.')
+      return
+    }
+    if (accountSettings.twoStepEnabled) {
+      await startSecurityChallenge('password-reset')
+      return
+    }
+    if (typeof onRequestPasswordResetLink !== 'function') {
+      showToast('error', 'Password reset is unavailable right now.')
+      return
+    }
+    setIsSendingPasswordResetLink(true)
+    const result = await onRequestPasswordResetLink(resolvedClientEmail)
+    setIsSendingPasswordResetLink(false)
+    showToast(result?.ok ? 'success' : 'error', result?.message || 'Unable to send password reset link.')
+  }
+
+  const validatePasswordChangeForm = () => {
+    const normalizedCurrentPassword = String(passwordChangeForm.currentPassword || '')
+    const normalizedNewPassword = String(passwordChangeForm.newPassword || '')
+    const normalizedConfirmPassword = String(passwordChangeForm.confirmPassword || '')
+    if (!normalizedCurrentPassword || !normalizedNewPassword || !normalizedConfirmPassword) {
+      return 'Please complete all required fields.'
+    }
+    if (normalizedNewPassword !== normalizedConfirmPassword) {
+      return 'Passwords do not match.'
+    }
+    if (!PASSWORD_SECURITY_REGEX.test(normalizedNewPassword)) {
+      return 'Password does not meet security requirements.'
+    }
+    if (normalizedCurrentPassword === normalizedNewPassword) {
+      return 'New password must be different from your current password.'
+    }
+    return ''
+  }
+
+  const submitPasswordChange = async () => {
+    const validationMessage = validatePasswordChangeForm()
+    if (validationMessage) {
+      showToast('error', validationMessage)
+      return false
+    }
+    if (typeof onChangePassword !== 'function') {
+      showToast('error', 'Password change is unavailable right now.')
+      return false
+    }
+
+    setIsChangingPassword(true)
+    const result = await onChangePassword({
+      currentPassword: passwordChangeForm.currentPassword,
+      newPassword: passwordChangeForm.newPassword,
+      confirmPassword: passwordChangeForm.confirmPassword,
+    })
+    setIsChangingPassword(false)
+    showToast(result?.ok ? 'success' : 'error', result?.message || 'Unable to update your password right now.')
+    if (!result?.ok) return false
+
+    setPasswordChangeForm({
+      currentPassword: '',
+      newPassword: '',
+      confirmPassword: '',
+    })
+    return true
+  }
+
+  const handleChangePasswordAction = async () => {
+    if (!canManageAccountSecurity) {
+      showToast('error', 'Password changes are available only in your direct client session.')
+      return
+    }
+    const validationMessage = validatePasswordChangeForm()
+    if (validationMessage) {
+      showToast('error', validationMessage)
+      return
+    }
+    if (accountSettings.twoStepEnabled) {
+      await startSecurityChallenge('change-password')
+      return
+    }
+    await submitPasswordChange()
+  }
+
   const resetDeleteAccountFlow = () => {
     setDeleteAccountStep(1)
     setDeleteAccountDraft({
@@ -1518,9 +2063,13 @@ function SettingsPage({
     setIsDeletingAccount(false)
   }
 
-  const handleOpenDeleteAccountModal = () => {
+  const handleOpenDeleteAccountModal = async ({ bypassSecurityChallenge = false } = {}) => {
     if (!canDeleteAccount) {
-      showToast('error', 'Account deletion is not available in this session.')
+      showToast('error', 'Account deletion is available only in your direct client session.')
+      return
+    }
+    if (accountSettings.twoStepEnabled && !bypassSecurityChallenge) {
+      await startSecurityChallenge('delete-account')
       return
     }
     resetDeleteAccountFlow()
@@ -1531,6 +2080,99 @@ function SettingsPage({
     if (isDeletingAccount) return
     setIsDeleteModalOpen(false)
     resetDeleteAccountFlow()
+  }
+
+  const completeSecurityChallenge = async () => {
+    const normalizedOtp = sanitizeDigitsOnly(securityChallenge.otp)
+    if (!normalizedOtp) {
+      showToast('error', 'Enter the verification code sent to your phone.')
+      return
+    }
+    if (!resolvedSecurityPhoneNumber || !resolvedClientEmail) {
+      showToast('error', 'Missing account details for verification.')
+      return
+    }
+
+    setSecurityChallenge((previous) => ({
+      ...previous,
+      otp: normalizedOtp,
+      isVerifying: true,
+    }))
+
+    try {
+      const response = await apiFetch('/api/auth/verify-sms-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phoneNumber: resolvedSecurityPhoneNumber,
+          purpose: 'mfa',
+          otp: normalizedOtp,
+          email: resolvedClientEmail,
+        }),
+      })
+      if (!response.ok) {
+        const message = await readResponseMessage(response)
+        setSecurityChallenge((previous) => ({ ...previous, isVerifying: false }))
+        showToast('error', message || 'Verification code is invalid or expired.')
+        return
+      }
+
+      const nowIso = new Date().toISOString()
+      const mode = securityChallenge.mode
+      resetSecurityChallenge()
+
+      if (mode === 'enable-two-step') {
+        persistAccountSettings({
+          twoStepEnabled: true,
+          twoStepMethod: 'sms',
+          verifiedPhoneNumber: resolvedSecurityPhoneNumber,
+          recoveryEmail: resolvedClientEmail,
+          enabledAt: accountSettings.enabledAt || nowIso,
+          lastVerifiedAt: nowIso,
+        })
+        showToast('success', 'Two-step verification enabled.')
+        return
+      }
+
+      if (mode === 'disable-two-step') {
+        persistAccountSettings({
+          twoStepEnabled: false,
+          twoStepMethod: '',
+          verifiedPhoneNumber: '',
+          recoveryEmail: resolvedClientEmail,
+          enabledAt: '',
+          lastVerifiedAt: nowIso,
+        })
+        showToast('success', 'Two-step verification turned off.')
+        return
+      }
+
+      if (mode === 'password-reset') {
+        if (typeof onRequestPasswordResetLink !== 'function') {
+          showToast('error', 'Password reset is unavailable right now.')
+          return
+        }
+        setIsSendingPasswordResetLink(true)
+        const result = await onRequestPasswordResetLink(resolvedClientEmail)
+        setIsSendingPasswordResetLink(false)
+        showToast(result?.ok ? 'success' : 'error', result?.message || 'Unable to send password reset link.')
+        return
+      }
+
+      if (mode === 'change-password') {
+        await submitPasswordChange()
+        return
+      }
+
+      if (mode === 'delete-account') {
+        resetDeleteAccountFlow()
+        setIsDeleteModalOpen(true)
+        showToast('success', 'Verification successful. You can continue deleting your account.')
+      }
+    } catch {
+      setSecurityChallenge((previous) => ({ ...previous, isVerifying: false }))
+      showToast('error', 'Unable to verify this code right now.')
+    }
   }
 
   const goToNextDeleteStep = async () => {
@@ -1820,6 +2462,251 @@ function SettingsPage({
         )
       }
 
+      case 'account-settings': {
+        const securityActionsDisabled = !canManageAccountSecurity
+        const twoStepStatusClass = accountSettings.twoStepEnabled
+          ? 'bg-success-bg text-success'
+          : 'bg-background text-text-secondary'
+        const resolvedVerifiedPhone = accountSettings.verifiedPhoneNumber || resolvedSecurityPhoneNumber
+
+        return (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold text-text-primary mb-1">Account Settings</h3>
+                <p className="text-sm text-text-muted">Manage password recovery, two-step verification, and sensitive account actions.</p>
+              </div>
+              <span className={`inline-flex items-center h-8 px-3 rounded-full text-xs font-medium ${twoStepStatusClass}`}>
+                {accountSettings.twoStepEnabled ? 'Two-Step Enabled' : 'Two-Step Disabled'}
+              </span>
+            </div>
+
+            {securityActionsDisabled && (
+              <div className="rounded-lg border border-warning/30 bg-warning-bg/40 p-4">
+                <p className="text-sm font-semibold text-text-primary">Direct Client Session Required</p>
+                <p className="text-sm text-text-secondary mt-1">
+                  Password changes and security controls can only be managed in your own client session.
+                </p>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="rounded-lg border border-border-light bg-white p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-text-secondary">Sign-In Email</p>
+                <p className="mt-2 text-sm font-semibold text-text-primary">{resolvedClientEmail || 'Not configured'}</p>
+                <p className="mt-2 text-xs text-text-muted">
+                  Password reset links and account-security notices are sent to this email.
+                </p>
+              </div>
+              <div className="rounded-lg border border-border-light bg-white p-4">
+                <p className="text-xs font-medium uppercase tracking-wide text-text-secondary">Security Phone</p>
+                <p className="mt-2 text-sm font-semibold text-text-primary">{resolvedVerifiedPhone || 'Add a phone number in User Profile'}</p>
+                <p className="mt-2 text-xs text-text-muted">
+                  SMS verification codes will be sent to this number when two-step verification is enabled.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border-light bg-white p-4">
+              <div className="flex flex-col gap-4">
+                <div>
+                  <h4 className="text-sm font-semibold text-text-primary">Change Password</h4>
+                  <p className="text-sm text-text-secondary mt-1">
+                    Update your password within your current session. If you signed up with Google or forgot your password, you can still send a reset link instead.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-text-secondary mb-1">Current Password</label>
+                    <input
+                      type="password"
+                      value={passwordChangeForm.currentPassword}
+                      onChange={(event) => setPasswordChangeForm((previous) => ({
+                        ...previous,
+                        currentPassword: event.target.value,
+                      }))}
+                      placeholder="Enter current password"
+                      className="w-full px-3 py-2 border border-border-light rounded-md text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-text-secondary mb-1">New Password</label>
+                    <input
+                      type="password"
+                      value={passwordChangeForm.newPassword}
+                      onChange={(event) => setPasswordChangeForm((previous) => ({
+                        ...previous,
+                        newPassword: event.target.value,
+                      }))}
+                      placeholder="Enter new password"
+                      className="w-full px-3 py-2 border border-border-light rounded-md text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-text-secondary mb-1">Confirm New Password</label>
+                    <input
+                      type="password"
+                      value={passwordChangeForm.confirmPassword}
+                      onChange={(event) => setPasswordChangeForm((previous) => ({
+                        ...previous,
+                        confirmPassword: event.target.value,
+                      }))}
+                      placeholder="Confirm new password"
+                      className="w-full px-3 py-2 border border-border-light rounded-md text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="rounded-md border border-border-light bg-background/40 px-3 py-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-text-secondary">Password Rules</p>
+                  <p className="mt-1 text-xs text-text-muted">
+                    Minimum 8 characters, at least one uppercase letter, one number, and one special character.
+                  </p>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <button
+                    type="button"
+                    onClick={handleChangePasswordAction}
+                    disabled={securityActionsDisabled || isChangingPassword}
+                    className="h-9 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                  >
+                    {isChangingPassword && <Loader2 className="w-4 h-4 animate-spin" />}
+                    {isChangingPassword ? 'Updating...' : 'Update Password'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePasswordResetAction}
+                    disabled={securityActionsDisabled || isSendingPasswordResetLink || !resolvedClientEmail}
+                    className="h-9 px-4 rounded-md border border-border-light text-text-primary text-sm font-medium hover:bg-background transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                  >
+                    {isSendingPasswordResetLink && <Loader2 className="w-4 h-4 animate-spin" />}
+                    {isSendingPasswordResetLink ? 'Sending...' : 'Send Reset Link Instead'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border-light bg-white p-4 space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-text-primary">Two-Step Verification</h4>
+                  <p className="text-sm text-text-secondary mt-1">
+                    Require an SMS code before sensitive account actions such as password reset and account deletion.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (accountSettings.twoStepEnabled) {
+                      void startSecurityChallenge('disable-two-step')
+                      return
+                    }
+                    void startSecurityChallenge('enable-two-step')
+                  }}
+                  disabled={securityActionsDisabled || securityChallenge.isSending || securityChallenge.isVerifying}
+                  className={`h-9 px-4 rounded-md text-sm font-medium transition-colors inline-flex items-center gap-2 ${
+                    accountSettings.twoStepEnabled
+                      ? 'border border-border text-text-primary hover:bg-background'
+                      : 'bg-primary text-white hover:bg-primary-light'
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {(securityChallenge.isSending || securityChallenge.isVerifying) && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {accountSettings.twoStepEnabled ? 'Turn Off' : 'Turn On'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="rounded-md border border-border-light bg-background/40 px-3 py-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-text-secondary">Status</p>
+                  <p className="mt-1 text-sm font-semibold text-text-primary">
+                    {accountSettings.twoStepEnabled ? 'Enabled' : 'Disabled'}
+                  </p>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {accountSettings.twoStepEnabled
+                      ? 'SMS verification is active for sensitive account actions.'
+                      : 'No extra verification is required for sensitive account actions.'}
+                  </p>
+                </div>
+                <div className="rounded-md border border-border-light bg-background/40 px-3 py-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-text-secondary">Verified Number</p>
+                  <p className="mt-1 text-sm font-semibold text-text-primary">
+                    {accountSettings.verifiedPhoneNumber || 'Not verified yet'}
+                  </p>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {accountSettings.lastVerifiedAt
+                      ? `Last verified ${formatDateTime(accountSettings.lastVerifiedAt)}.`
+                      : 'Verify your current phone number to turn this on.'}
+                  </p>
+                </div>
+              </div>
+
+              {verifiedSecurityPhoneMismatch && (
+                <div className="rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-3">
+                  <p className="text-sm font-semibold text-text-primary">Phone number changed</p>
+                  <p className="text-sm text-text-secondary mt-1">
+                    Your saved profile phone number is different from the verified number used for two-step verification.
+                    Turn two-step verification off and on again to verify the new number.
+                  </p>
+                </div>
+              )}
+
+              {!resolvedSecurityPhoneNumber && (
+                <div className="rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-3">
+                  <p className="text-sm font-semibold text-text-primary">Phone number required</p>
+                  <p className="text-sm text-text-secondary mt-1">
+                    Add a valid phone number in User Profile before you enable two-step verification.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveSection('user-profile')}
+                    className="mt-3 h-8 px-3 rounded-md bg-primary text-white text-xs font-medium hover:bg-primary-light transition-colors"
+                  >
+                    Open User Profile
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-lg border border-border-light bg-white p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-text-primary">Security Alert Emails</h4>
+                  <p className="text-sm text-text-secondary mt-1">
+                    Manage email alerts for unusual activity and security notices in Notification Settings.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('notifications')}
+                  className="h-9 px-4 rounded-md border border-border text-sm font-medium text-text-primary hover:bg-background transition-colors"
+                >
+                  Open Notifications
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-error/30 bg-error-bg/30 p-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-text-primary">Delete Account</h4>
+                  <p className="text-sm text-text-secondary mt-1">
+                    Permanently delete your account and remove access to this client workspace.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { void handleOpenDeleteAccountModal() }}
+                  disabled={!canDeleteAccount}
+                  className="h-9 px-4 rounded-md border border-error text-error text-sm font-medium hover:bg-error-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete Account
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      }
+
       case 'notifications': {
         const isEditingNotifications = editMode['notifications']
         return (
@@ -1996,7 +2883,7 @@ function SettingsPage({
                         govIdClarityStatus: nextType === verificationDocs.govIdType ? verificationDocs.govIdClarityStatus : '',
                       }
                       setVerificationDocs(next)
-                      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+                      writeLegacyJson(verificationDocsKey, next)
                     }}
                     disabled={identityLockedForClient}
                     className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary disabled:bg-gray-100 disabled:cursor-not-allowed"
@@ -2022,7 +2909,7 @@ function SettingsPage({
                         govIdVerificationStatus: '',
                       }
                       setVerificationDocs(next)
-                      localStorage.setItem(verificationDocsKey, JSON.stringify(next))
+                      writeLegacyJson(verificationDocsKey, next)
                     }}
                     disabled={identityLockedForClient}
                     placeholder="Enter ID card number"
@@ -2325,7 +3212,7 @@ function SettingsPage({
                     <span>Customer Reference ID (CRI)</span>
                     <Lock className="w-3.5 h-3.5 text-text-muted" />
                   </div>
-                  <div className="mt-1 text-sm font-medium text-text-primary">CRI-2026-78234</div>
+                  <div className="mt-1 text-sm font-medium text-text-primary">{resolvedClientCri}</div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {renderReadonlyField('Business Type', formData.businessType, true)}
@@ -2393,7 +3280,7 @@ function SettingsPage({
                     onClick={showLockedFieldToast}
                     className="w-full h-10 px-3 border border-gray-200 rounded-md bg-gray-100 text-left flex items-center justify-between"
                   >
-                    <span className="text-sm text-text-primary">CRI-2026-78234</span>
+                    <span className="text-sm text-text-primary">{resolvedClientCri}</span>
                     <Lock className="w-4 h-4 text-text-muted" />
                   </button>
                 </div>
@@ -2842,7 +3729,7 @@ function SettingsPage({
   }
 
   return (
-    <div className="animate-fade-in">
+    <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-semibold text-text-primary">Business Settings</h1>
       </div>
@@ -2911,23 +3798,91 @@ function SettingsPage({
         </div>
       </div>
 
-      <div className="mt-6 rounded-lg border border-error/30 bg-error-bg/30 p-4">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-text-primary">Danger Zone</h3>
-            <p className="text-xs text-text-secondary mt-1">Delete your account permanently. This cannot be undone.</p>
+      {securityChallenge.open && (
+        <div className="fixed inset-0 z-[165] bg-black/35 p-4 flex items-center justify-center">
+          <div className="w-full max-w-lg rounded-lg border border-border-light bg-white shadow-card p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-lg font-semibold text-text-primary">Security Verification</h4>
+                <p className="text-xs text-text-muted mt-1">
+                  Enter the SMS verification code sent to {resolvedSecurityPhoneNumber || 'your saved phone number'}.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeSecurityChallenge}
+                disabled={securityChallenge.isSending || securityChallenge.isVerifying}
+                className="h-8 w-8 rounded border border-border-light text-text-secondary hover:text-text-primary hover:bg-background inline-flex items-center justify-center disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 space-y-4">
+              <div className="rounded-md border border-border-light bg-background/40 px-3 py-3">
+                <p className="text-sm font-medium text-text-primary">
+                  {securityChallenge.mode === 'enable-two-step' && 'Enable two-step verification'}
+                  {securityChallenge.mode === 'disable-two-step' && 'Turn off two-step verification'}
+                  {securityChallenge.mode === 'password-reset' && 'Confirm password reset request'}
+                  {securityChallenge.mode === 'change-password' && 'Confirm password change request'}
+                  {securityChallenge.mode === 'delete-account' && 'Confirm account deletion access'}
+                </p>
+                <p className="text-xs text-text-muted mt-1">
+                  {securityChallenge.expiresAt
+                    ? `Code expires ${formatDateTime(securityChallenge.expiresAt)}.`
+                    : 'A fresh code has been sent to your phone.'}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-text-primary mb-1.5">Verification Code</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={securityChallenge.otp}
+                  onChange={(event) => setSecurityChallenge((previous) => ({
+                    ...previous,
+                    otp: sanitizeDigitsOnly(event.target.value).slice(0, 6),
+                  }))}
+                  placeholder="Enter 6-digit code"
+                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => { void startSecurityChallenge(securityChallenge.mode) }}
+                disabled={securityChallenge.isSending || securityChallenge.isVerifying}
+                className="h-9 px-4 rounded-md border border-border text-sm font-medium text-text-primary hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {securityChallenge.isSending ? 'Sending...' : 'Resend Code'}
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closeSecurityChallenge}
+                  disabled={securityChallenge.isSending || securityChallenge.isVerifying}
+                  className="h-9 px-4 rounded-md border border-border text-sm font-medium text-text-primary hover:bg-background disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={completeSecurityChallenge}
+                  disabled={securityChallenge.isSending || securityChallenge.isVerifying}
+                  className="h-9 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                >
+                  {securityChallenge.isVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {securityChallenge.isVerifying ? 'Verifying...' : 'Verify Code'}
+                </button>
+              </div>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={handleOpenDeleteAccountModal}
-            disabled={!canDeleteAccount}
-            className="h-9 px-4 rounded-md border border-error text-error text-sm font-medium hover:bg-error-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-          >
-            <Trash2 className="w-4 h-4" />
-            Delete Account
-          </button>
         </div>
-      </div>
+      )}
 
       {isInviteModalOpen && (
         <div className="fixed inset-0 z-[160] bg-black/30 backdrop-blur-[1px] p-4 flex items-center justify-center">

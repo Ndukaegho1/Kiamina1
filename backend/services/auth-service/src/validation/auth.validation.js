@@ -15,6 +15,7 @@ const ACCOUNT_STATUSES = ["active", "disabled", "suspended", "pending"];
 const AUTH_PROVIDERS = ["email-password", "google", "otp", "invite", "sso"];
 const LOGIN_METHODS = ["password", "otp", "google", "token", "invite"];
 const SMS_PURPOSES = ["admin-email-change", "login", "password-reset", "mfa"];
+const PASSWORD_COMPLEXITY_PATTERN = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/;
 
 const PURPOSES_TEXT = PURPOSES.join(", ");
 const ACCOUNT_ROLES_TEXT = ACCOUNT_ROLES.join(", ");
@@ -147,6 +148,18 @@ const verifyTokenSchema = Joi.object({
     "any.custom": "{{#message}}"
   });
 
+const socialAuthAccountStatusSchema = Joi.object({
+  idToken: Joi.string().trim().required().min(20).messages({
+    "any.required": "idToken is required",
+    "string.empty": "idToken is required",
+    "string.min": "idToken format appears invalid"
+  }),
+  provider: Joi.string().trim().lowercase().valid(...AUTH_PROVIDERS).default("google").messages({
+    "any.only": `provider must be one of: ${AUTH_PROVIDERS_TEXT}`,
+    "string.empty": `provider must be one of: ${AUTH_PROVIDERS_TEXT}`
+  })
+});
+
 const refreshTokenSchema = Joi.object({
   refreshToken: Joi.string()
     .trim()
@@ -175,6 +188,15 @@ const sendPasswordResetLinkSchema = Joi.object({
   })
 });
 
+const sendEmailVerificationLinkSchema = Joi.object({
+  email: requiredEmailSchema,
+  verificationLink: Joi.string().trim().uri({ scheme: [/https?/] }).required().messages({
+    "any.required": "verificationLink is required",
+    "string.empty": "verificationLink is required",
+    "string.uri": "verificationLink must be a valid URL"
+  })
+});
+
 const sendSmsOtpSchema = Joi.object({
   phoneNumber: requiredPhoneSchema,
   purpose: Joi.string().trim().lowercase().valid(...SMS_PURPOSES).default("admin-email-change").messages({
@@ -198,6 +220,33 @@ const verifySmsOtpSchema = Joi.object({
   }),
   email: optionalEmailAllowEmptySchema,
   currentEmail: optionalEmailAllowEmptySchema
+});
+
+const passwordLoginSchema = Joi.object({
+  email: requiredEmailSchema,
+  password: Joi.string().required().max(200).messages({
+    "any.required": "password is required",
+    "string.empty": "password is required",
+    "string.max": "password must be at most 200 characters"
+  })
+});
+
+const changePasswordSchema = Joi.object({
+  currentPassword: Joi.string().required().max(200).messages({
+    "any.required": "currentPassword is required",
+    "string.empty": "currentPassword is required",
+    "string.max": "currentPassword must be at most 200 characters"
+  }),
+  newPassword: Joi.string()
+    .required()
+    .max(200)
+    .pattern(PASSWORD_COMPLEXITY_PATTERN)
+    .messages({
+      "any.required": "newPassword is required",
+      "string.empty": "newPassword is required",
+      "string.max": "newPassword must be at most 200 characters",
+      "string.pattern.base": "newPassword must meet password security requirements"
+    })
 });
 
 const logoutSessionSchema = Joi.object({
@@ -344,6 +393,19 @@ export const validateRefreshTokenPayload = (body) => {
   };
 };
 
+export const validateSocialAuthAccountStatusPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = socialAuthAccountStatusSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      idToken: value?.idToken || "",
+      provider: value?.provider || "google"
+    }
+  };
+};
+
 export const validateLogoutSessionPayload = (body) => {
   const source = normalizeSource(body);
   const { value, error } = logoutSessionSchema.validate(source, VALIDATION_OPTIONS);
@@ -397,6 +459,19 @@ export const validateSendPasswordResetLinkPayload = (body) => {
   };
 };
 
+export const validateSendEmailVerificationLinkPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = sendEmailVerificationLinkSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      email: value?.email || "",
+      verificationLink: value?.verificationLink || ""
+    }
+  };
+};
+
 export const validateSendSmsOtpPayload = (body) => {
   const source = normalizeSource(body);
   const { value, error } = sendSmsOtpSchema.validate(source, VALIDATION_OPTIONS);
@@ -424,6 +499,32 @@ export const validateVerifySmsOtpPayload = (body) => {
       otp: value?.otp || "",
       email: value?.email || "",
       currentEmail: value?.currentEmail || ""
+    }
+  };
+};
+
+export const validatePasswordLoginPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = passwordLoginSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      email: value?.email || "",
+      password: value?.password || ""
+    }
+  };
+};
+
+export const validateChangePasswordPayload = (body) => {
+  const source = normalizeSource(body);
+  const { value, error } = changePasswordSchema.validate(source, VALIDATION_OPTIONS);
+
+  return {
+    errors: toErrors(error),
+    payload: {
+      currentPassword: value?.currentPassword || "",
+      newPassword: value?.newPassword || ""
     }
   };
 };

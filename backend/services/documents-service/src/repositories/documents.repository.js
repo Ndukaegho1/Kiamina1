@@ -5,6 +5,15 @@ export const createDocumentRecord = async (payload) => Document.create(payload);
 export const listDocumentsByOwner = async (ownerUserId) =>
   Document.find({ ownerUserId }).sort({ createdAt: -1 });
 
+export const listDocumentStorageRefsByOwner = async (ownerUserId) =>
+  Document.find(
+    { ownerUserId },
+    {
+      storageProvider: 1,
+      storagePath: 1
+    }
+  ).lean();
+
 export const findDocumentById = async (id) => Document.findById(id);
 
 export const updateDocumentStatus = async (id, status) =>
@@ -17,6 +26,9 @@ export const updateDocumentById = async (id, payload) =>
   });
 
 export const deleteDocumentById = async (id) => Document.findByIdAndDelete(id);
+
+export const deleteDocumentsByOwner = async (ownerUserId) =>
+  Document.deleteMany({ ownerUserId });
 
 const getSafeStatusKey = (value = "") => {
   const normalized = String(value || "").trim().toLowerCase();

@@ -32,6 +32,45 @@ export const findUserByUid = async (uid) => User.findOne({ uid });
 export const findUserByEmail = async (email) =>
   User.findOne({ email: String(email || "").trim().toLowerCase() });
 
+export const findUserByClientPhone = async ({
+  excludeUid = "",
+  phoneCountryCode = "",
+  phoneLocalNumber = "",
+  phoneVariants = []
+} = {}) => {
+  const normalizedCountryCode = String(phoneCountryCode || "").trim();
+  const normalizedLocalNumber = String(phoneLocalNumber || "").trim();
+  const variants = [...new Set(
+    (Array.isArray(phoneVariants) ? phoneVariants : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  )];
+
+  if (!normalizedCountryCode && !normalizedLocalNumber && variants.length === 0) {
+    return null;
+  }
+
+  const filters = [];
+  if (normalizedCountryCode || normalizedLocalNumber) {
+    filters.push({
+      "clientProfile.phoneCountryCode": normalizedCountryCode,
+      "clientProfile.phoneLocalNumber": normalizedLocalNumber
+    });
+  }
+  if (variants.length > 0) {
+    filters.push({ "clientProfile.phone": { $in: variants } });
+    filters.push({ "clientWorkspace.settingsProfile.phone": { $in: variants } });
+    filters.push({ "clientWorkspace.accountSettings.verifiedPhoneNumber": { $in: variants } });
+  }
+
+  const query = filters.length === 1 ? filters[0] : { $or: filters };
+  if (excludeUid) {
+    query.uid = { $ne: String(excludeUid || "").trim() };
+  }
+
+  return User.findOne(query);
+};
+
 export const findUserById = async (id) => User.findById(id);
 
 export const listUsers = async ({
@@ -60,3 +99,5 @@ export const updateUserByUid = async (uid, payload) =>
   });
 
 export const deleteUserById = async (id) => User.findByIdAndDelete(id);
+
+export const deleteUserByUid = async (uid) => User.findOneAndDelete({ uid });

@@ -41,3 +41,14 @@ export const revokeAuthSession = async ({ sessionId, reason = "revoked" }) =>
       new: true
     }
   );
+
+export const revokeAuthSessionsByUid = async ({ uid, reason = "revoked" }) =>
+  AuthSession.updateMany(
+    { uid, revokedAt: null },
+    {
+      $set: {
+        revokedAt: new Date(),
+        revokedReason: reason
+      }
+    }
+  );

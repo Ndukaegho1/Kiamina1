@@ -1,476 +1,175 @@
-﻿import { useState, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
-  LayoutDashboard,
-  DollarSign,
-  TrendingUp,
-  Building2,
-  Upload,
-  Settings,
-  LogOut,
-  Search,
-  Bell,
-  ChevronDown,
-  Plus,
-  Eye,
-  X,
-  FileUp,
-  ArrowUpRight,
-  ArrowDownRight,
-  Clock,
-  FileText,
-  FileSpreadsheet,
-  File,
-  ChevronRight,
-  User,
-  Shield,
-  CheckCircle,
   AlertCircle,
+  ArrowLeft,
+  CheckCircle,
+  Eye,
+  EyeOff,
   Loader2,
-  UploadCloud,
-  MapPin,
-  Building,
-  Lock
+  Lock,
+  Mail,
+  Phone,
+  Shield,
 } from 'lucide-react'
 import KiaminaLogo from '../common/KiaminaLogo'
 
+const BRAND_COLOR = '#153585'
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const PASSWORD_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+const CLIENT_PHONE_REGEX = /^\d{10,11}$/
+const PASSWORD_REQUIREMENTS = [
+  'Minimum 8 characters',
+  'At least one uppercase letter',
+  'At least one number',
+  'At least one special character',
+]
+const TITLES = {
+  login: 'Sign In',
+  signup: 'Create Account',
+  'forgot-password': 'Forgot Password',
+  'reset-password': 'Reset Password',
+  'email-verification': 'Email Verification',
+}
+const DESCRIPTIONS = {
+  login: 'Access your client portal securely.',
+  signup: 'Register your client account with professional, secure access controls.',
+  'forgot-password': 'Request a secure password reset link for your account.',
+  'reset-password': 'Create a new password for your client portal.',
+  'email-verification': 'Confirm your email address to activate your Kiamina account.',
+}
+
 function GoogleBrandIcon() {
   return (
-    <svg viewBox="0 0 24 24" className="w-5 h-5" aria-hidden="true">
-      <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.24 1.26-.96 2.32-2.05 3.04l3.31 2.57c1.93-1.78 3.04-4.4 3.04-7.51 0-.72-.07-1.43-.2-2.1H12z"/>
-      <path fill="#34A853" d="M12 22c2.75 0 5.07-.9 6.76-2.29l-3.31-2.57c-.92.62-2.09.98-3.45.98-2.66 0-4.9-1.8-5.7-4.21l-3.42 2.64C4.55 19.84 8.01 22 12 22z"/>
-      <path fill="#4A90E2" d="M6.3 13.91A5.95 5.95 0 0 1 6 12c0-.66.11-1.3.3-1.91L2.88 7.45A9.97 9.97 0 0 0 2 12c0 1.6.38 3.11 1.05 4.45l3.25-2.54z"/>
-      <path fill="#FBBC05" d="M12 5.88c1.49 0 2.82.51 3.87 1.5l2.9-2.9C17.06 2.88 14.75 2 12 2 8.01 2 4.55 4.16 2.88 7.45l3.42 2.64c.8-2.41 3.04-4.21 5.7-4.21z"/>
+    <svg viewBox="0 0 24 24" className="h-5 w-5" aria-hidden="true">
+      <path fill="#EA4335" d="M12 10.2v3.9h5.5c-.24 1.26-.96 2.32-2.05 3.04l3.31 2.57c1.93-1.78 3.04-4.4 3.04-7.51 0-.72-.07-1.43-.2-2.1H12z" />
+      <path fill="#34A853" d="M12 22c2.75 0 5.07-.9 6.76-2.29l-3.31-2.57c-.92.62-2.09.98-3.45.98-2.66 0-4.9-1.8-5.7-4.21l-3.42 2.64C4.55 19.84 8.01 22 12 22z" />
+      <path fill="#4A90E2" d="M6.3 13.91A5.95 5.95 0 0 1 6 12c0-.66.11-1.3.3-1.91L2.88 7.45A9.97 9.97 0 0 0 2 12c0 1.6.38 3.11 1.05 4.45l3.25-2.54z" />
+      <path fill="#FBBC05" d="M12 5.88c1.49 0 2.82.51 3.87 1.5l2.9-2.9C17.06 2.88 14.75 2 12 2 8.01 2 4.55 4.16 2.88 7.45l3.42 2.64c.8-2.41 3.04-4.21 5.7-4.21z" />
     </svg>
   )
 }
 
-function LegacyAuthExperience({ mode, setMode, onLogin, onSignup, onSocialLogin, onForgotPassword, onRequestOtp }) {
-  const [loginForm, setLoginForm] = useState({ email: '', password: '', otp: '', remember: false, agree: false })
-  const [otpSent, setOtpSent] = useState(false)
-  const [signupErrors, setSignupErrors] = useState({ password: '' })
-  const [signupForm, setSignupForm] = useState({
-    fullName: '',
-    email: '',
-    password: '',
-    confirmPassword: '',
-    agree: false,
-  })
-  const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).+$/
+function maskEmail(email) {
+  const value = String(email || '').trim()
+  const at = value.indexOf('@')
+  if (at <= 1) return value || 'your email address'
+  return `${value[0]}${'*'.repeat(Math.max(3, at - 1))}${value.slice(at)}`
+}
 
-  const socialButtons = [
-    { id: 'google', label: 'Continue with Google', icon: GoogleBrandIcon },
-  ]
+function getPasswordStrength(password) {
+  let score = 0
+  if (password.length >= 8) score += 1
+  if (/[A-Z]/.test(password)) score += 1
+  if (/\d/.test(password)) score += 1
+  if (/[^A-Za-z0-9]/.test(password)) score += 1
+  if (score <= 1) return { label: 'Weak', width: '25%', color: 'bg-red-500' }
+  if (score === 2) return { label: 'Fair', width: '50%', color: 'bg-amber-500' }
+  if (score === 3) return { label: 'Good', width: '75%', color: 'bg-blue-600' }
+  return { label: 'Strong', width: '100%', color: 'bg-emerald-600' }
+}
 
+function Notice({ type = 'error', message = '' }) {
+  if (!message) return null
+  const classes = type === 'success'
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : type === 'info'
+      ? 'border-[#cddbf7] bg-[#f3f7ff] text-[#21407e]'
+      : 'border-red-200 bg-red-50 text-red-700'
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center px-4 py-10" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
-      <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-8">
-        <div className="flex items-center justify-center mb-6">
-          <KiaminaLogo className="h-12 w-auto" />
-        </div>
-
-        {mode === 'login' ? (
-          <>
-            <h1 className="text-2xl font-semibold text-text-primary text-center">Welcome Back</h1>
-            <p className="text-sm text-text-muted text-center mt-2 mb-6">Access your financial dashboard securely.</p>
-
-            <div className="space-y-3">
-              {socialButtons.map((button) => (
-                <button
-                  key={button.id}
-                  type="button"
-                  onClick={() => onSocialLogin(button.id)}
-                  className="w-full h-11 px-4 border border-border rounded-md flex items-center justify-center gap-2 text-sm font-medium text-text-primary hover:bg-background transition-colors"
-                >
-                  <button.icon />
-                  {button.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-3 my-6">
-              <div className="flex-1 border-t border-border-light"></div>
-              <span className="text-xs text-text-muted font-medium">OR</span>
-              <div className="flex-1 border-t border-border-light"></div>
-            </div>
-
-            <form
-              className="space-y-4"
-              onSubmit={(e) => {
-                e.preventDefault()
-                onLogin(loginForm)
-              }}
-            >
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Email Address</label>
-                <input
-                  type="email"
-                  value={loginForm.email}
-                  onChange={(e) => setLoginForm(prev => ({ ...prev, email: e.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Password</label>
-                <input
-                  type="password"
-                  value={loginForm.password}
-                  onChange={(e) => setLoginForm(prev => ({ ...prev, password: e.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-              </div>
-              {otpSent && (
-                <div>
-                  <label className="block text-sm font-medium text-text-primary mb-1.5">One-Time Password (OTP)</label>
-                  <input
-                    type="text"
-                    value={loginForm.otp}
-                    onChange={(e) => setLoginForm(prev => ({ ...prev, otp: e.target.value }))}
-                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary tracking-[0.2em]"
-                  />
-                </div>
-              )}
-              <div className="flex items-center justify-between">
-                <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                  <input
-                    type="checkbox"
-                    checked={loginForm.remember}
-                    onChange={(e) => setLoginForm(prev => ({ ...prev, remember: e.target.checked }))}
-                    className="w-4 h-4 accent-primary"
-                  />
-                  Remember Me
-                </label>
-                <button type="button" onClick={() => onForgotPassword(loginForm.email)} className="text-sm text-primary hover:text-primary-light">
-                  Forgot Password?
-                </button>
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input
-                  type="checkbox"
-                  checked={loginForm.agree}
-                  onChange={(e) => setLoginForm(prev => ({ ...prev, agree: e.target.checked }))}
-                  className="w-4 h-4 accent-primary"
-                />
-                I agree to the Terms & Privacy Policy
-              </label>
-              <button
-                type="button"
-                onClick={async () => {
-                  const sent = await onRequestOtp(loginForm.email)
-                  if (sent) setOtpSent(true)
-                }}
-                className="w-full h-10 bg-white border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors"
-              >
-                Send OTP to Email
-              </button>
-              <button
-                type="submit"
-                disabled={!loginForm.agree}
-                className="w-full h-10 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {otpSent ? 'Verify OTP & Sign In' : 'Sign In'}
-              </button>
-            </form>
-
-            <p className="text-sm text-text-muted text-center mt-6">
-              Don't have an account?{' '}
-              <button type="button" onClick={() => setMode('signup')} className="text-primary font-medium hover:text-primary-light">
-                Sign Up
-              </button>
-            </p>
-          </>
-        ) : (
-          <>
-            <h1 className="text-2xl font-semibold text-text-primary text-center">Create Your Account</h1>
-            <p className="text-sm text-text-muted text-center mt-2 mb-6">Start managing your accounting and compliance in one secure platform.</p>
-
-            <div className="space-y-3">
-              {socialButtons.map((button) => (
-                <button
-                  key={button.id}
-                  type="button"
-                  onClick={() => onSocialLogin(button.id)}
-                  className="w-full h-11 px-4 border border-border rounded-md flex items-center justify-center gap-2 text-sm font-medium text-text-primary hover:bg-background transition-colors"
-                >
-                  <button.icon />
-                  {button.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-3 my-6">
-              <div className="flex-1 border-t border-border-light"></div>
-              <span className="text-xs text-text-muted font-medium">OR</span>
-              <div className="flex-1 border-t border-border-light"></div>
-            </div>
-
-            <form
-              className="space-y-4"
-              onSubmit={(e) => {
-                e.preventDefault()
-                const passwordError = signupPasswordRegex.test(signupForm.password)
-                  ? ''
-                  : 'Password must include at least one number and one special character.'
-                setSignupErrors({ password: passwordError })
-                if (passwordError) return
-                onSignup(signupForm)
-              }}
-            >
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Full Name</label>
-                <input
-                  type="text"
-                  value={signupForm.fullName}
-                  onChange={(e) => setSignupForm(prev => ({ ...prev, fullName: e.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Email Address</label>
-                <input
-                  type="email"
-                  value={signupForm.email}
-                  onChange={(e) => setSignupForm(prev => ({ ...prev, email: e.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Password</label>
-                <input
-                  type="password"
-                  value={signupForm.password}
-                  onChange={(e) => {
-                    const nextPassword = e.target.value
-                    setSignupForm(prev => ({ ...prev, password: nextPassword }))
-                    if (signupErrors.password) {
-                      setSignupErrors({
-                        password: signupPasswordRegex.test(nextPassword)
-                          ? ''
-                          : 'Password must include at least one number and one special character.'
-                      })
-                    }
-                  }}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-                {signupErrors.password && <p className="text-xs text-error mt-1">{signupErrors.password}</p>}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Confirm Password</label>
-                <input
-                  type="password"
-                  value={signupForm.confirmPassword}
-                  onChange={(e) => setSignupForm(prev => ({ ...prev, confirmPassword: e.target.value }))}
-                  className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
-                />
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input
-                  type="checkbox"
-                  checked={signupForm.agree}
-                  onChange={(e) => setSignupForm(prev => ({ ...prev, agree: e.target.checked }))}
-                  className="w-4 h-4 accent-primary"
-                />
-                I agree to the Terms & Privacy Policy
-              </label>
-              <button
-                type="submit"
-                disabled={!signupForm.agree}
-                className="w-full h-10 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Create Account
-              </button>
-            </form>
-
-            <p className="text-xs text-text-muted text-center mt-4">Your information is encrypted and securely stored.</p>
-            <p className="text-sm text-text-muted text-center mt-4">
-              Already have an account?{' '}
-              <button type="button" onClick={() => setMode('login')} className="text-primary font-medium hover:text-primary-light">
-                Sign In
-              </button>
-            </p>
-          </>
-        )}
-      </div>
+    <div className={`flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm ${classes}`}>
+      {type === 'success' ? <CheckCircle className="mt-0.5 h-4 w-4 flex-shrink-0" /> : <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />}
+      <span>{message}</span>
     </div>
   )
 }
 
-function maskEmailAddress(email) {
-  const normalized = email?.trim() || ''
-  const atIndex = normalized.indexOf('@')
-  if (atIndex <= 1) return normalized || 'your registered email'
-  const local = normalized.slice(0, atIndex)
-  const domain = normalized.slice(atIndex)
-  return `${local[0]}${'*'.repeat(Math.max(4, local.length - 1))}${domain}`
+function Field({ label, icon: Icon, error = '', required = false, children }) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-sm font-semibold text-slate-800">
+        {label}
+        {required ? <span className="ml-1 text-red-500">*</span> : null}
+      </span>
+      <div className={`flex h-12 items-center gap-3 rounded-xl bg-white px-4 ${error ? 'border border-red-300' : 'border border-slate-200 focus-within:border-[#153585]'}`}>
+        {Icon ? <Icon className={`h-4 w-4 flex-shrink-0 ${error ? 'text-red-500' : 'text-slate-400'}`} /> : null}
+        {children}
+      </div>
+      {error ? <p className="mt-2 text-xs font-medium text-red-600">{error}</p> : null}
+    </label>
+  )
 }
 
-function getPasswordStrengthState(password) {
-  let score = 0
-  if (password.length >= 8) score += 1
-  if (/[A-Z]/.test(password) && /[a-z]/.test(password)) score += 1
-  if (/\d/.test(password)) score += 1
-  if (/[^A-Za-z0-9]/.test(password)) score += 1
-
-  if (score <= 1) return { score, label: 'Weak', color: 'bg-error' }
-  if (score === 2) return { score, label: 'Fair', color: 'bg-warning' }
-  if (score === 3) return { score, label: 'Good', color: 'bg-primary' }
-  return { score, label: 'Strong', color: 'bg-success' }
-}
-
-function OtpVerificationModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
-  const [otpDigits, setOtpDigits] = useState(['', '', '', '', '', ''])
-  const [otpError, setOtpError] = useState('')
+function OtpModal({ challenge, onVerifyOtp, onResendOtp, onCancelOtp }) {
+  const [digits, setDigits] = useState(['', '', '', '', '', ''])
+  const [error, setError] = useState('')
   const [isVerifying, setIsVerifying] = useState(false)
   const [isResending, setIsResending] = useState(false)
-  const [isShaking, setIsShaking] = useState(false)
-  const otpInputRefs = useRef([])
+  const refs = useRef([])
+  const code = digits.join('')
+  const deliveryStatusMessage = challenge?.deliveryError
+    ? 'We could not confirm delivery of the verification code. If it does not arrive, use Resend code.'
+    : ''
 
-  const otpCode = otpDigits.join('')
-  const maskedEmail = maskEmailAddress(challenge.email)
-
-  const triggerShake = () => {
-    setIsShaking(true)
-    setTimeout(() => setIsShaking(false), 350)
-  }
-
-  const handleOtpChange = (index, rawValue) => {
-    const digitsOnly = rawValue.replace(/\D/g, '')
-    if (!digitsOnly) {
-      const next = [...otpDigits]
-      next[index] = ''
-      setOtpDigits(next)
-      return
-    }
-
-    const next = [...otpDigits]
-    digitsOnly.slice(0, 6 - index).split('').forEach((digit, offset) => {
-      next[index + offset] = digit
-    })
-    setOtpDigits(next)
-    setOtpError('')
-
-    const nextFocusIndex = Math.min(index + digitsOnly.length, 5)
-    otpInputRefs.current[nextFocusIndex]?.focus()
-    otpInputRefs.current[nextFocusIndex]?.select()
-
-    if (next.join('').length === 6) {
-      void handleVerify(next.join(''))
-    }
-  }
-
-  const handleOtpKeyDown = (index, event) => {
-    if (event.key === 'Backspace') {
-      if (otpDigits[index]) {
-        const next = [...otpDigits]
-        next[index] = ''
-        setOtpDigits(next)
-      } else if (index > 0) {
-        const next = [...otpDigits]
-        next[index - 1] = ''
-        setOtpDigits(next)
-        otpInputRefs.current[index - 1]?.focus()
-      }
-    }
-  }
-
-  const handleOtpPaste = (event) => {
-    event.preventDefault()
-    const pastedDigits = event.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6)
-    if (!pastedDigits) return
-    const next = ['', '', '', '', '', '']
-    pastedDigits.split('').forEach((digit, idx) => {
-      next[idx] = digit
-    })
-    setOtpDigits(next)
-    setOtpError('')
-    if (pastedDigits.length === 6) {
-      void handleVerify(pastedDigits)
-    } else {
-      otpInputRefs.current[pastedDigits.length]?.focus()
-    }
-  }
-
-  const handleVerify = async (overrideCode) => {
-    const code = overrideCode || otpCode
-    if (code.length !== 6 || isVerifying) return
+  const verify = async (override = '') => {
+    const nextCode = override || code
+    if (nextCode.length !== 6 || isVerifying) return
     setIsVerifying(true)
-    setOtpError('')
-    const result = await onVerifyOtp(code)
-    if (!result?.ok) {
-      setOtpError(result?.message || 'Incorrect verification code.')
-      triggerShake()
-    }
+    setError('')
+    const result = await onVerifyOtp(nextCode)
+    if (!result?.ok) setError(result?.message || 'Incorrect verification code.')
     setIsVerifying(false)
   }
 
-  const handleResend = async () => {
+  const resend = async () => {
     if (isResending) return
     setIsResending(true)
-    setOtpError('')
+    setError('')
     const result = await onResendOtp()
-    if (!result?.ok) {
-      setOtpError(result?.message || 'Unable to resend OTP right now.')
-      setIsResending(false)
-      return
-    }
-    setOtpDigits(['', '', '', '', '', ''])
-    otpInputRefs.current[0]?.focus()
+    if (!result?.ok) setError(result?.message || 'Unable to resend OTP right now.')
+    else setDigits(['', '', '', '', '', ''])
     setIsResending(false)
   }
 
   return (
-    <div className="fixed inset-0 z-[230] bg-black/35 flex items-center justify-center p-4">
-      <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-6">
-        <style>{'@keyframes otp-shake{0%{transform:translateX(0)}25%{transform:translateX(-6px)}50%{transform:translateX(6px)}75%{transform:translateX(-4px)}100%{transform:translateX(0)}}'}</style>
-        <h3 className="text-xl font-semibold text-text-primary">Verify Your Identity</h3>
-        <p className="text-sm text-text-secondary mt-2">We&apos;ve sent a 6-digit code to your registered email.</p>
-        <p className="text-xs text-text-muted mt-1">{maskedEmail}</p>
-
-        <div className="mt-6" style={isShaking ? { animation: 'otp-shake 0.35s ease-in-out' } : undefined}>
-          <div className="grid grid-cols-6 gap-2" onPaste={handleOtpPaste}>
-            {otpDigits.map((digit, index) => (
-              <input
-                key={index}
-                ref={(el) => { otpInputRefs.current[index] = el }}
-                type="text"
-                inputMode="numeric"
-                maxLength={1}
-                value={digit}
-                onChange={(e) => handleOtpChange(index, e.target.value)}
-                onKeyDown={(e) => handleOtpKeyDown(index, e)}
-                className={`h-12 text-center text-lg font-semibold border rounded-md focus:outline-none focus:border-primary ${otpError ? 'border-error' : 'border-border'}`}
-              />
-            ))}
+    <div className="fixed inset-0 z-[230] flex items-center justify-center bg-slate-950/45 p-4">
+      <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-7 shadow-[0_30px_80px_rgba(15,23,42,0.24)]">
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#153585]"><Shield className="h-5 w-5" /></div>
+          <div>
+            <h3 className="text-lg font-semibold text-slate-900">Verify Your Identity</h3>
+            <p className="text-sm text-slate-500">We sent a six-digit code to {maskEmail(challenge.email)}.</p>
           </div>
-          {otpError && <p className="text-xs text-error mt-2">{otpError}</p>}
         </div>
-
-        <div className="mt-6 flex items-center justify-between">
-          <button
-            type="button"
-            onClick={handleResend}
-            disabled={isResending}
-            className="text-sm text-primary hover:text-primary-light disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
-          >
-            {isResending && <Loader2 className="w-4 h-4 animate-spin" />}
-            Resend code
-          </button>
+        {deliveryStatusMessage ? <p className="mt-4 text-xs font-medium text-amber-600">{deliveryStatusMessage}</p> : null}
+        <div className="mt-6 grid grid-cols-6 gap-2">
+          {digits.map((digit, index) => (
+            <input
+              key={`otp-${index}`}
+              ref={(element) => { refs.current[index] = element }}
+              type="text"
+              inputMode="numeric"
+              maxLength={1}
+              value={digit}
+              onChange={(event) => {
+                const onlyDigits = event.target.value.replace(/\D/g, '')
+                const next = [...digits]
+                if (!onlyDigits) next[index] = ''
+                else onlyDigits.slice(0, 6 - index).split('').forEach((value, offset) => { next[index + offset] = value })
+                setDigits(next)
+                setError('')
+                if (next.join('').length === 6) void verify(next.join(''))
+                else refs.current[Math.min(index + onlyDigits.length, 5)]?.focus()
+              }}
+              className={`h-12 rounded-xl border text-center text-lg font-semibold outline-none ${error ? 'border-red-300' : 'border-slate-200 focus:border-[#153585]'}`}
+            />
+          ))}
+        </div>
+        {error ? <p className="mt-3 text-xs font-medium text-red-600">{error}</p> : null}
+        <div className="mt-7 flex items-center justify-between">
+          <button type="button" onClick={resend} disabled={isResending} className="inline-flex items-center gap-2 text-sm font-semibold text-[#153585] disabled:opacity-60">{isResending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}Resend code</button>
           <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onCancelOtp}
-              className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleVerify()}
-              disabled={otpCode.length !== 6 || isVerifying}
-              className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-            >
-              {isVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
-              {isVerifying ? 'Processing...' : 'Verify'}
-            </button>
+            <button type="button" onClick={onCancelOtp} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Cancel</button>
+            <button type="button" onClick={() => void verify()} disabled={code.length !== 6 || isVerifying} className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: BRAND_COLOR }}>{isVerifying ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{isVerifying ? 'Processing...' : 'Verify'}</button>
           </div>
         </div>
       </div>
@@ -484,8 +183,14 @@ function AuthExperience({
   onLogin,
   onSignup,
   onSocialLogin,
+  pendingSocialPrompt,
+  onCancelSocialNamePrompt,
   onRequestPasswordReset,
+  onResolvePasswordResetCode,
   onUpdatePassword,
+  onResendVerificationEmail,
+  onVerifyEmailAddress,
+  verificationEmail,
   passwordResetEmail,
   setPasswordResetEmail,
   otpChallenge,
@@ -493,386 +198,378 @@ function AuthExperience({
   onResendOtp,
   onCancelOtp,
 }) {
-  const [loginForm, setLoginForm] = useState({ email: '', password: '', remember: false, agree: false })
-  const [signupForm, setSignupForm] = useState({ fullName: '', email: '', password: '', confirmPassword: '', agree: false })
-  const [forgotForm, setForgotForm] = useState({ email: passwordResetEmail || '' })
+  const [loginForm, setLoginForm] = useState({ email: '', password: '', remember: false })
+  const [signupForm, setSignupForm] = useState({
+    firstName: '',
+    lastName: '',
+    otherNames: '',
+    email: '',
+    phoneNumber: '',
+    password: '',
+    confirmPassword: '',
+    agree: false,
+  })
+  const [forgotEmail, setForgotEmail] = useState(passwordResetEmail || '')
   const [resetForm, setResetForm] = useState({ password: '', confirmPassword: '' })
+  const [resolvedResetEmail, setResolvedResetEmail] = useState(passwordResetEmail || '')
   const [loginError, setLoginError] = useState('')
   const [signupError, setSignupError] = useState('')
+  const [loginFieldErrors, setLoginFieldErrors] = useState({ email: '', password: '' })
+  const [signupFieldErrors, setSignupFieldErrors] = useState({
+    firstName: '',
+    lastName: '',
+    otherNames: '',
+    email: '',
+    phoneNumber: '',
+    password: '',
+    confirmPassword: '',
+    agree: '',
+  })
   const [forgotFeedback, setForgotFeedback] = useState(null)
-  const [resetError, setResetError] = useState('')
-  const [signupPasswordError, setSignupPasswordError] = useState('')
+  const [resetFeedback, setResetFeedback] = useState(null)
+  const [verificationFeedback, setVerificationFeedback] = useState(null)
   const [showLoginPassword, setShowLoginPassword] = useState(false)
-  const [showSignupPasswords, setShowSignupPasswords] = useState(false)
-  const [showResetPasswords, setShowResetPasswords] = useState(false)
+  const [showSignupPassword, setShowSignupPassword] = useState(false)
+  const [showResetPassword, setShowResetPassword] = useState(false)
   const [isLoginLoading, setIsLoginLoading] = useState(false)
   const [isSignupLoading, setIsSignupLoading] = useState(false)
-  const [isSendingResetLink, setIsSendingResetLink] = useState(false)
-  const [isUpdatingPassword, setIsUpdatingPassword] = useState(false)
-  const [socialLoadingProvider, setSocialLoadingProvider] = useState('')
-  const [isSubmittingSocialName, setIsSubmittingSocialName] = useState(false)
-  const [socialNamePrompt, setSocialNamePrompt] = useState({
-    open: false,
-    provider: '',
-    fullName: '',
-    error: '',
-  })
+  const [isForgotLoading, setIsForgotLoading] = useState(false)
+  const [isResolvingResetCode, setIsResolvingResetCode] = useState(false)
+  const [isResetLoading, setIsResetLoading] = useState(false)
+  const [isVerificationResendLoading, setIsVerificationResendLoading] = useState(false)
+  const [isVerificationApplying, setIsVerificationApplying] = useState(false)
+  const [socialLoading, setSocialLoading] = useState('')
+  const [socialPrompt, setSocialPrompt] = useState({ open: false, provider: '', fullName: '', error: '' })
+  const actionCode = typeof window !== 'undefined' ? String(new URLSearchParams(window.location.search || '').get('oobCode') || '').trim() : ''
+  const processedResetCodeRef = useRef('')
+  const processedVerificationCodeRef = useRef('')
+  const verificationTargetEmail = String(verificationEmail || signupForm.email || loginForm.email || '').trim().toLowerCase()
+  const strength = getPasswordStrength(resetForm.password)
 
-  const signupPasswordRegex = /^(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
-  const passwordStrength = getPasswordStrengthState(resetForm.password)
-  const activeResetEmail = passwordResetEmail || forgotForm.email
-  const busy = Boolean(socialLoadingProvider) || isLoginLoading || isSignupLoading || isSendingResetLink || isUpdatingPassword || isSubmittingSocialName
+  useEffect(() => {
+    if (!passwordResetEmail) return
+    setForgotEmail(passwordResetEmail)
+    setResolvedResetEmail(passwordResetEmail)
+  }, [passwordResetEmail])
 
-  const socialButtons = [
-    { id: 'google', label: 'Continue with Google', icon: GoogleBrandIcon },
-  ]
+  useEffect(() => {
+    if (mode !== 'reset-password') { processedResetCodeRef.current = ''; return }
+    if (!actionCode) { setResetFeedback({ type: 'error', message: 'Reset link is invalid or expired.' }); return }
+    if (processedResetCodeRef.current === actionCode) return
+    processedResetCodeRef.current = actionCode
+    let disposed = false
+    const resolve = async () => {
+      setIsResolvingResetCode(true)
+      const result = await onResolvePasswordResetCode(actionCode)
+      if (disposed) return
+      if (!result?.ok) setResetFeedback({ type: 'error', message: result?.message || 'Reset link is invalid or expired.' })
+      else {
+        const email = String(result.email || '').trim().toLowerCase()
+        setResolvedResetEmail(email)
+        setPasswordResetEmail(email)
+        setResetFeedback(null)
+      }
+      setIsResolvingResetCode(false)
+    }
+    void resolve()
+    return () => { disposed = true }
+  }, [actionCode, mode, onResolvePasswordResetCode, setPasswordResetEmail])
 
-  const submitSocial = async (provider) => {
-    setLoginError('')
-    setSignupError('')
-    setSocialLoadingProvider(provider)
-    const result = await onSocialLogin(provider)
-    if (result?.requiresFullName) {
-      setSocialNamePrompt({
-        open: true,
-        provider,
-        fullName: '',
-        error: '',
-      })
-      setSocialLoadingProvider('')
+  useEffect(() => {
+    if (mode !== 'email-verification') { processedVerificationCodeRef.current = ''; return }
+    if (!actionCode) {
+      setVerificationFeedback((previous) => previous || { type: 'info', message: 'A verification link has been sent to your email. Please verify your email address to activate your account.' })
       return
     }
-    if (!result?.ok) {
-      const message = result?.message || 'Authentication failed. Please try again.'
-      if (mode === 'signup') setSignupError(message)
-      if (mode === 'login') setLoginError(message)
+    if (processedVerificationCodeRef.current === actionCode) return
+    processedVerificationCodeRef.current = actionCode
+    let disposed = false
+    const apply = async () => {
+      setIsVerificationApplying(true)
+      const result = await onVerifyEmailAddress(actionCode)
+      if (disposed) return
+      setVerificationFeedback({ type: result?.ok ? 'success' : 'error', message: result?.message || (result?.ok ? 'Email verified successfully.' : 'Verification link expired. Please request a new one.') })
+      setIsVerificationApplying(false)
     }
-    setSocialLoadingProvider('')
-  }
+    void apply()
+    return () => { disposed = true }
+  }, [actionCode, mode, onVerifyEmailAddress])
 
-  const closeSocialNamePrompt = () => {
-    if (isSubmittingSocialName) return
-    setSocialNamePrompt({
-      open: false,
-      provider: '',
-      fullName: '',
+  useEffect(() => {
+    if (mode !== 'signup' || socialPrompt.open) return
+    if (!pendingSocialPrompt || typeof pendingSocialPrompt !== 'object') return
+    setSocialPrompt({
+      open: true,
+      provider: String(pendingSocialPrompt.provider || 'google').trim() || 'google',
+      fullName: String(pendingSocialPrompt?.profile?.fullName || '').trim(),
       error: '',
     })
-  }
+  }, [mode, pendingSocialPrompt, socialPrompt.open])
 
-  const submitSocialWithName = async () => {
-    const fullName = socialNamePrompt.fullName.trim()
-    if (!fullName) {
-      setSocialNamePrompt(prev => ({ ...prev, error: 'Please complete all required fields.' }))
-      return
-    }
-
-    setIsSubmittingSocialName(true)
-    const result = await onSocialLogin(socialNamePrompt.provider, fullName)
-    if (!result?.ok) {
-      setSocialNamePrompt(prev => ({ ...prev, error: result?.message || 'Authentication failed. Please try again.' }))
-      setIsSubmittingSocialName(false)
-      return
-    }
-
-    setIsSubmittingSocialName(false)
-    setSocialNamePrompt({
-      open: false,
-      provider: '',
-      fullName: '',
-      error: '',
-    })
-  }
-
-  const submitLogin = async (event) => {
-    event.preventDefault()
+  const navigate = (nextMode) => {
     setLoginError('')
-    setIsLoginLoading(true)
-    const result = await onLogin(loginForm)
-    if (!result?.ok) setLoginError(result?.message || 'Email or password incorrect.')
-    setIsLoginLoading(false)
-  }
-
-  const submitSignup = async (event) => {
-    event.preventDefault()
     setSignupError('')
-    const passwordError = signupPasswordRegex.test(signupForm.password) ? '' : 'Password must include at least one number and one special character.'
-    setSignupPasswordError(passwordError)
-    if (passwordError) return
-
-    setIsSignupLoading(true)
-    const result = await onSignup(signupForm)
-    if (!result?.ok) setSignupError(result?.message || 'Unable to create account.')
-    setIsSignupLoading(false)
-  }
-
-  const submitForgotPassword = async (event) => {
-    event.preventDefault()
+    setLoginFieldErrors({ email: '', password: '' })
+    setSignupFieldErrors({
+      firstName: '',
+      lastName: '',
+      otherNames: '',
+      email: '',
+      phoneNumber: '',
+      password: '',
+      confirmPassword: '',
+      agree: '',
+    })
     setForgotFeedback(null)
-    setIsSendingResetLink(true)
-    const result = await onRequestPasswordReset(forgotForm.email)
-    if (result?.ok && result.email) setPasswordResetEmail(result.email)
-    setForgotFeedback({
-      type: result?.ok ? 'success' : 'error',
-      message: result?.message || 'Unable to process your request.',
-    })
-    setIsSendingResetLink(false)
+    setResetFeedback(null)
+    setVerificationFeedback(null)
+    setMode(nextMode)
   }
 
-  const submitPasswordUpdate = async (event) => {
-    event.preventDefault()
-    setResetError('')
-    setIsUpdatingPassword(true)
-    const result = await onUpdatePassword({
-      email: activeResetEmail,
-      password: resetForm.password,
-      confirmPassword: resetForm.confirmPassword,
-    })
-    if (!result?.ok) {
-      setResetError(result?.message || 'Unable to update password.')
-      setIsUpdatingPassword(false)
-      return
-    }
-    setResetForm({ password: '', confirmPassword: '' })
-    setPasswordResetEmail('')
-    setMode('login')
-    setIsUpdatingPassword(false)
-  }
+  const socialBlock = (mode === 'login' || mode === 'signup') ? (
+    <>
+      <button type="button" onClick={() => void (async () => {
+        setSocialLoading('google')
+        const result = await onSocialLogin('google')
+        if (result?.requiresProfileCompletion || result?.requiresFullName) setSocialPrompt({ open: true, provider: 'google', fullName: String(result?.profile?.fullName || '').trim(), error: '' })
+        else if (!result?.ok) (mode === 'signup' ? setSignupError(result?.message || 'Authentication failed. Please try again.') : setLoginError(result?.message || 'Authentication failed. Please try again.'))
+        setSocialLoading('')
+      })()} disabled={Boolean(socialLoading)} className="flex h-12 w-full items-center justify-center gap-3 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 disabled:opacity-60">
+        {socialLoading === 'google' ? <Loader2 className="h-5 w-5 animate-spin" /> : <GoogleBrandIcon />}
+        {socialLoading === 'google' ? 'Processing...' : 'Continue with Google'}
+      </button>
+      <div className="flex items-center gap-3"><div className="h-px flex-1 bg-slate-200" /><span className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">or continue with email</span><div className="h-px flex-1 bg-slate-200" /></div>
+    </>
+  ) : null
 
-  const renderSocialButtons = () => (
-    <div className="space-y-3">
-      {socialButtons.map((button) => (
-        <button
-          key={button.id}
-          type="button"
-          disabled={busy}
-          onClick={() => void submitSocial(button.id)}
-          className="w-full h-11 px-4 border border-border rounded-md flex items-center justify-center gap-2 text-sm font-medium text-text-primary hover:bg-background transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          {socialLoadingProvider === button.id ? <Loader2 className="w-5 h-5 animate-spin" /> : <button.icon />}
-          {socialLoadingProvider === button.id ? 'Processing...' : button.label}
-        </button>
-      ))}
+  const footer = (
+    <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 border-t border-slate-200 pt-5 text-sm">
+      <a href="/" className="inline-flex items-center gap-2 font-semibold text-slate-600"><ArrowLeft className="h-4 w-4" />Back to Home</a>
+      {mode !== 'signup' ? <button type="button" onClick={() => navigate('signup')} className="font-semibold text-[#153585]">Create Account</button> : null}
+      {mode !== 'login' ? <button type="button" onClick={() => navigate('login')} className="font-semibold text-[#153585]">Login</button> : null}
+      {mode !== 'forgot-password' ? <button type="button" onClick={() => navigate('forgot-password')} className="font-semibold text-[#153585]">Forgot Password</button> : null}
     </div>
   )
 
   return (
-    <div className="min-h-screen bg-background flex items-center justify-center px-4 py-10" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
-      <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-8">
-        <div className="flex items-center justify-center mb-6">
-          <KiaminaLogo className="h-12 w-auto" />
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#eef3fb] px-4 py-10" style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}>
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(21,53,133,0.16),transparent_38%),radial-gradient(circle_at_bottom_right,rgba(21,53,133,0.12),transparent_42%)]" aria-hidden="true" />
+      <div className={`relative w-full rounded-[32px] border border-slate-200 bg-white/95 shadow-[0_32px_90px_rgba(15,23,42,0.18)] ${mode === 'signup' ? 'max-w-3xl' : 'max-w-lg'}`}>
+        <div className="border-b border-slate-200 px-8 pb-6 pt-8">
+          <div className="flex items-center justify-center"><KiaminaLogo className="h-12 w-auto" /></div>
+          <div className="mt-6 flex items-center justify-center gap-3 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#153585]"><Shield className="h-5 w-5" /></div>
+            <div><p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">Kiamina Client Portal</p><h1 className="mt-1 text-2xl font-semibold text-slate-900">{TITLES[mode]}</h1><p className="mt-2 text-sm text-slate-500">{DESCRIPTIONS[mode]}</p></div>
+          </div>
         </div>
-
-        {mode === 'login' && (
-          <>
-            <h1 className="text-2xl font-semibold text-text-primary text-center">Welcome Back</h1>
-            <p className="text-sm text-text-muted text-center mt-2 mb-6">Access your financial dashboard securely.</p>
-            {renderSocialButtons()}
-            <div className="flex items-center gap-3 my-6">
-              <div className="flex-1 border-t border-border-light"></div>
-              <span className="text-xs text-text-muted font-medium">OR</span>
-              <div className="flex-1 border-t border-border-light"></div>
-            </div>
-            <form className="space-y-4" onSubmit={submitLogin}>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Email Address <span className="text-error">*</span></label>
-                <input type="email" value={loginForm.email} onChange={(e) => setLoginForm(prev => ({ ...prev, email: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Password <span className="text-error">*</span></label>
-                <input type={showLoginPassword ? 'text' : 'password'} value={loginForm.password} onChange={(e) => setLoginForm(prev => ({ ...prev, password: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={showLoginPassword} onChange={(e) => setShowLoginPassword(e.target.checked)} className="w-4 h-4 accent-primary" />
-                Show password
-              </label>
-              <div className="flex items-center justify-between">
-                <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                  <input type="checkbox" checked={loginForm.remember} onChange={(e) => setLoginForm(prev => ({ ...prev, remember: e.target.checked }))} className="w-4 h-4 accent-primary" />
-                  Remember Me
-                </label>
-                <button type="button" className="text-sm text-primary hover:text-primary-light" onClick={() => { setForgotForm({ email: loginForm.email }); setForgotFeedback(null); setMode('forgot-password') }}>
-                  Forgot Password?
-                </button>
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={loginForm.agree} onChange={(e) => setLoginForm(prev => ({ ...prev, agree: e.target.checked }))} className="w-4 h-4 accent-primary" />
-                I agree to the Terms & Privacy Policy <span className="text-error">*</span>
-              </label>
-              {loginError && <p className="text-xs text-error">{loginError}</p>}
-              <button type="submit" disabled={!loginForm.agree || busy} className="w-full h-10 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2">
-                {isLoginLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isLoginLoading ? 'Processing...' : 'Sign In'}
-              </button>
-            </form>
-            <p className="text-sm text-text-muted text-center mt-6">
-              Don&apos;t have an account?{' '}
-              <button type="button" onClick={() => setMode('signup')} className="text-primary font-medium hover:text-primary-light">Sign Up</button>
-            </p>
-          </>
-        )}
-
-        {mode === 'signup' && (
-          <>
-            <h1 className="text-2xl font-semibold text-text-primary text-center">Create Your Account</h1>
-            <p className="text-sm text-text-muted text-center mt-2 mb-6">Start managing your accounting and compliance in one secure platform.</p>
-            {renderSocialButtons()}
-            <div className="flex items-center gap-3 my-6">
-              <div className="flex-1 border-t border-border-light"></div>
-              <span className="text-xs text-text-muted font-medium">OR</span>
-              <div className="flex-1 border-t border-border-light"></div>
-            </div>
-            <form className="space-y-4" onSubmit={submitSignup}>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Full Name <span className="text-error">*</span></label>
-                <input type="text" value={signupForm.fullName} onChange={(e) => setSignupForm(prev => ({ ...prev, fullName: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Email Address <span className="text-error">*</span></label>
-                <input type="email" value={signupForm.email} onChange={(e) => setSignupForm(prev => ({ ...prev, email: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Password <span className="text-error">*</span></label>
-                <input type={showSignupPasswords ? 'text' : 'password'} value={signupForm.password} onChange={(e) => { const nextPassword = e.target.value; setSignupForm(prev => ({ ...prev, password: nextPassword })); if (signupPasswordError) setSignupPasswordError(signupPasswordRegex.test(nextPassword) ? '' : 'Password must include at least one number and one special character.')}} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-                {signupPasswordError && <p className="text-xs text-error mt-1">{signupPasswordError}</p>}
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Confirm Password <span className="text-error">*</span></label>
-                <input type={showSignupPasswords ? 'text' : 'password'} value={signupForm.confirmPassword} onChange={(e) => setSignupForm(prev => ({ ...prev, confirmPassword: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={showSignupPasswords} onChange={(e) => setShowSignupPasswords(e.target.checked)} className="w-4 h-4 accent-primary" />
-                Show password
-              </label>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={signupForm.agree} onChange={(e) => setSignupForm(prev => ({ ...prev, agree: e.target.checked }))} className="w-4 h-4 accent-primary" />
-                I agree to the Terms & Privacy Policy <span className="text-error">*</span>
-              </label>
-              {signupError && <p className="text-xs text-error">{signupError}</p>}
-              <button type="submit" disabled={!signupForm.agree || busy} className="w-full h-10 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2">
-                {isSignupLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isSignupLoading ? 'Processing...' : 'Create Account'}
-              </button>
-            </form>
-            <p className="text-xs text-text-muted text-center mt-4">Your information is encrypted and securely stored.</p>
-            <p className="text-sm text-text-muted text-center mt-4">
-              Already have an account?{' '}
-              <button type="button" onClick={() => setMode('login')} className="text-primary font-medium hover:text-primary-light">Sign In</button>
-            </p>
-          </>
-        )}
-
-        {mode === 'forgot-password' && (
-          <>
-            <h1 className="text-2xl font-semibold text-text-primary text-center">Reset Your Password</h1>
-            <p className="text-sm text-text-muted text-center mt-2 mb-6">Enter your email to receive a password reset link.</p>
-            <form className="space-y-4" onSubmit={submitForgotPassword}>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Email Address <span className="text-error">*</span></label>
-                <input type="email" value={forgotForm.email} placeholder="name@company.com" onChange={(e) => setForgotForm({ email: e.target.value })} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              {forgotFeedback && <p className={`text-xs ${forgotFeedback.type === 'success' ? 'text-success' : 'text-error'}`}>{forgotFeedback.message}</p>}
-              <button type="submit" disabled={isSendingResetLink} className="w-full h-10 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2">
-                {isSendingResetLink && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isSendingResetLink ? 'Processing...' : 'Send Reset Link'}
-              </button>
-            </form>
-            <p className="text-sm text-text-muted text-center mt-6">
-              <button type="button" onClick={() => setMode('login')} className="text-primary font-medium hover:text-primary-light">Back to Sign In</button>
-            </p>
-          </>
-        )}
-
-        {mode === 'reset-password' && (
-          <>
-            <h1 className="text-2xl font-semibold text-text-primary text-center">Create New Password</h1>
-            <p className="text-sm text-text-muted text-center mt-2 mb-6">Set a new password for your account.</p>
-            <form className="space-y-4" onSubmit={submitPasswordUpdate}>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Email Address <span className="text-error">*</span></label>
-                <input type="email" value={activeResetEmail || ''} readOnly className="w-full h-10 px-3 border border-border-light rounded-md text-sm bg-background text-text-secondary" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">New Password <span className="text-error">*</span></label>
-                <input type={showResetPasswords ? 'text' : 'password'} value={resetForm.password} onChange={(e) => setResetForm(prev => ({ ...prev, password: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-                <div className="mt-2">
-                  <div className="w-full h-1.5 bg-border-light rounded-full overflow-hidden">
-                    <div className={`h-full transition-all ${passwordStrength.color}`} style={{ width: `${(passwordStrength.score / 4) * 100}%` }}></div>
-                  </div>
-                  <p className="text-xs text-text-muted mt-1">Password strength: {passwordStrength.label}</p>
+        <div className="space-y-6 px-8 py-8">
+          {mode === 'login' ? (
+            <>
+              {socialBlock}
+              <Notice message={loginError} />
+              <form className="space-y-4" onSubmit={async (event) => {
+                event.preventDefault()
+                const email = String(loginForm.email || '').trim().toLowerCase()
+                const nextErrors = { email: '', password: '' }
+                if (!email) nextErrors.email = 'Email address is required.'
+                else if (!EMAIL_REGEX.test(email)) nextErrors.email = 'Please enter a valid email address.'
+                if (!loginForm.password) nextErrors.password = 'Password is required.'
+                setLoginFieldErrors(nextErrors)
+                if (nextErrors.email || nextErrors.password) {
+                  setLoginError('')
+                  return
+                }
+                setLoginError('')
+                setIsLoginLoading(true)
+                const result = await onLogin({ email, password: loginForm.password, remember: loginForm.remember })
+                if (!result?.ok) setLoginError(result?.message || 'Incorrect email or password')
+                setIsLoginLoading(false)
+              }}>
+                <Field label="Email Address" icon={Mail} error={loginFieldErrors.email} required><input value={loginForm.email} onChange={(e) => { setLoginError(''); setLoginFieldErrors((previous) => ({ ...previous, email: '' })); setLoginForm((p) => ({ ...p, email: e.target.value })) }} placeholder="name@company.com" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                <Field label="Password" icon={Lock} error={loginFieldErrors.password} required><input type={showLoginPassword ? 'text' : 'password'} value={loginForm.password} onChange={(e) => { setLoginError(''); setLoginFieldErrors((previous) => ({ ...previous, password: '' })); setLoginForm((p) => ({ ...p, password: e.target.value })) }} placeholder="Enter your password" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /><button type="button" onClick={() => setShowLoginPassword((p) => !p)} className="text-slate-400">{showLoginPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></Field>
+                <div className="flex items-center justify-between gap-4"><label className="inline-flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={loginForm.remember} onChange={(e) => setLoginForm((p) => ({ ...p, remember: e.target.checked }))} className="h-4 w-4 accent-[#153585]" />Remember Me</label><button type="button" onClick={() => navigate('forgot-password')} className="text-sm font-semibold text-[#153585]">Forgot Password</button></div>
+                <button type="submit" disabled={isLoginLoading} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: BRAND_COLOR }}>{isLoginLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{isLoginLoading ? 'Signing In...' : 'Sign In'}</button>
+              </form>
+              {footer}
+            </>
+          ) : null}
+          {mode === 'signup' ? (
+            <>
+              {socialBlock}
+              <Notice message={signupError} />
+              <form className="space-y-6" onSubmit={async (event) => {
+                event.preventDefault()
+                const email = String(signupForm.email || '').trim().toLowerCase()
+                const normalizedPhoneNumber = String(signupForm.phoneNumber || '').replace(/\D/g, '').slice(0, 11)
+                const nextErrors = {
+                  firstName: '',
+                  lastName: '',
+                  otherNames: '',
+                  email: '',
+                  phoneNumber: '',
+                  password: '',
+                  confirmPassword: '',
+                  agree: '',
+                }
+                if (!signupForm.firstName.trim()) nextErrors.firstName = 'First name is required.'
+                if (!signupForm.lastName.trim()) nextErrors.lastName = 'Last name is required.'
+                if (!email) nextErrors.email = 'Work email is required.'
+                else if (!EMAIL_REGEX.test(email)) nextErrors.email = 'Please enter a valid email address.'
+                if (!normalizedPhoneNumber) nextErrors.phoneNumber = 'Phone number is required.'
+                else if (!CLIENT_PHONE_REGEX.test(normalizedPhoneNumber)) nextErrors.phoneNumber = 'Phone number must be 10 or 11 digits.'
+                if (!signupForm.password) nextErrors.password = 'Create password is required.'
+                else if (!PASSWORD_REGEX.test(signupForm.password)) nextErrors.password = 'Password does not meet security requirements.'
+                if (!signupForm.confirmPassword) nextErrors.confirmPassword = 'Please confirm your password.'
+                else if (signupForm.password !== signupForm.confirmPassword) nextErrors.confirmPassword = 'Passwords do not match.'
+                if (!signupForm.agree) nextErrors.agree = 'You must agree to the Terms of Service and Privacy Policy.'
+                setSignupFieldErrors(nextErrors)
+                if (Object.values(nextErrors).some(Boolean)) {
+                  setSignupError('')
+                  return
+                }
+                setSignupError('')
+                setIsSignupLoading(true)
+                const result = await onSignup({ ...signupForm, email, phoneNumber: normalizedPhoneNumber })
+                if (!result?.ok) {
+                  const message = String(result?.message || 'Unable to create account.').trim()
+                  const normalizedMessage = message.toLowerCase()
+                  if (normalizedMessage.includes('email') && normalizedMessage.includes('already')) {
+                    setSignupFieldErrors((previous) => ({ ...previous, email: message }))
+                    setSignupError('')
+                  } else if (normalizedMessage.includes('phone')) {
+                    setSignupFieldErrors((previous) => ({ ...previous, phoneNumber: message }))
+                    setSignupError('')
+                  } else {
+                    setSignupError(message)
+                  }
+                }
+                setIsSignupLoading(false)
+              }}>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Field label="First Name" icon={Shield} error={signupFieldErrors.firstName} required><input value={signupForm.firstName} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, firstName: '' })); setSignupForm((p) => ({ ...p, firstName: e.target.value })) }} placeholder="Enter your first name" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                  <Field label="Last Name" icon={Shield} error={signupFieldErrors.lastName} required><input value={signupForm.lastName} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, lastName: '' })); setSignupForm((p) => ({ ...p, lastName: e.target.value })) }} placeholder="Enter your last name" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                  <div className="md:col-span-2"><Field label="Other Name" icon={Shield} error={signupFieldErrors.otherNames}><input value={signupForm.otherNames} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, otherNames: '' })); setSignupForm((p) => ({ ...p, otherNames: e.target.value })) }} placeholder="Enter other name" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field></div>
+                  <Field label="Work Email" icon={Mail} error={signupFieldErrors.email} required><input value={signupForm.email} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, email: '' })); setSignupForm((p) => ({ ...p, email: e.target.value })) }} placeholder="name@company.com" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                  <Field label="Phone Number" icon={Phone} error={signupFieldErrors.phoneNumber} required><input type="text" inputMode="numeric" value={signupForm.phoneNumber} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, phoneNumber: '' })); setSignupForm((p) => ({ ...p, phoneNumber: e.target.value.replace(/\D/g, '').slice(0, 11) })) }} placeholder="08012345678" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
                 </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="md:col-span-2">
+                    <Field label="Create Password" icon={Lock} error={signupFieldErrors.password} required><input type={showSignupPassword ? 'text' : 'password'} value={signupForm.password} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, password: '' })); setSignupForm((p) => ({ ...p, password: e.target.value })) }} placeholder="Create a secure password" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /><button type="button" onClick={() => setShowSignupPassword((p) => !p)} className="text-slate-400">{showSignupPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></Field>
+                    <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Password Requirements</p>
+                      <ul className="mt-3 space-y-2 text-sm text-slate-600">{PASSWORD_REQUIREMENTS.map((item) => {
+                        const active = (item === 'Minimum 8 characters' && signupForm.password.length >= 8) || (item === 'At least one uppercase letter' && /[A-Z]/.test(signupForm.password)) || (item === 'At least one number' && /\d/.test(signupForm.password)) || (item === 'At least one special character' && /[^A-Za-z0-9]/.test(signupForm.password))
+                        return <li key={item} className={`flex items-center gap-2 ${active ? 'text-emerald-700' : ''}`}><span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-500' : 'bg-slate-300'}`} />{item}</li>
+                      })}</ul>
+                    </div>
+                  </div>
+                  <Field label="Confirm Password" icon={Lock} error={signupFieldErrors.confirmPassword} required><input type={showSignupPassword ? 'text' : 'password'} value={signupForm.confirmPassword} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, confirmPassword: '' })); setSignupForm((p) => ({ ...p, confirmPassword: e.target.value })) }} placeholder="Confirm your password" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                </div>
+                <div className="space-y-2">
+                  <label className={`inline-flex items-start gap-3 rounded-2xl border bg-slate-50 px-4 py-4 text-sm text-slate-600 ${signupFieldErrors.agree ? 'border-red-300' : 'border-slate-200'}`}><input type="checkbox" checked={signupForm.agree} onChange={(e) => { setSignupError(''); setSignupFieldErrors((previous) => ({ ...previous, agree: '' })); setSignupForm((p) => ({ ...p, agree: e.target.checked })) }} className="mt-0.5 h-4 w-4 accent-[#153585]" /><span>I agree to the Terms of Service and Privacy Policy <span className="text-red-500">*</span></span></label>
+                  {signupFieldErrors.agree ? <p className="text-xs font-medium text-red-600">{signupFieldErrors.agree}</p> : null}
+                </div>
+                <button type="submit" disabled={isSignupLoading} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: BRAND_COLOR }}>{isSignupLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{isSignupLoading ? 'Creating Account...' : 'Create Account'}</button>
+              </form>
+              {footer}
+            </>
+          ) : null}
+          {mode === 'forgot-password' ? (
+            <>
+              <Notice type="info" message="If an account exists for this email, a password reset link will be sent securely." />
+              <Notice type={forgotFeedback?.type} message={forgotFeedback?.message} />
+              <form className="space-y-4" onSubmit={async (event) => {
+                event.preventDefault()
+                const email = String(forgotEmail || '').trim().toLowerCase()
+                if (!EMAIL_REGEX.test(email)) return setForgotFeedback({ type: 'error', message: 'Please enter a valid email address.' })
+                setIsForgotLoading(true)
+                const result = await onRequestPasswordReset(email)
+                setForgotFeedback({ type: result?.ok ? 'success' : 'error', message: result?.message || 'Unable to process your request.' })
+                setIsForgotLoading(false)
+              }}>
+                <Field label="Email Address" icon={Mail}><input value={forgotEmail} onChange={(e) => { setForgotFeedback(null); setForgotEmail(e.target.value) }} placeholder="name@company.com" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                <button type="submit" disabled={isForgotLoading} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: BRAND_COLOR }}>{isForgotLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{isForgotLoading ? 'Sending Reset Link...' : 'Send Reset Link'}</button>
+              </form>
+              {footer}
+            </>
+          ) : null}
+          {mode === 'reset-password' ? (
+            <>
+              {isResolvingResetCode ? <Notice type="info" message="Validating your secure reset link..." /> : null}
+              <Notice type={resetFeedback?.type} message={resetFeedback?.message} />
+              <form className="space-y-4" onSubmit={async (event) => {
+                event.preventDefault()
+                if (!actionCode) return setResetFeedback({ type: 'error', message: 'Reset link is invalid or expired.' })
+                if (!PASSWORD_REGEX.test(resetForm.password)) return setResetFeedback({ type: 'error', message: 'Password does not meet security requirements.' })
+                if (resetForm.password !== resetForm.confirmPassword) return setResetFeedback({ type: 'error', message: 'Passwords do not match.' })
+                setIsResetLoading(true)
+                const result = await onUpdatePassword({ oobCode: actionCode, password: resetForm.password, confirmPassword: resetForm.confirmPassword })
+                setResetFeedback({ type: result?.ok ? 'success' : 'error', message: result?.message || (result?.ok ? 'Your password has been updated successfully. You can now sign in.' : 'Reset link is invalid or expired.') })
+                if (result?.ok) setResetForm({ password: '', confirmPassword: '' })
+                setIsResetLoading(false)
+              }}>
+                <Field label="Email Address" icon={Mail}><input value={resolvedResetEmail || passwordResetEmail || ''} readOnly className="h-full w-full bg-transparent text-sm outline-none" /></Field>
+                <Field label="New Password" icon={Lock}><input type={showResetPassword ? 'text' : 'password'} value={resetForm.password} onChange={(e) => setResetForm((p) => ({ ...p, password: e.target.value }))} placeholder="Enter your new password" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /><button type="button" onClick={() => setShowResetPassword((p) => !p)} className="text-slate-400">{showResetPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}</button></Field>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                  <div className="flex items-center justify-between gap-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500"><span>Password Strength</span><span className="tracking-normal text-slate-600">{strength.label}</span></div>
+                  <div className="mt-3 h-2 rounded-full bg-slate-200"><div className={`${strength.color} h-full rounded-full`} style={{ width: strength.width }} /></div>
+                  <ul className="mt-4 space-y-2 text-sm text-slate-600">{PASSWORD_REQUIREMENTS.map((item) => <li key={item} className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${((item === 'Minimum 8 characters' && resetForm.password.length >= 8) || (item === 'At least one uppercase letter' && /[A-Z]/.test(resetForm.password)) || (item === 'At least one number' && /\d/.test(resetForm.password)) || (item === 'At least one special character' && /[^A-Za-z0-9]/.test(resetForm.password))) ? 'bg-emerald-500' : 'bg-slate-300'}`} />{item}</li>)}</ul>
+                </div>
+                <Field label="Confirm New Password" icon={Lock}><input type={showResetPassword ? 'text' : 'password'} value={resetForm.confirmPassword} onChange={(e) => setResetForm((p) => ({ ...p, confirmPassword: e.target.value }))} placeholder="Confirm your new password" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field>
+                <button type="submit" disabled={isResetLoading || isResolvingResetCode} className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold text-white disabled:opacity-60" style={{ backgroundColor: BRAND_COLOR }}>{isResetLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}{isResetLoading ? 'Resetting Password...' : 'Reset Password'}</button>
+              </form>
+              {footer}
+            </>
+          ) : null}
+          {mode === 'email-verification' ? (
+            <>
+              {isVerificationApplying ? <Notice type="info" message="Verifying your email address..." /> : null}
+              <Notice type={verificationFeedback?.type || 'info'} message={verificationFeedback?.message || 'A verification link has been sent to your email. Please verify your email address to activate your account.'} />
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-5 py-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Verification Destination</p>
+                <div className="mt-3 flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#eef3ff] text-[#153585]"><Mail className="h-4 w-4" /></div><div><p className="text-sm font-semibold text-slate-900">{maskEmail(verificationTargetEmail)}</p><p className="text-xs text-slate-500">Use the link sent to this inbox to complete activation.</p></div></div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">Confirm New Password <span className="text-error">*</span></label>
-                <input type={showResetPasswords ? 'text' : 'password'} value={resetForm.confirmPassword} onChange={(e) => setResetForm(prev => ({ ...prev, confirmPassword: e.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <label className="inline-flex items-center gap-2 text-sm text-text-secondary">
-                <input type="checkbox" checked={showResetPasswords} onChange={(e) => setShowResetPasswords(e.target.checked)} className="w-4 h-4 accent-primary" />
-                Show password
-              </label>
-              {resetError && <p className="text-xs text-error">{resetError}</p>}
-              <button type="submit" disabled={isUpdatingPassword} className="w-full h-10 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2">
-                {isUpdatingPassword && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isUpdatingPassword ? 'Processing...' : 'Update Password'}
-              </button>
-            </form>
-            <p className="text-sm text-text-muted text-center mt-6">
-              <button type="button" onClick={() => setMode('login')} className="text-primary font-medium hover:text-primary-light">Back to Sign In</button>
-            </p>
-          </>
-        )}
+              {verificationFeedback?.type === 'success' ? (
+                <button type="button" onClick={() => navigate('login')} className="inline-flex h-12 w-full items-center justify-center rounded-xl text-sm font-semibold text-white" style={{ backgroundColor: BRAND_COLOR }}>Return to Login</button>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <button type="button" onClick={async () => {
+                    if (!EMAIL_REGEX.test(verificationTargetEmail)) return setVerificationFeedback({ type: 'error', message: 'Please enter a valid email address.' })
+                    setIsVerificationResendLoading(true)
+                    const result = await onResendVerificationEmail(verificationTargetEmail)
+                    setVerificationFeedback({ type: result?.ok ? 'info' : 'error', message: result?.message || 'Unable to send verification email right now.' })
+                    setIsVerificationResendLoading(false)
+                  }} disabled={isVerificationResendLoading || isVerificationApplying} className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-sm font-semibold text-slate-700 disabled:opacity-60">{isVerificationResendLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}Resend Verification Email</button>
+                  <button type="button" onClick={() => navigate('login')} className="inline-flex h-12 items-center justify-center rounded-xl text-sm font-semibold text-white" style={{ backgroundColor: BRAND_COLOR }}>Return to Login</button>
+                </div>
+              )}
+              {footer}
+            </>
+          ) : null}
+        </div>
       </div>
-
-      {socialNamePrompt.open && (
-        <div className="fixed inset-0 z-[225] bg-black/35 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-white border border-border-light rounded-xl shadow-card p-6">
-            <h3 className="text-lg font-semibold text-text-primary">Complete Your Profile</h3>
-            <p className="text-sm text-text-secondary mt-2">Enter your full name to continue to onboarding.</p>
-            <div className="mt-4">
-              <label className="block text-sm font-medium text-text-primary mb-1.5">Full Name <span className="text-error">*</span></label>
-              <input
-                type="text"
-                value={socialNamePrompt.fullName}
-                onChange={(e) => setSocialNamePrompt(prev => ({ ...prev, fullName: e.target.value, error: '' }))}
-                placeholder="Enter your full legal name"
-                className={`w-full h-10 px-3 border rounded-md text-sm focus:outline-none focus:border-primary ${socialNamePrompt.error ? 'border-error' : 'border-border'}`}
-              />
-              {socialNamePrompt.error && <p className="text-xs text-error mt-1">{socialNamePrompt.error}</p>}
-            </div>
+      {socialPrompt.open ? (
+        <div className="fixed inset-0 z-[225] flex items-center justify-center bg-slate-950/40 p-4">
+          <div className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-7 shadow-[0_30px_80px_rgba(15,23,42,0.24)]">
+            <h3 className="text-lg font-semibold text-slate-900">Complete Your Profile</h3>
+            <p className="mt-2 text-sm text-slate-500">Add your full name before continuing with Google authentication.</p>
+            <div className="mt-5"><Field label="Full Name" icon={Shield} error={socialPrompt.error}><input value={socialPrompt.fullName} onChange={(e) => setSocialPrompt((p) => ({ ...p, fullName: e.target.value, error: '' }))} placeholder="Enter your full name" className="h-full w-full bg-transparent text-sm outline-none placeholder:text-slate-400" /></Field></div>
             <div className="mt-6 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={closeSocialNamePrompt}
-                className="h-9 px-4 border border-border rounded-md text-sm font-medium text-text-primary hover:bg-background transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void submitSocialWithName()}
-                disabled={isSubmittingSocialName}
-                className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-              >
-                {isSubmittingSocialName && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isSubmittingSocialName ? 'Processing...' : 'Continue'}
-              </button>
+              <button type="button" onClick={() => { setSocialPrompt({ open: false, provider: '', fullName: '', error: '' }); onCancelSocialNamePrompt?.() }} className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Cancel</button>
+              <button type="button" onClick={async () => {
+                const fullName = String(socialPrompt.fullName || '').trim()
+                if (!fullName) return setSocialPrompt((p) => ({ ...p, error: 'Please complete all required fields.' }))
+                const result = await onSocialLogin(socialPrompt.provider, fullName)
+                if (!result?.ok) return setSocialPrompt((p) => ({ ...p, error: result?.message || 'Authentication failed. Please try again.' }))
+                setSocialPrompt({ open: false, provider: '', fullName: '', error: '' })
+              }} className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold text-white" style={{ backgroundColor: BRAND_COLOR }}>Continue</button>
             </div>
           </div>
         </div>
-      )}
-
-      {otpChallenge && (
-        <OtpVerificationModal
-          key={otpChallenge.requestId}
-          challenge={otpChallenge}
-          onVerifyOtp={onVerifyOtp}
-          onResendOtp={onResendOtp}
-          onCancelOtp={onCancelOtp}
-        />
-      )}
+      ) : null}
+      {otpChallenge ? <OtpModal key={otpChallenge.requestId} challenge={otpChallenge} onVerifyOtp={onVerifyOtp} onResendOtp={onResendOtp} onCancelOtp={onCancelOtp} /> : null}
     </div>
   )
 }
 
 export default AuthExperience
-

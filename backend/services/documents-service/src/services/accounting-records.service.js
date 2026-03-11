@@ -2,6 +2,7 @@ import {
   bulkCreateAccountingRecords,
   createAccountingRecord,
   deleteAccountingRecordById,
+  deleteAccountingRecordsByOwner,
   findAccountingRecordById,
   listAccountingRecords,
   monthlyCashflowSummary,
@@ -431,6 +432,9 @@ export const updateRecordById = async ({ id, payload }) =>
   updateAccountingRecordById(id, payload);
 
 export const removeRecordById = async (id) => deleteAccountingRecordById(id);
+
+export const removeRecordsByOwner = async (ownerUserId) =>
+  deleteAccountingRecordsByOwner(ownerUserId);
 
 export const getRecords = async (filters) => listAccountingRecords(filters);
 

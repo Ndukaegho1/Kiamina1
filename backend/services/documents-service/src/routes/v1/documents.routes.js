@@ -1,10 +1,12 @@
 import express from "express";
 import {
   createOne,
+  downloadById,
   getDownloadUrl,
   getById,
   getOwnerSummary,
   listByOwner,
+  removeByOwner,
   putById,
   removeById,
   uploadOne,
@@ -20,7 +22,9 @@ router.post("/", createOne);
 router.post("/upload", singleDocumentUploadMiddleware, uploadOne);
 router.get("/owner/:ownerUserId/summary", getOwnerSummary);
 router.get("/owner/:ownerUserId", listByOwner);
+router.delete("/owner/:ownerUserId", removeByOwner);
 router.get("/:id/download-url", getDownloadUrl);
+router.get("/:id/download", downloadById);
 router.get("/:id", getById);
 router.put("/:id", putById);
 router.patch("/:id/status", updateStatus);

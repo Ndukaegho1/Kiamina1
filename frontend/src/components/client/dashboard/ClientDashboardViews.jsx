@@ -38,6 +38,7 @@ import {
   Sun,
   Moon,
   Sunrise,
+  Home,
 } from 'lucide-react'
 import {
   Chart as ChartJS,
@@ -59,6 +60,11 @@ import KiaminaLogo from '../../common/KiaminaLogo'
 import { getCachedFileBlob } from '../../../utils/fileCache'
 import { buildClientDownloadFilename } from '../../../utils/downloadFilename'
 import { parseFirstWorksheet } from '../../../utils/excelWorkbook'
+import {
+  markResolvedDocumentDownloaded,
+  readResolvedDocumentsForClient,
+  RESOLVED_DOCUMENTS_SYNC_EVENT,
+} from '../../../utils/resolvedDocuments'
 import { ClientSupportPageExperience, ClientSupportWidgetExperience } from '../support/ClientSupportExperience'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
 import { registerNewsletterSubscriberLead } from '../../../utils/supportCenter'
@@ -308,6 +314,34 @@ const normalizeRuntimePreviewUrl = (value = '', { allowBlob = false } = {}) => {
   return normalized
 }
 
+const triggerBrowserDownload = ({
+  url = '',
+  blob = null,
+  fileName = 'document',
+} = {}) => {
+  const downloadUrl = blob instanceof Blob ? URL.createObjectURL(blob) : String(url || '').trim()
+  if (!downloadUrl) return false
+
+  const anchor = document.createElement('a')
+  anchor.href = downloadUrl
+  anchor.download = fileName
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+
+  if (blob instanceof Blob) {
+    window.setTimeout(() => {
+      try {
+        URL.revokeObjectURL(downloadUrl)
+      } catch {
+        // ignore object URL cleanup failures
+      }
+    }, 0)
+  }
+
+  return true
+}
+
 const readBlobAsText = (blob) => new Promise((resolve, reject) => {
   if (!blob) {
     resolve('')
@@ -468,6 +502,7 @@ function Sidebar({
   companyName,
   businessCountry = '',
   isBusinessVerified = false,
+  onOpenHomePage,
   onLogout,
   isMobileOpen = false,
   onCloseMobile,
@@ -481,6 +516,7 @@ function Sidebar({
 
   const footerNavItems = [
     { id: 'upload-history', label: 'Upload History', icon: Upload },
+    { id: 'resolved-documents', label: 'Resolved Documents', icon: FileText },
     { id: 'recent-activities', label: 'Recent Activities', icon: Clock },
     { id: 'support', label: 'Support', icon: MessageCircle },
     { id: 'settings', label: 'Settings', icon: Settings },
@@ -584,6 +620,17 @@ function Sidebar({
 
       {/* Logout */}
       <div className="py-3 border-t border-border-light">
+        <button
+          type="button"
+          onClick={() => {
+            onCloseMobile?.()
+            onOpenHomePage?.()
+          }}
+          className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-text-secondary hover:bg-background hover:text-text-primary transition-colors"
+        >
+          <Home className="w-5 h-5" />
+          Home Page
+        </button>
         <button
           onClick={() => {
             onCloseMobile?.()
@@ -2221,6 +2268,7 @@ function UploadHistoryPage({
   downloadBusinessName = '',
   onOpenFileLocation,
   showToast,
+  onEnsureFileAvailable,
   globalSearchTerm = '',
   onGlobalSearchTermChange,
 }) {
@@ -2503,7 +2551,7 @@ function UploadHistoryPage({
     }
     onOpenFileLocation?.(categoryId, folderId)
   }
-  const downloadFile = (item) => {
+  const downloadFile = async (item) => {
     if (!item?.canPreview || !item?.liveFile) {
       showToast?.('error', 'This file is no longer available for download.')
       return
@@ -2513,21 +2561,42 @@ function UploadHistoryPage({
       source.previewUrl || source.url || source.fileUrl || source.documentUrl || '',
       { allowBlob: false },
     )
-    const url = isBlobLike(source.rawFile) ? getRuntimeObjectUrl(source.rawFile) : directUrl
-    if (!url) {
+    if (!(source.rawFile instanceof Blob) && !directUrl && typeof onEnsureFileAvailable === 'function') {
+      const ensured = await onEnsureFileAvailable(source)
+      if (!(ensured?.ok && ensured.blob instanceof Blob)) {
+        showToast?.('error', ensured?.message || 'Download URL is not available for this file.')
+        return
+      }
+      triggerBrowserDownload({
+        blob: ensured.blob,
+        fileName: buildClientDownloadFilename({
+          businessName: downloadBusinessName,
+          fileName: source.filename || item.filename || 'document',
+        }),
+      })
+      return
+    }
+
+    if (!triggerBrowserDownload({
+      blob: source.rawFile instanceof Blob ? source.rawFile : null,
+      url: directUrl,
+      fileName: buildClientDownloadFilename({
+        businessName: downloadBusinessName,
+        fileName: source.filename || item.filename || 'document',
+      }),
+    })) {
       showToast?.('error', 'Download URL is not available for this file.')
       return
     }
-    const link = document.createElement('a')
-    link.href = url
-    link.download = buildClientDownloadFilename({
-      businessName: downloadBusinessName,
-      fileName: source.filename || item.filename || 'document',
-    })
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
   }
+
+  const resolvedViewingFile = viewingFile
+    ? {
+      ...viewingFile,
+      folderId: viewingFile.folderId || '',
+      folderName: viewingFile.folderName || '',
+    }
+    : null
 
   const clearFilters = () => {
     setSearchTerm('')
@@ -2761,7 +2830,7 @@ function UploadHistoryPage({
           </button>
           <button
             type="button"
-            onClick={() => withContextRow(downloadFile)}
+            onClick={() => withContextRow((row) => void downloadFile(row))}
             disabled={!activeContextRow?.canPreview}
             className="w-full h-9 px-3 text-left text-sm text-text-primary hover:bg-background inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
           >
@@ -2771,17 +2840,243 @@ function UploadHistoryPage({
         </div>
       )}
 
-      {viewingFile && (
+      {resolvedViewingFile && (
         <FileViewerModal
-          file={viewingFile}
+          file={resolvedViewingFile}
           downloadNamePrefix={downloadBusinessName}
           readOnly
+          onEnsureFileAvailable={onEnsureFileAvailable}
           onClose={() => setViewingFile(null)}
         />
       )}
     </div>
   )
 }
+
+function ResolvedDocumentsPage({
+  clientEmail = '',
+  downloadBusinessName = '',
+  showToast,
+  globalSearchTerm = '',
+  onGlobalSearchTermChange,
+}) {
+  const [localSearchTerm, setLocalSearchTerm] = useState('')
+  const searchTerm = typeof onGlobalSearchTermChange === 'function'
+    ? String(globalSearchTerm || '')
+    : localSearchTerm
+  const setSearchTerm = (value) => {
+    if (typeof onGlobalSearchTermChange === 'function') {
+      onGlobalSearchTermChange(value)
+      return
+    }
+    setLocalSearchTerm(value)
+  }
+  const [records, setRecords] = useState([])
+  const normalizedClientEmail = String(clientEmail || '').trim().toLowerCase()
+
+  useEffect(() => {
+    if (!normalizedClientEmail) {
+      setRecords([])
+      return
+    }
+    setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
+  }, [normalizedClientEmail])
+
+  useEffect(() => {
+    if (!normalizedClientEmail) return
+    const refresh = () => {
+      setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
+    }
+    const handleStorage = (event) => {
+      if (!event.key || event.key === `kiaminaClientResolvedDocuments:${normalizedClientEmail}`) {
+        refresh()
+      }
+    }
+    const handleSyncEvent = (event) => {
+      const syncedEmail = String(event?.detail?.email || '').trim().toLowerCase()
+      if (!syncedEmail || syncedEmail === normalizedClientEmail) {
+        refresh()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
+    return () => {
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
+    }
+  }, [normalizedClientEmail])
+
+  const toDisplayTimestamp = (value = '') => {
+    const parsed = Date.parse(value || '')
+    if (!Number.isFinite(parsed)) return '--'
+    return new Date(parsed).toLocaleString('en-US', {
+      month: 'short',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    })
+  }
+
+  const filteredRecords = records
+    .filter((row) => {
+      const query = String(searchTerm || '').trim().toLowerCase()
+      if (!query) return true
+      return [
+        row.title,
+        row.filename,
+        row.notes,
+        row.ticketReference,
+        row.sentByName,
+        row.signatureName,
+      ].join(' ').toLowerCase().includes(query)
+    })
+    .sort((left, right) => (
+      (Date.parse(right.sentAtIso || '') || 0) - (Date.parse(left.sentAtIso || '') || 0)
+    ))
+
+  const searchSuggestions = buildSearchSuggestions(
+    records.flatMap((row) => [
+      row.title,
+      row.filename,
+      row.ticketReference,
+      row.signatureName,
+      row.sentByName,
+    ]),
+    14,
+  )
+  const searchListId = 'resolved-documents-search-suggestions'
+  const totalDelivered = records.length
+  const totalDownloaded = records.filter((row) => Number(row.downloadCount || 0) > 0).length
+
+  const handleDownload = async (row = {}) => {
+    const cacheKey = String(row.fileCacheKey || '').trim()
+    if (!cacheKey) {
+      showToast?.('error', 'Download is unavailable for this document.')
+      return
+    }
+    const blob = await getCachedFileBlob(cacheKey)
+    if (!(blob instanceof Blob)) {
+      showToast?.('error', 'This file is no longer available for download.')
+      return
+    }
+    const objectUrl = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = objectUrl
+    anchor.download = buildClientDownloadFilename({
+      businessName: downloadBusinessName,
+      fileName: row.filename || row.title || 'resolved-document',
+    })
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+
+    const nextRows = markResolvedDocumentDownloaded(normalizedClientEmail, row.id || row.fileId || '')
+    if (Array.isArray(nextRows) && nextRows.length > 0) {
+      setRecords(nextRows)
+    }
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+        <h1 className="text-2xl font-semibold text-text-primary">Resolved Documents</h1>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div className="bg-white rounded-lg shadow-card border border-border-light px-4 py-3">
+          <p className="text-xs uppercase tracking-wide text-text-muted">Delivered by Admin</p>
+          <p className="text-xl font-semibold text-text-primary mt-1">{totalDelivered}</p>
+        </div>
+        <div className="bg-white rounded-lg shadow-card border border-border-light px-4 py-3">
+          <p className="text-xs uppercase tracking-wide text-text-muted">Downloaded</p>
+          <p className="text-xl font-semibold text-text-primary mt-1">{totalDownloaded}</p>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light p-4 mb-6">
+        <div className="relative max-w-md">
+          <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            list={searchSuggestions.length > 0 ? searchListId : undefined}
+            placeholder="Search title, file name, or signer..."
+            className="w-full h-10 pl-9 pr-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary"
+          />
+          {searchSuggestions.length > 0 && (
+            <datalist id={searchListId}>
+              {searchSuggestions.map((item) => (
+                <option key={item} value={item} />
+              ))}
+            </datalist>
+          )}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-lg shadow-card border border-border-light overflow-hidden">
+        <table className="w-full">
+          <thead>
+            <tr className="bg-[#F9FAFB]">
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Document</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Signed By</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Delivered</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Status</th>
+              <th className="px-4 py-3 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filteredRecords.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-4 py-8 text-center text-sm text-text-muted">
+                  No resolved documents have been delivered yet.
+                </td>
+              </tr>
+            )}
+            {filteredRecords.map((row) => (
+              <tr key={row.id} className="border-t border-border-light hover:bg-[#F9FAFB]">
+                <td className="px-4 py-3.5 text-sm">
+                  <p className="font-medium text-text-primary">{row.title || row.filename || '--'}</p>
+                  <p className="text-xs text-text-secondary mt-1">{row.filename || '--'}{row.ticketReference ? ` / ${row.ticketReference}` : ''}</p>
+                  {row.notes && <p className="text-xs text-text-muted mt-1 truncate max-w-[28rem]">{row.notes}</p>}
+                </td>
+                <td className="px-4 py-3.5 text-sm">
+                  <p className="text-text-primary">{row.signatureName || row.sentByName || '--'}</p>
+                  <p className="text-xs text-text-muted mt-1">{toDisplayTimestamp(row.signatureAtIso || row.sentAtIso)}</p>
+                </td>
+                <td className="px-4 py-3.5 text-sm text-text-secondary">{toDisplayTimestamp(row.sentAtIso)}</td>
+                <td className="px-4 py-3.5 text-sm">
+                  <span className="inline-flex items-center h-6 px-2.5 rounded text-xs font-medium bg-success-bg text-success">
+                    Ready
+                  </span>
+                  {Number(row.downloadCount || 0) > 0 && (
+                    <p className="text-xs text-text-muted mt-1">
+                      Downloaded {Number(row.downloadCount || 0)} time{Number(row.downloadCount || 0) > 1 ? 's' : ''}
+                    </p>
+                  )}
+                </td>
+                <td className="px-4 py-3.5 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => void handleDownload(row)}
+                    className="h-8 px-3 border border-border rounded-md text-xs font-medium text-text-primary hover:bg-background inline-flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 function RecentActivitiesPage({
   records = [],
   activityLogs = [],
@@ -3078,6 +3373,7 @@ function FileViewerModal({
   readOnly = false,
   tagOptions = [],
   downloadNamePrefix = '',
+  onEnsureFileAvailable,
 }) {
   const file = incomingFile && typeof incomingFile === 'object' ? incomingFile : EMPTY_FILE_RECORD
   const [editData, setEditData] = useState(file)
@@ -3195,9 +3491,9 @@ function FileViewerModal({
       return
     }
 
-    const url = resolvePreviewUrl(active)
+    let previewUrl = resolvePreviewUrl(active)
     const activeCacheKey = String(active?.fileCacheKey || '').trim()
-    const sourceFile = isBlobLike(active?.rawFile)
+    let sourceFile = isBlobLike(active?.rawFile)
       ? active.rawFile
       : (activeCacheKey && activeCacheKey === cachedFileCacheKey && isBlobLike(cachedFileBlob) ? cachedFileBlob : null)
 
@@ -3209,16 +3505,16 @@ function FileViewerModal({
 
     const readPreviewText = async () => {
       if (sourceFile) return readBlobAsText(sourceFile)
-      if (!url) return ''
-      const response = await fetch(url)
+      if (!previewUrl) return ''
+      const response = await fetch(previewUrl)
       if (!response.ok) throw new Error('Unable to fetch file text preview')
       return response.text()
     }
 
     const readPreviewArrayBuffer = async () => {
       if (sourceFile) return readBlobAsArrayBuffer(sourceFile)
-      if (!url) return new ArrayBuffer(0)
-      const response = await fetch(url)
+      if (!previewUrl) return new ArrayBuffer(0)
+      const response = await fetch(previewUrl)
       if (!response.ok) throw new Error('Unable to fetch file binary preview')
       return response.arrayBuffer()
     }
@@ -3234,7 +3530,22 @@ function FileViewerModal({
       })
 
       try {
-        if (!sourceFile && !url) {
+        if (!sourceFile && !previewUrl && typeof onEnsureFileAvailable === 'function') {
+          const ensured = await onEnsureFileAvailable(active)
+          if (cancelled) return
+          if (ensured?.ok && isBlobLike(ensured.blob)) {
+            sourceFile = ensured.blob
+            const ensuredCacheKey = String(ensured?.filePatch?.fileCacheKey || activeCacheKey || '').trim()
+            setIfActive(() => {
+              if (ensuredCacheKey) {
+                setCachedFileCacheKey(ensuredCacheKey)
+              }
+              setCachedFileBlob(ensured.blob)
+            })
+          }
+        }
+
+        if (!sourceFile && !previewUrl) {
           setIfActive(() => setPreviewMessage('Preview is unavailable for this file. The saved preview link may have expired.'))
           return
         }
@@ -3327,8 +3638,8 @@ function FileViewerModal({
         }
 
         if (ext === 'DOC' || ext === 'PPT') {
-          if (!sourceFile && isHttpUrl(url)) {
-            const embedUrl = toOfficeEmbedUrl(url)
+          if (!sourceFile && isHttpUrl(previewUrl)) {
+            const embedUrl = toOfficeEmbedUrl(previewUrl)
             if (embedUrl) {
               setIfActive(() => {
                 setExternalPreviewUrl(embedUrl)
@@ -3379,9 +3690,9 @@ function FileViewerModal({
 
         setIfActive(() => setPreviewMessage('Preview not available for this file type.'))
       } catch {
-        if (!sourceFile && isPublicHttpUrl(url)) {
+        if (!sourceFile && isPublicHttpUrl(previewUrl)) {
           if (OFFICE_EMBED_PREVIEW_EXTENSIONS.has(ext)) {
-            const embedUrl = toOfficeEmbedUrl(url)
+            const embedUrl = toOfficeEmbedUrl(previewUrl)
             if (embedUrl) {
               setIfActive(() => {
                 setExternalPreviewUrl(embedUrl)
@@ -3392,7 +3703,7 @@ function FileViewerModal({
           }
           if (ext === 'CSV' || ext === 'TXT') {
             setIfActive(() => {
-              setExternalPreviewUrl(url)
+              setExternalPreviewUrl(previewUrl)
               setPreviewMessage('')
             })
             return
@@ -3409,7 +3720,7 @@ function FileViewerModal({
     return () => {
       cancelled = true
     }
-  }, [safeEditData, file, selectedVersion, cachedFileBlob, cachedFileCacheKey])
+  }, [safeEditData, file, selectedVersion, cachedFileBlob, cachedFileCacheKey, onEnsureFileAvailable])
 
   const renderFilePreview = () => {
     const active = selectedVersion || safeEditData || file
@@ -3573,6 +3884,38 @@ function FileViewerModal({
     businessName: downloadNamePrefix,
     fileName: baseDownloadFileName,
   })
+  const handleDownloadTarget = async (target = {}, fallbackFileName = 'document') => {
+    const nextFileName = buildClientDownloadFilename({
+      businessName: downloadNamePrefix,
+      fileName: target?.filename || fallbackFileName,
+    })
+    const directUrl = resolvePreviewUrl(target)
+    if (directUrl) {
+      triggerBrowserDownload({ url: directUrl, fileName: nextFileName })
+      return true
+    }
+
+    if (typeof onEnsureFileAvailable !== 'function') {
+      return false
+    }
+
+    const ensured = await onEnsureFileAvailable(target)
+    if (!(ensured?.ok && ensured.blob instanceof Blob)) {
+      return false
+    }
+
+    const ensuredCacheKey = String(ensured?.filePatch?.fileCacheKey || target?.fileCacheKey || '').trim()
+    if (ensuredCacheKey) {
+      setCachedFileCacheKey(ensuredCacheKey)
+    }
+    setCachedFileBlob(ensured.blob)
+    triggerBrowserDownload({
+      blob: ensured.blob,
+      fileName: nextFileName,
+    })
+    return true
+  }
+
   const uploadInfo = file.uploadInfo || {}
   const sourceLabelMap = {
     'drag-drop': 'Drag & Drop',
@@ -3989,6 +4332,12 @@ function FileViewerModal({
                         fileName: filename || 'document',
                       })
                       const versionNumber = version.versionNumber || version.version || idx + 1
+                      const canDownloadVersion = !isDeletedFile && Boolean(
+                        previewUrl
+                        || snapshot.backendDocumentId
+                        || version.backendDocumentId
+                        || file.backendDocumentId
+                      )
                       return (
                         <tr key={`version-row-${versionNumber}-${idx}`} className="border-b border-border-light last:border-b-0">
                           <td className="px-3 py-2 text-sm text-text-primary">
@@ -4011,10 +4360,21 @@ function FileViewerModal({
                           <td className="px-3 py-2 text-sm text-text-secondary">{formatDate(version.timestamp || version.date)}</td>
                           <td className="px-3 py-2 text-sm text-text-secondary">{formatTime(version.timestamp || version.date)}</td>
                           <td className="px-3 py-2 text-sm">
-                            {previewUrl && !isDeletedFile ? (
-                              <a href={previewUrl} download={versionDownloadFileName} className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background">
+                            {canDownloadVersion ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleDownloadTarget({
+                                  ...file,
+                                  ...snapshot,
+                                  backendDocumentId: snapshot.backendDocumentId || version.backendDocumentId || file.backendDocumentId || '',
+                                  filename,
+                                  previewUrl,
+                                  extension: snapshot.extension || file.extension,
+                                }, versionDownloadFileName)}
+                                className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background"
+                              >
                                 Download
-                              </a>
+                              </button>
                             ) : (
                               <span className="text-xs text-text-muted">Unavailable</span>
                             )}
@@ -4029,8 +4389,14 @@ function FileViewerModal({
           )}
 
           <div className="pt-4 flex items-center gap-2 justify-end">
-            {currentDownloadUrl ? (
-              <a href={currentDownloadUrl} download={resolvedDownloadFileName} className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center">Download</a>
+            {(currentDownloadUrl || safeEditData.backendDocumentId || file.backendDocumentId) ? (
+              <button
+                type="button"
+                onClick={() => void handleDownloadTarget(safeEditData || file, resolvedDownloadFileName)}
+                className="h-9 px-4 border border-border rounded-md text-sm text-text-primary hover:bg-background flex items-center justify-center"
+              >
+                Download
+              </button>
             ) : (
               <span className="h-9 px-4 inline-flex items-center rounded-md bg-background text-xs text-text-secondary border border-border">
                 Download unavailable
@@ -4105,6 +4471,7 @@ export {
   SalesPage,
   BankStatementsPage,
   UploadHistoryPage,
+  ResolvedDocumentsPage,
   RecentActivitiesPage,
   SupportPage,
   ClientSupportWidget,

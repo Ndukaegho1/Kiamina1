@@ -434,6 +434,8 @@ export const buildClientProfileUpdatePayload = (body) => {
     const normalizedPhone = sanitizeDigitsOnly(rawPhone);
     if (rawPhone && !normalizedPhone) {
       errors.push("phoneLocalNumber must contain digits only");
+    } else if (normalizedPhone && !/^\d{10,11}$/.test(normalizedPhone)) {
+      errors.push("phoneLocalNumber must be 10 or 11 digits");
     } else {
       payload["clientProfile.phoneLocalNumber"] = normalizedPhone;
     }
@@ -444,6 +446,8 @@ export const buildClientProfileUpdatePayload = (body) => {
     const normalizedPhone = sanitizeDigitsOnly(rawPhone);
     if (rawPhone && !normalizedPhone) {
       errors.push("phone must contain digits only");
+    } else if (normalizedPhone && !/^\d{10,11}$/.test(normalizedPhone)) {
+      errors.push("phone must be 10 or 11 digits");
     } else {
       payload["clientProfile.phoneLocalNumber"] = normalizedPhone;
     }
@@ -677,6 +681,11 @@ export const buildClientWorkspaceUpdatePayload = (body) => {
     "notificationSettings",
     "clientWorkspace.notificationSettings",
     "notificationSettings must be an object"
+  );
+  assignObjectField(
+    "accountSettings",
+    "clientWorkspace.accountSettings",
+    "accountSettings must be an object"
   );
 
   if (source.activityLog !== undefined) {

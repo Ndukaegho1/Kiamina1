@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  validateChangePasswordPayload,
   validateRefreshTokenPayload,
   validateLogoutSessionPayload,
   validateLoginSessionPayload,
+  validatePasswordLoginPayload,
   validateRegisterAccountPayload,
   validateSendOtpPayload,
   validateSendPasswordResetLinkPayload,
@@ -92,4 +94,24 @@ test("auth: verify-sms-otp validator enforces otp digits", () => {
   });
 
   assert.ok(errors.includes("otp must be 4 to 8 digits"));
+});
+
+test("auth: password-login validator requires password and normalizes email", () => {
+  const { errors, payload } = validatePasswordLoginPayload({
+    email: " USER@EXAMPLE.COM ",
+    password: "Secret123!"
+  });
+
+  assert.deepEqual(errors, []);
+  assert.equal(payload.email, "user@example.com");
+  assert.equal(payload.password, "Secret123!");
+});
+
+test("auth: change-password validator enforces password policy", () => {
+  const { errors } = validateChangePasswordPayload({
+    currentPassword: "Current123!",
+    newPassword: "weak"
+  });
+
+  assert.ok(errors.includes("newPassword must meet password security requirements"));
 });

@@ -10,6 +10,9 @@ import { requestIdMiddleware } from "./middleware/request-id.js";
 import v1Router from "./routes/v1/index.js";
 
 const app = express();
+const helmetOptions = {
+  crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
+};
 
 morgan.token("id", (req) => req.id || "-");
 
@@ -25,7 +28,7 @@ const isAllowedOrigin = (origin = "") => {
 };
 
 app.use(requestIdMiddleware);
-app.use(helmet());
+app.use(helmet(helmetOptions));
 app.use(
   cors({
     credentials: true,

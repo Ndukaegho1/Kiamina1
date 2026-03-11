@@ -5,13 +5,20 @@ const PUBLIC_ROUTE_KEYS = new Set([
   "POST /notifications/insights/analytics/events",
   "GET /notifications/insights/articles",
   "GET /notifications/insights/articles/search",
+  "POST /notifications/support/public/tickets",
+  "GET /notifications/support/public/tickets",
+  "GET /users/public/phone-availability",
+  "GET /auth/bootstrap-owner-status",
+  "POST /auth/authenticate-password",
   "POST /auth/register-account",
   "POST /auth/login-session",
   "POST /auth/refresh-token",
   "POST /auth/send-otp",
+  "POST /auth/send-email-verification-link",
   "POST /auth/send-password-reset-link",
   "POST /auth/verify-otp",
-  "POST /auth/verify-token"
+  "POST /auth/verify-token",
+  "POST /auth/social-account-status"
 ]);
 
 const normalizePath = (pathValue) => {
@@ -32,6 +39,13 @@ const isPublicRoute = (method, pathValue) => {
   if (
     normalizedMethod === "GET"
     && normalizedPath.startsWith("/notifications/insights/articles/")
+  ) {
+    return true;
+  }
+  if (
+    (normalizedMethod === "GET" || normalizedMethod === "POST")
+    && normalizedPath.startsWith("/notifications/support/public/tickets/")
+    && normalizedPath.endsWith("/messages")
   ) {
     return true;
   }

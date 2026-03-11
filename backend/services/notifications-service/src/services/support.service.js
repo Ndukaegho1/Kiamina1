@@ -21,8 +21,28 @@ const createHttpError = (status, message) => {
   return error;
 };
 
+const ANONYMOUS_OWNER_PREFIX = "anon_session_";
+const ANONYMOUS_EMAIL_DOMAIN = "anon.support.kiamina.local";
+
 const generateEntityId = (prefix) =>
   `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
+
+const normalizeString = (value = "") => String(value || "").trim();
+const normalizeEmail = (value = "") => normalizeString(value).toLowerCase();
+const isValidEmail = (value = "") => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(value));
+const normalizeAnonymousSessionId = (value = "") =>
+  normalizeString(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+const buildAnonymousOwnerUserId = (sessionId = "") => `${ANONYMOUS_OWNER_PREFIX}${sessionId}`;
+const buildAnonymousOwnerEmail = ({ sessionId = "", contactEmail = "" } = {}) => {
+  if (isValidEmail(contactEmail)) {
+    return normalizeEmail(contactEmail);
+  }
+  return `anon-${sessionId}@${ANONYMOUS_EMAIL_DOMAIN}`;
+};
 
 const assertCanAccessTicket = ({ ticket, actorUid, isAdmin }) => {
   if (!ticket) {
@@ -30,6 +50,22 @@ const assertCanAccessTicket = ({ ticket, actorUid, isAdmin }) => {
   }
 
   if (!isAdmin && ticket.ownerUserId !== actorUid) {
+    throw createHttpError(403, "You cannot access this support ticket.");
+  }
+};
+
+const assertCanAccessAnonymousTicket = ({ ticket, sessionId }) => {
+  if (!ticket) {
+    throw createHttpError(404, "Support ticket not found");
+  }
+
+  const normalizedSessionId = normalizeAnonymousSessionId(sessionId);
+  if (!normalizedSessionId) {
+    throw createHttpError(400, "Anonymous support session is required.");
+  }
+
+  const metadataSessionId = normalizeAnonymousSessionId(ticket?.metadata?.anonymousSessionId);
+  if (!metadataSessionId || metadataSessionId !== normalizedSessionId) {
     throw createHttpError(403, "You cannot access this support ticket.");
   }
 };
@@ -130,6 +166,94 @@ export const createSupportTicketForActor = async ({ actor, payload }) => {
   };
 };
 
+export const createAnonymousSupportTicket = async ({
+  payload = {},
+  sourceIp = "",
+  userAgent = ""
+}) => {
+  const normalizedSessionId = normalizeAnonymousSessionId(payload.sessionId);
+  if (!normalizedSessionId) {
+    throw createHttpError(400, "Anonymous support session is required.");
+  }
+
+  const ticketId = generateEntityId("sup");
+  const threadId = generateEntityId("thread");
+  const now = new Date();
+  const ownerUserId = buildAnonymousOwnerUserId(normalizedSessionId);
+  const ownerEmail = buildAnonymousOwnerEmail({
+    sessionId: normalizedSessionId,
+    contactEmail: payload.contactEmail
+  });
+  const leadLabel = normalizeString(payload.leadLabel);
+  const fullName = normalizeString(payload.fullName);
+  const senderDisplayName = fullName || leadLabel || "Website Visitor";
+  const effectiveSubject =
+    normalizeString(payload.subject)
+    || `Support request from ${senderDisplayName}`;
+  const effectiveDescription = normalizeString(payload.description);
+  const metadata = {
+    anonymous: true,
+    anonymousSessionId: normalizedSessionId,
+    leadLabel,
+    fullName,
+    contactEmail: normalizeEmail(payload.contactEmail),
+    organizationType: normalizeString(payload.organizationType).toLowerCase(),
+    sourceIp: normalizeString(sourceIp),
+    userAgent: normalizeString(userAgent),
+    source: "public-support-api"
+  };
+
+  const ticket = await createSupportTicket({
+    ticketId,
+    ownerUserId,
+    ownerEmail,
+    subject: effectiveSubject,
+    description: effectiveDescription,
+    priority: payload.priority || "medium",
+    status: "open",
+    channel: payload.channel || "web",
+    tags: Array.isArray(payload.tags)
+      ? [...new Set(payload.tags.map((tag) => normalizeString(tag).toLowerCase()).filter(Boolean))]
+      : ["anonymous"],
+    lastMessageAt: now,
+    openedAt: now,
+    metadata
+  });
+
+  const thread = await createSupportThread({
+    threadId,
+    ticketId,
+    ownerUserId,
+    participants: [ownerUserId],
+    source: payload.channel === "chatbot" ? "chatbot" : "support",
+    status: "active",
+    lastMessageAt: now
+  });
+
+  const initialMessageContent = effectiveDescription || effectiveSubject;
+  const initialMessage = await createSupportMessage({
+    threadId: thread.threadId,
+    ticketId: ticket.ticketId,
+    senderType: "user",
+    senderUid: ownerUserId,
+    senderDisplayName,
+    messageType: "text",
+    visibility: "public",
+    content: initialMessageContent,
+    attachments: [],
+    metadata: {
+      source: "public-support-api",
+      anonymous: true
+    }
+  });
+
+  return {
+    ticket,
+    thread,
+    initialMessage
+  };
+};
+
 export const createEscalatedSupportTicketFromChat = async ({
   ownerUserId,
   ownerEmail = "",
@@ -198,6 +322,19 @@ export const listSupportTicketsForActor = async ({ actor, isAdmin, query }) => {
 
   return listSupportTickets({
     ownerUserId: shouldListAll ? "" : actor.uid,
+    status: query.status || "",
+    limit: query.limit || 50
+  });
+};
+
+export const listAnonymousSupportTickets = async ({ query = {} }) => {
+  const normalizedSessionId = normalizeAnonymousSessionId(query.sessionId);
+  if (!normalizedSessionId) {
+    throw createHttpError(400, "Anonymous support session is required.");
+  }
+
+  return listSupportTickets({
+    ownerUserId: buildAnonymousOwnerUserId(normalizedSessionId),
     status: query.status || "",
     limit: query.limit || 50
   });
@@ -292,6 +429,70 @@ export const postSupportMessageForTicket = async ({ ticketId, actor, isAdmin, pa
   return message;
 };
 
+export const postAnonymousSupportMessageForTicket = async ({
+  ticketId,
+  payload = {}
+}) => {
+  const normalizedSessionId = normalizeAnonymousSessionId(payload.sessionId);
+  if (!normalizedSessionId) {
+    throw createHttpError(400, "Anonymous support session is required.");
+  }
+
+  const ticket = await findSupportTicketByTicketId(ticketId);
+  assertCanAccessAnonymousTicket({
+    ticket,
+    sessionId: normalizedSessionId
+  });
+
+  let thread = await findSupportThreadByTicketId(ticketId);
+  if (!thread) {
+    thread = await createSupportThread({
+      threadId: generateEntityId("thread"),
+      ticketId,
+      ownerUserId: ticket.ownerUserId,
+      participants: [ticket.ownerUserId].filter(Boolean),
+      source: ticket.channel === "chatbot" ? "chatbot" : "support",
+      status: "active",
+      lastMessageAt: new Date()
+    });
+  }
+
+  const senderDisplayName =
+    normalizeString(payload.senderDisplayName)
+    || normalizeString(ticket?.metadata?.fullName)
+    || normalizeString(ticket?.metadata?.leadLabel)
+    || "Website Visitor";
+
+  const message = await createSupportMessage({
+    threadId: thread.threadId,
+    ticketId: ticket.ticketId,
+    senderType: "user",
+    senderUid: ticket.ownerUserId,
+    senderDisplayName,
+    messageType: "text",
+    visibility: "public",
+    content: payload.content,
+    attachments: payload.attachments || [],
+    metadata: {
+      source: "public-support-api",
+      anonymous: true
+    }
+  });
+
+  const participants = [...new Set([...(thread.participants || []), ticket.ownerUserId].filter(Boolean))];
+  await updateSupportThreadByThreadId(thread.threadId, {
+    participants,
+    lastMessageAt: message.createdAt
+  });
+
+  await updateSupportTicketByTicketId(ticketId, {
+    lastMessageAt: message.createdAt,
+    status: ticket.status === "waiting-user" ? "open" : ticket.status
+  });
+
+  return message;
+};
+
 export const listSupportMessagesForTicket = async ({ ticketId, actor, isAdmin, limit = 100 }) => {
   const ticket = await findSupportTicketByTicketId(ticketId);
   assertCanAccessTicket({ ticket, actorUid: actor.uid, isAdmin });
@@ -306,5 +507,22 @@ export const listSupportMessagesForTicket = async ({ ticketId, actor, isAdmin, l
     return messages;
   }
 
+  return messages.filter((message) => message.visibility !== "internal");
+};
+
+export const listAnonymousSupportMessagesForTicket = async ({
+  ticketId,
+  sessionId,
+  limit = 100
+}) => {
+  const ticket = await findSupportTicketByTicketId(ticketId);
+  assertCanAccessAnonymousTicket({ ticket, sessionId });
+
+  const thread = await findSupportThreadByTicketId(ticketId);
+  if (!thread) {
+    return [];
+  }
+
+  const messages = await listSupportMessagesByThreadId(thread.threadId, limit);
   return messages.filter((message) => message.visibility !== "internal");
 };

@@ -23,8 +23,10 @@ test.before(async () => {
   process.env.NODE_ENV = "test";
   process.env.SERVICE_NAME = "users-service-test";
   process.env.MONGO_DB_NAME = "kiamina_users_integration";
-  process.env.DOCUMENTS_SERVICE_URL = "http://localhost:4103";
+  process.env.DOCUMENTS_SERVICE_URL = "";
   process.env.DOCUMENTS_SERVICE_TIMEOUT_MS = "500";
+  process.env.AUTH_SERVICE_URL = "";
+  process.env.AUTH_SERVICE_TIMEOUT_MS = "500";
   process.env.MONGOMS_RUNTIME_DOWNLOAD = process.env.MONGOMS_RUNTIME_DOWNLOAD || "0";
 
   try {
@@ -256,4 +258,76 @@ test("users integration: admin client-management list and patch update client ac
     patchResponse.body?.clientWorkspace?.statusControl?.tags,
     ["priority", "escalated"]
   );
+});
+
+test("users integration: owner can delete client-management account by uid", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const ownerUid = "owner_uid_management";
+  const ownerEmail = "owner-management@example.com";
+  const clientUid = "client_uid_delete_management";
+  const clientEmail = "client-delete-management@example.com";
+
+  await User.create({
+    uid: ownerUid,
+    email: ownerEmail,
+    roles: ["owner"],
+    displayName: "Owner Management"
+  });
+
+  await User.create({
+    uid: clientUid,
+    email: clientEmail,
+    roles: ["client"],
+    displayName: "Client Delete Management",
+    status: "active"
+  });
+
+  const response = await request(app)
+    .delete(`/api/v1/users/admin/client-management/clients/${clientUid}`)
+    .set("x-user-id", ownerUid)
+    .set("x-user-email", ownerEmail)
+    .set("x-user-roles", "owner")
+    .send({
+      reason: "cleanup"
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body?.uid, clientUid);
+  assert.equal(response.body?.cascade?.documents?.attempted, false);
+  assert.equal(response.body?.cascade?.auth?.attempted, false);
+
+  const deletedUser = await User.findOne({ uid: clientUid }).lean();
+  assert.equal(deletedUser, null);
+});
+
+test("users integration: delete /users/me removes user and returns cascade summary", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const uid = "client_delete_uid";
+  const email = "client-delete@example.com";
+
+  await User.create({
+    uid,
+    email,
+    roles: ["client"],
+    displayName: "Client Delete"
+  });
+
+  const response = await request(app)
+    .delete("/api/v1/users/me")
+    .set("x-user-id", uid)
+    .set("x-user-email", email)
+    .set("x-user-roles", "client")
+    .send({
+      reason: "user-requested"
+    });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body?.uid, uid);
+  assert.equal(response.body?.cascade?.documents?.attempted, false);
+  assert.equal(response.body?.cascade?.auth?.attempted, false);
+
+  const deletedUser = await User.findOne({ uid }).lean();
+  assert.equal(deletedUser, null);
 });

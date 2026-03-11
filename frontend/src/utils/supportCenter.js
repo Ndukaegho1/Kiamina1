@@ -14,6 +14,7 @@ const GENERIC_AGENT_NAME_PATTERN = /^(admin|administrator|senior admin|super adm
 const GENERIC_AGENT_TOKENS = new Set(['admin', 'administrator', 'senior', 'super', 'support', 'agent', 'system'])
 const LEAD_ALIAS_DOMAIN = 'lead.kiamina.local'
 const LEAD_EMAIL_PATTERN = /^lead-(\d+)@lead\.kiamina\.local$/i
+const ANONYMOUS_SUPPORT_SESSION_PREFIX = 'anon-session'
 
 const LEAD_ORGANIZATION_TYPE = Object.freeze({
   BUSINESS: 'business',
@@ -34,6 +35,8 @@ const LEAD_INTAKE_STAGE = Object.freeze({
   INQUIRY: 'awaiting_inquiry',
   COMPLETE: 'complete',
 })
+const SUPPORT_LEAD_STATUS_VALUES = new Set(['new', 'contacted', 'qualified', 'converted', 'closed'])
+const NEWSLETTER_STATUS_VALUES = new Set(['subscribed', 'unsubscribed', 'bounced'])
 
 const SUPPORT_TIMEZONE = 'Africa/Lagos'
 const SUPPORT_WORKING_HOURS_TEXT = 'Mon-Fri 8:00 AM - 6:00 PM, Sat-Sun 9:00 AM - 1:00 PM (WAT)'
@@ -203,6 +206,7 @@ const parseLeadNumberFromAlias = (clientEmail = '') => {
   const parsed = Number(match[1] || 0)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
 }
+const isLeadAliasEmail = (clientEmail = '') => LEAD_EMAIL_PATTERN.test(toEmail(clientEmail))
 
 const isValidEmail = (value = '') => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(toEmail(value))
 
@@ -354,6 +358,10 @@ const normalizeLead = (lead = {}, index = 0) => {
     createdAtIso: toTrimmedValue(lead.createdAtIso) || nowIso(),
     updatedAtIso: toTrimmedValue(lead.updatedAtIso) || nowIso(),
     source: toTrimmedValue(lead.source) || 'support-chat',
+    supportStatus: toTrimmedValue(lead.supportStatus || lead.status).toLowerCase(),
+    newsletterStatus: toTrimmedValue(lead.newsletterStatus).toLowerCase(),
+    assignedToUid: toTrimmedValue(lead.assignedToUid),
+    leadNotes: toTrimmedValue(lead.leadNotes || lead.notes),
   }
 }
 
@@ -409,6 +417,220 @@ const sortLeads = (leads = []) => (
     return (Number(left.leadNumber) || 0) - (Number(right.leadNumber) || 0)
   })
 )
+
+const parseAdminDashboardLeadCollections = (payload = {}) => {
+  const dashboard = payload?.dashboard && typeof payload.dashboard === 'object'
+    ? payload.dashboard
+    : {}
+  return {
+    supportLeads: Array.isArray(dashboard.supportLeads) ? dashboard.supportLeads : [],
+    newsletters: Array.isArray(dashboard.newsletters) ? dashboard.newsletters : [],
+  }
+}
+
+const mapAdminSupportLeadToLocalLead = (entry = {}, index = 0) => {
+  const normalizedEmail = toEmail(entry?.email)
+  const fallbackLabel = toTrimmedValue(entry?.companyName)
+    || toTrimmedValue(entry?.fullName)
+    || normalizedEmail
+    || `Lead ${index + 1}`
+  return normalizeLead({
+    id: toTrimmedValue(entry?.leadId) || createId(`LEADADM${index + 1}`),
+    leadNumber: index + 1,
+    leadLabel: fallbackLabel,
+    clientEmail: normalizedEmail || buildLeadAliasEmail(index + 1),
+    fullName: toTrimmedValue(entry?.fullName),
+    contactEmail: normalizedEmail,
+    leadCategory: LEAD_CATEGORY.INQUIRY_FOLLOW_UP,
+    leadCategories: [LEAD_CATEGORY.INQUIRY_FOLLOW_UP],
+    inquiryText: toTrimmedValue(entry?.interest) || toTrimmedValue(entry?.notes),
+    source: toTrimmedValue(entry?.source) || 'support-form',
+    createdAtIso: toTrimmedValue(entry?.createdAt),
+    updatedAtIso: toTrimmedValue(entry?.updatedAt) || toTrimmedValue(entry?.createdAt),
+    supportStatus: toTrimmedValue(entry?.status).toLowerCase(),
+    assignedToUid: toTrimmedValue(entry?.assignedToUid),
+    leadNotes: toTrimmedValue(entry?.notes),
+  }, index)
+}
+
+const mapAdminNewsletterToLocalLead = (entry = {}, index = 0) => {
+  const normalizedEmail = toEmail(entry?.email)
+  const normalizedFullName = toTrimmedValue(entry?.fullName)
+  const fallbackLabel = normalizedFullName || normalizedEmail || `Newsletter ${index + 1}`
+  return normalizeLead({
+    id: `NEWS-${normalizedEmail || index + 1}`,
+    leadNumber: index + 1,
+    leadLabel: fallbackLabel,
+    clientEmail: normalizedEmail || buildLeadAliasEmail(index + 1),
+    fullName: normalizedFullName,
+    contactEmail: normalizedEmail,
+    leadCategory: LEAD_CATEGORY.NEWSLETTER_SUBSCRIBER,
+    leadCategories: [LEAD_CATEGORY.NEWSLETTER_SUBSCRIBER],
+    inquiryText: '',
+    source: toTrimmedValue(entry?.source) || 'newsletter-subscription',
+    createdAtIso: toTrimmedValue(entry?.subscribedAt),
+    updatedAtIso: toTrimmedValue(entry?.lastEngagedAt) || toTrimmedValue(entry?.subscribedAt),
+    newsletterStatus: toTrimmedValue(entry?.status).toLowerCase(),
+  }, index)
+}
+
+const mapAdminDashboardCollectionsToLocalLeads = ({
+  supportLeads = [],
+  newsletters = [],
+} = {}) => {
+  const combined = [
+    ...(Array.isArray(supportLeads) ? supportLeads : []).map((entry, index) => mapAdminSupportLeadToLocalLead(entry, index)),
+    ...(Array.isArray(newsletters) ? newsletters : []).map((entry, index) => mapAdminNewsletterToLocalLead(entry, index)),
+  ]
+  const byKey = new Map()
+  combined.forEach((lead, index) => {
+    const normalizedLead = normalizeLead(lead, index)
+    const normalizedEmail = toEmail(normalizedLead.contactEmail || normalizedLead.clientEmail)
+    const categoryKey = normalizeLeadCategories(normalizedLead.leadCategories, normalizedLead.leadCategory).sort().join('|')
+    const key = `${toTrimmedValue(normalizedLead.id) || normalizedEmail}::${normalizedEmail}::${categoryKey}`
+    const existing = byKey.get(key)
+    const nextUpdatedAt = Date.parse(normalizedLead.updatedAtIso || '') || 0
+    const existingUpdatedAt = Date.parse(existing?.updatedAtIso || '') || 0
+    if (!existing || nextUpdatedAt >= existingUpdatedAt) {
+      byKey.set(key, normalizedLead)
+    }
+  })
+  return sortLeads(Array.from(byKey.values()))
+}
+
+const buildAdminDashboardCollectionsFromLocalLeads = (leads = []) => {
+  const supportLeads = []
+  const newslettersByEmail = new Map()
+  const supportLeadKeySet = new Set()
+
+  ;(Array.isArray(leads) ? leads : []).forEach((lead, index) => {
+    const normalizedLead = normalizeLead(lead, index)
+    const normalizedCategories = normalizeLeadCategories(
+      normalizedLead.leadCategories,
+      normalizedLead.leadCategory,
+    )
+    const hasNewsletterCategory = normalizedCategories.includes(LEAD_CATEGORY.NEWSLETTER_SUBSCRIBER)
+    const hasInquiryCategory = normalizedCategories.includes(LEAD_CATEGORY.INQUIRY_FOLLOW_UP) || !hasNewsletterCategory
+    const normalizedEmail = toEmail(normalizedLead.contactEmail || normalizedLead.clientEmail)
+    const createdAtIso = toTrimmedValue(normalizedLead.createdAtIso) || nowIso()
+    const updatedAtIso = toTrimmedValue(normalizedLead.updatedAtIso) || createdAtIso
+
+    if (hasInquiryCategory) {
+      const leadId = toTrimmedValue(normalizedLead.id) || createId(`LEADSYNC${index + 1}`)
+      const supportKey = `${leadId}:${normalizedEmail}`
+      const normalizedSupportStatus = SUPPORT_LEAD_STATUS_VALUES.has(normalizedLead.supportStatus)
+        ? normalizedLead.supportStatus
+        : 'new'
+      if (!supportLeadKeySet.has(supportKey)) {
+        supportLeadKeySet.add(supportKey)
+        supportLeads.push({
+          leadId,
+          fullName: toTrimmedValue(normalizedLead.fullName),
+          email: normalizedEmail,
+          companyName: toTrimmedValue(normalizedLead.leadLabel),
+          phone: '',
+          source: toTrimmedValue(normalizedLead.source) || 'support-form',
+          status: normalizedSupportStatus,
+          interest: toTrimmedValue(normalizedLead.inquiryText),
+          assignedToUid: toTrimmedValue(normalizedLead.assignedToUid),
+          notes: toTrimmedValue(normalizedLead.leadNotes),
+          createdAt: createdAtIso,
+          updatedAt: updatedAtIso,
+        })
+      }
+    }
+
+    if (hasNewsletterCategory && normalizedEmail) {
+      const normalizedNewsletterStatus = NEWSLETTER_STATUS_VALUES.has(normalizedLead.newsletterStatus)
+        ? normalizedLead.newsletterStatus
+        : 'subscribed'
+      const candidateNewsletter = {
+        email: normalizedEmail,
+        fullName: toTrimmedValue(normalizedLead.fullName),
+        status: normalizedNewsletterStatus,
+        source: toTrimmedValue(normalizedLead.source) || 'newsletter-subscription',
+        tags: ['newsletter'],
+        subscribedAt: createdAtIso,
+        lastEngagedAt: updatedAtIso,
+      }
+      const existing = newslettersByEmail.get(normalizedEmail)
+      const existingUpdatedAt = Date.parse(existing?.lastEngagedAt || '') || 0
+      const nextUpdatedAt = Date.parse(candidateNewsletter.lastEngagedAt || '') || 0
+      if (!existing || nextUpdatedAt >= existingUpdatedAt) {
+        newslettersByEmail.set(normalizedEmail, candidateNewsletter)
+      }
+    }
+  })
+
+  return {
+    supportLeads: supportLeads.sort((left, right) => (
+      String(left.leadId || '').localeCompare(String(right.leadId || ''))
+    )),
+    newsletters: Array.from(newslettersByEmail.values()).sort((left, right) => (
+      String(left.email || '').localeCompare(String(right.email || ''))
+    )),
+  }
+}
+
+const serializeAdminDashboardLeadCollections = (payload = {}) => {
+  const normalized = {
+    supportLeads: Array.isArray(payload?.supportLeads) ? payload.supportLeads : [],
+    newsletters: Array.isArray(payload?.newsletters) ? payload.newsletters : [],
+  }
+  return JSON.stringify(normalized)
+}
+
+const patchAdminDashboardLeadCollections = async (payload = {}) => (
+  requestJson('/api/users/me/admin-dashboard', {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      supportLeads: Array.isArray(payload?.supportLeads) ? payload.supportLeads : [],
+      newsletters: Array.isArray(payload?.newsletters) ? payload.newsletters : [],
+    }),
+  })
+)
+
+const syncAdminDashboardLeadCollections = async ({
+  force = false,
+  localLeads = supportState.leads,
+} = {}) => {
+  if (!isBackendSupportAvailable() || !isBackendAdminActor()) {
+    return { ok: false, reason: 'not-admin-session' }
+  }
+  const payload = buildAdminDashboardCollectionsFromLocalLeads(localLeads)
+  const signature = serializeAdminDashboardLeadCollections(payload)
+  if (!force && signature === backendAdminDashboardLeadSyncSignature) {
+    return { ok: true, skipped: true }
+  }
+  const response = await patchAdminDashboardLeadCollections(payload)
+  if (!response.ok) {
+    return { ok: false, message: response.message || 'Unable to sync admin dashboard leads.' }
+  }
+  backendAdminDashboardLeadSyncSignature = signature
+  return { ok: true }
+}
+
+const scheduleAdminDashboardLeadCollectionsSync = ({
+  force = false,
+  delayMs = ADMIN_DASHBOARD_LEAD_SYNC_DELAY_MS,
+} = {}) => {
+  if (!isBackendSupportAvailable() || !isBackendAdminActor()) return
+  if (typeof window === 'undefined') {
+    void syncAdminDashboardLeadCollections({ force })
+    return
+  }
+  if (backendAdminDashboardLeadSyncTimer) {
+    window.clearTimeout(backendAdminDashboardLeadSyncTimer)
+    backendAdminDashboardLeadSyncTimer = null
+  }
+  backendAdminDashboardLeadSyncTimer = window.setTimeout(() => {
+    backendAdminDashboardLeadSyncTimer = null
+    void syncAdminDashboardLeadCollections({ force })
+  }, Math.max(0, Number(delayMs) || 0))
+}
 
 const readSupportTickets = () => {
   if (typeof localStorage === 'undefined') return []
@@ -520,6 +742,9 @@ const updateSupportLeads = (updater) => {
   }
   persistSupportLeads(updatedLeads)
   emitSupportState()
+  if (isBackendAdminActor()) {
+    scheduleAdminDashboardLeadCollectionsSync()
+  }
   return updatedLeads
 }
 
@@ -614,20 +839,65 @@ const persistAnonymousLeadSession = ({
   leadId = '',
   leadLabel = '',
   clientEmail = '',
+  anonymousSessionId = '',
+  backendTicketId = '',
 } = {}) => {
   if (typeof localStorage === 'undefined') return
   const normalizedClientEmail = toEmail(clientEmail)
-  if (!normalizedClientEmail) return
+  const normalizedAnonymousSessionId = toTrimmedValue(anonymousSessionId)
+  if (!normalizedClientEmail && !normalizedAnonymousSessionId) return
+  const existingSession = safeParseJson(localStorage.getItem(SUPPORT_ANON_LEAD_SESSION_STORAGE_KEY), {})
   try {
     localStorage.setItem(SUPPORT_ANON_LEAD_SESSION_STORAGE_KEY, JSON.stringify({
+      ...(existingSession && typeof existingSession === 'object' ? existingSession : {}),
       leadId: toTrimmedValue(leadId),
       leadLabel: toTrimmedValue(leadLabel),
-      clientEmail: normalizedClientEmail,
+      clientEmail: normalizedClientEmail || toEmail(existingSession?.clientEmail),
+      anonymousSessionId: normalizedAnonymousSessionId || toTrimmedValue(existingSession?.anonymousSessionId),
+      backendTicketId: toTrimmedValue(backendTicketId) || toTrimmedValue(existingSession?.backendTicketId),
       createdAtIso: nowIso(),
     }))
   } catch {
     // Ignore session persistence failures.
   }
+}
+
+const buildAnonymousSupportSessionId = () => (
+  `${ANONYMOUS_SUPPORT_SESSION_PREFIX}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+)
+
+const getAnonymousSupportSessionId = ({
+  createIfMissing = true,
+  clientEmail = '',
+  leadId = '',
+  leadLabel = '',
+  backendTicketId = '',
+} = {}) => {
+  if (typeof localStorage === 'undefined') return ''
+  const savedSession = safeParseJson(localStorage.getItem(SUPPORT_ANON_LEAD_SESSION_STORAGE_KEY), null)
+  const existingSessionId = toTrimmedValue(savedSession?.anonymousSessionId)
+  if (existingSessionId) {
+    if (clientEmail || leadId || leadLabel || backendTicketId) {
+      persistAnonymousLeadSession({
+        leadId: leadId || savedSession?.leadId,
+        leadLabel: leadLabel || savedSession?.leadLabel,
+        clientEmail: clientEmail || savedSession?.clientEmail,
+        anonymousSessionId: existingSessionId,
+        backendTicketId: backendTicketId || savedSession?.backendTicketId,
+      })
+    }
+    return existingSessionId
+  }
+  if (!createIfMissing) return ''
+  const generatedSessionId = buildAnonymousSupportSessionId()
+  persistAnonymousLeadSession({
+    leadId: leadId || savedSession?.leadId,
+    leadLabel: leadLabel || savedSession?.leadLabel,
+    clientEmail: clientEmail || savedSession?.clientEmail,
+    anonymousSessionId: generatedSessionId,
+    backendTicketId: backendTicketId || savedSession?.backendTicketId,
+  })
+  return generatedSessionId
 }
 
 const getLeadByContactEmail = (leads = [], contactEmail = '') => {
@@ -981,6 +1251,7 @@ export const initializeAnonymousSupportLead = () => {
 
   const savedSession = safeParseJson(localStorage.getItem(SUPPORT_ANON_LEAD_SESSION_STORAGE_KEY), null)
   const savedClientEmail = toEmail(savedSession?.clientEmail)
+  const savedAnonymousSessionId = toTrimmedValue(savedSession?.anonymousSessionId)
   if (savedClientEmail) {
     let existingLead = getLeadByClientEmail(supportState.leads, savedClientEmail)
     if (!existingLead) {
@@ -1001,12 +1272,21 @@ export const initializeAnonymousSupportLead = () => {
     if (existingLead && (!existingLead.ipAddress || !existingLead.location)) {
       void hydrateSupportLeadNetworkProfile({ clientEmail: existingLead.clientEmail })
     }
+    const anonymousSessionId = getAnonymousSupportSessionId({
+      createIfMissing: true,
+      leadId: existingLead.id,
+      leadLabel: existingLead.leadLabel,
+      clientEmail: existingLead.clientEmail,
+      backendTicketId: toTrimmedValue(savedSession?.backendTicketId),
+    }) || savedAnonymousSessionId
     return {
       ok: true,
       lead: existingLead,
       leadId: existingLead.id,
       leadLabel: existingLead.leadLabel,
       clientEmail: existingLead.clientEmail,
+      anonymousSessionId,
+      backendTicketId: toTrimmedValue(savedSession?.backendTicketId),
     }
   }
 
@@ -1022,10 +1302,17 @@ export const initializeAnonymousSupportLead = () => {
     source: 'chat-inquiry',
   })
   updateSupportLeads((leads) => replaceLead(leads, nextLead))
+  const anonymousSessionId = getAnonymousSupportSessionId({
+    createIfMissing: true,
+    leadId: nextLead.id,
+    leadLabel: nextLead.leadLabel,
+    clientEmail: nextLead.clientEmail,
+  })
   persistAnonymousLeadSession({
     leadId: nextLead.id,
     leadLabel: nextLead.leadLabel,
     clientEmail: nextLead.clientEmail,
+    anonymousSessionId,
   })
   if (!nextLead.ipAddress || !nextLead.location) {
     void hydrateSupportLeadNetworkProfile({ clientEmail: nextLead.clientEmail })
@@ -1036,6 +1323,7 @@ export const initializeAnonymousSupportLead = () => {
     leadId: nextLead.id,
     leadLabel: nextLead.leadLabel,
     clientEmail: nextLead.clientEmail,
+    anonymousSessionId,
   }
 }
 
@@ -1160,18 +1448,21 @@ export const deleteSupportLead = ({
   const removedLeadId = toTrimmedValue(removedLead.id)
   const removedLeadClientEmail = toEmail(removedLead.clientEmail)
   let removedTickets = []
-  updateSupportTickets((tickets) => {
-    removedTickets = tickets.filter((ticket) => (
-      Boolean(ticket?.isLead)
-      && (
-        (removedLeadId && toTrimmedValue(ticket.leadId) === removedLeadId)
-        || (removedLeadClientEmail && toEmail(ticket.clientEmail) === removedLeadClientEmail)
-      )
-    ))
-    if (removedTickets.length === 0) return tickets
-    const removedTicketIds = new Set(removedTickets.map((ticket) => ticket.id))
-    return tickets.filter((ticket) => !removedTicketIds.has(ticket.id))
-  })
+  const shouldRemoveLinkedTickets = !isBackendAdminActor()
+  if (shouldRemoveLinkedTickets) {
+    updateSupportTickets((tickets) => {
+      removedTickets = tickets.filter((ticket) => (
+        Boolean(ticket?.isLead)
+        && (
+          (removedLeadId && toTrimmedValue(ticket.leadId) === removedLeadId)
+          || (removedLeadClientEmail && toEmail(ticket.clientEmail) === removedLeadClientEmail)
+        )
+      ))
+      if (removedTickets.length === 0) return tickets
+      const removedTicketIds = new Set(removedTickets.map((ticket) => ticket.id))
+      return tickets.filter((ticket) => !removedTicketIds.has(ticket.id))
+    })
+  }
 
   clearAnonymousLeadSessionByClientEmail(removedLeadClientEmail)
 
@@ -1336,6 +1627,9 @@ export const subscribeSupportCenter = (listener) => {
 
 let backendRefreshPromise = null
 let cachedKnowledgeBaseHint = ''
+let backendAdminDashboardLeadSyncTimer = null
+let backendAdminDashboardLeadSyncSignature = ''
+const ADMIN_DASHBOARD_LEAD_SYNC_DELAY_MS = 350
 
 const readIsoMapFromStorage = (storageKey) => {
   if (typeof localStorage === 'undefined') return {}
@@ -1380,6 +1674,29 @@ const isBackendSupportAvailable = () => {
   const authUser = getStoredAuthUserForSupport()
   return Boolean(toTrimmedValue(authUser?.email))
 }
+
+const isBackendAnonymousSupportAvailable = () => hasApiCapabilities()
+
+const getStoredAnonymousSupportSession = () => {
+  if (typeof localStorage === 'undefined') return null
+  const parsed = safeParseJson(localStorage.getItem(SUPPORT_ANON_LEAD_SESSION_STORAGE_KEY), null)
+  if (!parsed || typeof parsed !== 'object') return null
+  return parsed
+}
+
+const getActiveAnonymousSupportSessionId = ({
+  createIfMissing = true,
+  clientEmail = '',
+  leadId = '',
+  leadLabel = '',
+  backendTicketId = '',
+} = {}) => getAnonymousSupportSessionId({
+  createIfMissing,
+  clientEmail,
+  leadId,
+  leadLabel,
+  backendTicketId,
+})
 
 const isBackendAdminActor = () => {
   const authUser = getStoredAuthUserForSupport()
@@ -1495,8 +1812,8 @@ const mapChatMessagesFromBackend = (messages = [], { sessionId = '' } = {}) => {
   })]
 }
 
-const applyLeadMetadataToTicket = (ticket = {}) => {
-  const lead = getLeadByClientEmail(supportState.leads, ticket.clientEmail)
+const applyLeadMetadataToTicket = (ticket = {}, leadRows = supportState.leads) => {
+  const lead = getLeadByClientEmail(leadRows, ticket.clientEmail)
   if (!lead) return ticket
   return normalizeTicket({
     ...ticket,
@@ -1563,28 +1880,74 @@ const refreshKnowledgeBaseHint = async () => {
     : `Tip from Knowledge Base: ${title || summary}`
 }
 
-const refreshSupportStateFromBackend = async () => {
-  if (!isBackendSupportAvailable()) return { ok: false, message: 'Backend support unavailable for anonymous session.' }
+export const refreshSupportStateFromBackend = async () => {
+  const hasAuthenticatedBackend = isBackendSupportAvailable()
+  const hasAnonymousBackend = !hasAuthenticatedBackend && isBackendAnonymousSupportAvailable()
+  if (!hasAuthenticatedBackend && !hasAnonymousBackend) {
+    return { ok: false, message: 'Network API unavailable.' }
+  }
   if (backendRefreshPromise) return backendRefreshPromise
 
   backendRefreshPromise = (async () => {
-    const adminActor = isBackendAdminActor()
+    const adminActor = hasAuthenticatedBackend && isBackendAdminActor()
     const actor = getActorIdentity()
     const assignedAdminMeta = readAssignedAdminMetaMap()
+    const anonymousSession = getStoredAnonymousSupportSession()
+    const anonymousSessionId = hasAnonymousBackend
+      ? getActiveAnonymousSupportSessionId({
+        createIfMissing: false,
+        clientEmail: toEmail(anonymousSession?.clientEmail),
+        leadId: toTrimmedValue(anonymousSession?.leadId),
+        leadLabel: toTrimmedValue(anonymousSession?.leadLabel),
+        backendTicketId: toTrimmedValue(anonymousSession?.backendTicketId),
+      })
+      : ''
+    let adminDashboardCollections = { supportLeads: [], newsletters: [] }
+    let hasAdminDashboardPayload = false
 
-    const ticketListResponse = await requestJson(`/api/notifications/support/tickets?scope=${adminActor ? 'all' : 'own'}&limit=100`)
+    if (adminActor) {
+      const adminDashboardResponse = await requestJson('/api/users/me/admin-dashboard')
+      if (adminDashboardResponse.ok && adminDashboardResponse.data && typeof adminDashboardResponse.data === 'object') {
+        adminDashboardCollections = parseAdminDashboardLeadCollections(adminDashboardResponse.data)
+        hasAdminDashboardPayload = true
+      }
+    }
+
+    if (!hasAuthenticatedBackend && !anonymousSessionId) {
+      return { ok: false, message: 'Anonymous support session is unavailable.' }
+    }
+
+    const ticketListResponse = hasAuthenticatedBackend
+      ? await requestJson(`/api/notifications/support/tickets?scope=${adminActor ? 'all' : 'own'}&limit=100`)
+      : await requestJson(
+        `/api/notifications/support/public/tickets?sessionId=${encodeURIComponent(anonymousSessionId)}&limit=100`,
+      )
     if (!ticketListResponse.ok || !Array.isArray(ticketListResponse.data)) {
       return { ok: false, message: ticketListResponse.message || 'Unable to load support tickets.' }
     }
 
     const supportTicketRecords = ticketListResponse.data
     const supportMessageResponses = await Promise.all(supportTicketRecords.map((ticket) => (
-      requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticket.ticketId)}/messages?limit=200`)
+      hasAuthenticatedBackend
+        ? requestJson(`/api/notifications/support/tickets/${encodeURIComponent(ticket.ticketId)}/messages?limit=200`)
+        : requestJson(
+          `/api/notifications/support/public/tickets/${encodeURIComponent(ticket.ticketId)}/messages?sessionId=${encodeURIComponent(anonymousSessionId)}&limit=200`,
+        )
     )))
 
     const mappedSupportTickets = supportTicketRecords.map((ticket, index) => {
       const messages = mapSupportMessagesFromBackend(supportMessageResponses[index]?.data)
       const assignmentMeta = assignedAdminMeta[ticket.ticketId] || {}
+      const metadata = ticket?.metadata && typeof ticket.metadata === 'object' ? ticket.metadata : {}
+      const metadataLeadLabel = toTrimmedValue(metadata.leadLabel)
+      const metadataFullName = toTrimmedValue(metadata.fullName)
+      const metadataContactEmail = toEmail(metadata.contactEmail)
+      const metadataOrganizationType = normalizeLeadOrganizationType(metadata.organizationType)
+      const metadataLeadCategory = normalizeLeadCategories(
+        metadata.leadCategories,
+        metadata.leadCategory,
+        metadata.anonymous ? LEAD_CATEGORY.INQUIRY_FOLLOW_UP : '',
+      )
       const assignedAdminName = (
         toTrimmedValue(ticket.assignedAdminName)
         || toTrimmedValue(assignmentMeta.name)
@@ -1595,10 +1958,12 @@ const refreshSupportStateFromBackend = async () => {
         || toEmail(assignmentMeta.email)
         || (toTrimmedValue(ticket.assignedToUid) === actor.uid ? actor.email : '')
       )
+      const ticketOwnerEmail = toEmail(ticket.ownerEmail)
+      const isLeadTicket = Boolean(metadata.anonymous) || isLeadAliasEmail(ticketOwnerEmail)
       return normalizeTicket({
         id: ticket.ticketId,
-        clientEmail: toEmail(ticket.ownerEmail),
-        clientName: toTrimmedValue(ticket.ownerEmail) || 'Client User',
+        clientEmail: ticketOwnerEmail,
+        clientName: metadataLeadLabel || metadataFullName || toTrimmedValue(ticket.ownerEmail) || 'Client User',
         businessName: '',
         status: mapBackendSupportStatusToLocal(ticket.status),
         channel: mapBackendSupportChannelToLocal({ status: ticket.status, channel: ticket.channel }),
@@ -1610,24 +1975,24 @@ const refreshSupportStateFromBackend = async () => {
         unreadByAdmin: 0,
         slaDueAtIso: '',
         resolvedAtIso: toTrimmedValue(ticket.resolvedAt),
-        isLead: false,
-        leadId: '',
-        leadLabel: '',
-        leadFullName: '',
-        leadContactEmail: '',
-        leadOrganizationType: '',
-        leadCategory: LEAD_CATEGORY.GENERAL,
-        leadCategories: [],
-        leadInquiryText: '',
-        leadIntakeStage: LEAD_INTAKE_STAGE.COMPLETE,
-        leadIpAddress: '',
-        leadLocation: '',
+        isLead: isLeadTicket,
+        leadId: toTrimmedValue(metadata.leadId),
+        leadLabel: metadataLeadLabel,
+        leadFullName: metadataFullName,
+        leadContactEmail: metadataContactEmail,
+        leadOrganizationType: metadataOrganizationType,
+        leadCategory: metadataLeadCategory[0] || LEAD_CATEGORY.GENERAL,
+        leadCategories: metadataLeadCategory,
+        leadInquiryText: toTrimmedValue(metadata.inquiryText),
+        leadIntakeStage: normalizeLeadIntakeStage(metadata.intakeStage) || LEAD_INTAKE_STAGE.COMPLETE,
+        leadIpAddress: toTrimmedValue(metadata.sourceIp),
+        leadLocation: toTrimmedValue(metadata.location),
         messages,
       })
     })
 
     let mappedChatTickets = []
-    if (!adminActor) {
+    if (hasAuthenticatedBackend && !adminActor) {
       await refreshKnowledgeBaseHint()
       const chatSessionsResponse = await requestJson('/api/notifications/chatbot/sessions?scope=own&limit=30')
       const chatSessions = Array.isArray(chatSessionsResponse.data) ? chatSessionsResponse.data : []
@@ -1667,28 +2032,73 @@ const refreshSupportStateFromBackend = async () => {
         }))
     }
 
+    let nextLeads = sortLeads(supportState.leads)
+    if (adminActor && hasAdminDashboardPayload) {
+      nextLeads = mapAdminDashboardCollectionsToLocalLeads(adminDashboardCollections)
+      if (nextLeads.length === 0 && supportState.leads.length > 0) {
+        const migrationResult = await syncAdminDashboardLeadCollections({
+          force: true,
+          localLeads: supportState.leads,
+        })
+        if (migrationResult.ok) {
+          nextLeads = sortLeads(
+            supportState.leads.map((lead, index) => normalizeLead(lead, index)),
+          )
+        }
+      }
+      const normalizedCollections = buildAdminDashboardCollectionsFromLocalLeads(nextLeads)
+      backendAdminDashboardLeadSyncSignature = serializeAdminDashboardLeadCollections(normalizedCollections)
+    }
+
+    const leadRowsForTicketMetadata = adminActor
+      ? nextLeads
+      : supportState.leads
+
     const localLeadTickets = supportState.tickets.filter((ticket) => {
       const email = toEmail(ticket.clientEmail)
       return email && LEAD_EMAIL_PATTERN.test(email)
     })
+    const shouldIncludeLocalLeadFallbackTickets = !hasAnonymousBackend
     const combinedTickets = sortTickets([
       ...mappedSupportTickets,
       ...mappedChatTickets,
-      ...localLeadTickets.filter((ticket) => (
-        !mappedSupportTickets.some((backendTicket) => backendTicket.id === ticket.id)
-        && !mappedChatTickets.some((backendTicket) => backendTicket.id === ticket.id)
-      )),
+      ...(
+        shouldIncludeLocalLeadFallbackTickets
+          ? localLeadTickets.filter((ticket) => (
+            !mappedSupportTickets.some((backendTicket) => backendTicket.id === ticket.id)
+            && !mappedChatTickets.some((backendTicket) => backendTicket.id === ticket.id)
+          ))
+          : []
+      ),
     ])
-      .map((ticket) => applyLeadMetadataToTicket(ticket))
+      .map((ticket) => applyLeadMetadataToTicket(ticket, leadRowsForTicketMetadata))
       .map((ticket) => withComputedUnreadCounts(ticket))
+
+    if (!hasAuthenticatedBackend && anonymousSessionId) {
+      const activeBackendTicket = supportTicketRecords.find((ticket) => (
+        mapBackendSupportStatusToLocal(ticket?.status) !== SUPPORT_TICKET_STATUS.RESOLVED
+      )) || supportTicketRecords[0]
+      const activeBackendTicketId = toTrimmedValue(activeBackendTicket?.ticketId)
+      if (activeBackendTicketId || anonymousSession?.backendTicketId) {
+        persistAnonymousLeadSession({
+          leadId: toTrimmedValue(anonymousSession?.leadId),
+          leadLabel: toTrimmedValue(anonymousSession?.leadLabel),
+          clientEmail: toEmail(anonymousSession?.clientEmail),
+          anonymousSessionId,
+          backendTicketId: activeBackendTicketId || toTrimmedValue(anonymousSession?.backendTicketId),
+        })
+      }
+    }
 
     supportState = {
       ...supportState,
       tickets: combinedTickets,
+      leads: nextLeads,
     }
     persistSupportTickets(combinedTickets)
+    persistSupportLeads(nextLeads)
     emitSupportState()
-    return { ok: true, ticketCount: combinedTickets.length }
+    return { ok: true, ticketCount: combinedTickets.length, leadCount: nextLeads.length }
   })()
     .finally(() => {
       backendRefreshPromise = null
@@ -1727,6 +2137,162 @@ const ensureBackendChatSession = async ({
   return { ok: true, sessionId, session: response.data.session }
 }
 
+const buildAnonymousSupportTicketSubject = ({
+  clientName = '',
+  businessName = '',
+} = {}) => {
+  const normalizedClientName = toTrimmedValue(clientName)
+  const normalizedBusinessName = toTrimmedValue(businessName)
+  if (normalizedBusinessName) return `Support request from ${normalizedBusinessName}`
+  if (normalizedClientName) return `Support request from ${normalizedClientName}`
+  return 'Anonymous support request'
+}
+
+const ensureBackendAnonymousSupportTicket = async ({
+  clientEmail = '',
+  clientName = 'Website Visitor',
+  businessName = '',
+  reuseActive = true,
+  forceNew = false,
+  initialMessage = '',
+} = {}) => {
+  const normalizedClientEmail = toEmail(clientEmail)
+  if (!normalizedClientEmail || !isLeadAliasEmail(normalizedClientEmail)) {
+    return { ok: false, message: 'Anonymous support identity is missing.' }
+  }
+  if (!isBackendAnonymousSupportAvailable()) {
+    return { ok: false, message: 'Network API unavailable.' }
+  }
+
+  const lead = getLeadByClientEmail(supportState.leads, normalizedClientEmail)
+  const anonymousSession = getStoredAnonymousSupportSession()
+  const sessionId = getActiveAnonymousSupportSessionId({
+    createIfMissing: true,
+    clientEmail: normalizedClientEmail,
+    leadId: toTrimmedValue(lead?.id),
+    leadLabel: toTrimmedValue(lead?.leadLabel),
+    backendTicketId: toTrimmedValue(anonymousSession?.backendTicketId),
+  })
+  if (!sessionId) {
+    return { ok: false, message: 'Anonymous support session is unavailable.' }
+  }
+
+  const readCandidateTicketFromList = (rows = []) => {
+    const safeRows = Array.isArray(rows) ? rows : []
+    const openTicket = safeRows.find((ticket) => {
+      const status = toTrimmedValue(ticket?.status).toLowerCase()
+      return status !== 'resolved' && status !== 'closed'
+    })
+    if (openTicket) return openTicket
+    return safeRows[0] || null
+  }
+
+  if (!forceNew && reuseActive) {
+    const listResponse = await requestJson(
+      `/api/notifications/support/public/tickets?sessionId=${encodeURIComponent(sessionId)}&limit=30`,
+    )
+    if (listResponse.ok && Array.isArray(listResponse.data)) {
+      const candidateTicket = readCandidateTicketFromList(listResponse.data)
+      const candidateTicketId = toTrimmedValue(candidateTicket?.ticketId)
+      if (candidateTicketId) {
+        persistAnonymousLeadSession({
+          leadId: toTrimmedValue(lead?.id),
+          leadLabel: toTrimmedValue(lead?.leadLabel),
+          clientEmail: normalizedClientEmail,
+          anonymousSessionId: sessionId,
+          backendTicketId: candidateTicketId,
+        })
+        return { ok: true, sessionId, ticketId: candidateTicketId, ticket: candidateTicket }
+      }
+    }
+  }
+
+  const createResponse = await requestJson('/api/notifications/support/public/tickets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId,
+      leadLabel: toTrimmedValue(lead?.leadLabel),
+      fullName: toTrimmedValue(lead?.fullName) || toTrimmedValue(clientName),
+      contactEmail: toEmail(lead?.contactEmail),
+      organizationType: normalizeLeadOrganizationType(lead?.organizationType),
+      subject: buildAnonymousSupportTicketSubject({ clientName, businessName }),
+      description: toTrimmedValue(initialMessage),
+      priority: 'medium',
+      channel: 'web',
+      tags: ['anonymous', 'website'],
+    }),
+  })
+  if (!createResponse.ok) {
+    return { ok: false, message: createResponse.message || 'Unable to create anonymous support ticket.' }
+  }
+
+  const ticketId = toTrimmedValue(createResponse?.data?.ticket?.ticketId)
+  if (!ticketId) {
+    return { ok: false, message: 'Anonymous support ticket response is invalid.' }
+  }
+
+  persistAnonymousLeadSession({
+    leadId: toTrimmedValue(lead?.id),
+    leadLabel: toTrimmedValue(lead?.leadLabel),
+    clientEmail: normalizedClientEmail,
+    anonymousSessionId: sessionId,
+    backendTicketId: ticketId,
+  })
+  return {
+    ok: true,
+    sessionId,
+    ticketId,
+    ticket: createResponse?.data?.ticket,
+  }
+}
+
+const postBackendAnonymousSupportMessage = async ({
+  clientEmail = '',
+  clientName = '',
+  businessName = '',
+  text = '',
+  attachments = [],
+  forceNewTicket = false,
+} = {}) => {
+  const normalizedText = toTrimmedValue(text)
+  const ensureResult = await ensureBackendAnonymousSupportTicket({
+    clientEmail,
+    clientName,
+    businessName,
+    reuseActive: !forceNewTicket,
+    forceNew: forceNewTicket,
+    initialMessage: normalizedText,
+  })
+  if (!ensureResult.ok || !ensureResult.ticketId || !ensureResult.sessionId) {
+    return { ok: false, message: ensureResult.message || 'Unable to create anonymous support session.' }
+  }
+
+  const response = await requestJson(
+    `/api/notifications/support/public/tickets/${encodeURIComponent(ensureResult.ticketId)}/messages`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId: ensureResult.sessionId,
+        content: normalizedText || 'Anonymous support attachment uploaded.',
+        senderDisplayName: toTrimmedValue(clientName) || 'Website Visitor',
+        attachments: toOutgoingSupportAttachments(attachments),
+      }),
+    },
+  )
+  if (!response.ok) {
+    return { ok: false, message: response.message || 'Unable to send anonymous support message.' }
+  }
+
+  await refreshSupportStateFromBackend()
+  return {
+    ok: true,
+    ticketId: ensureResult.ticketId,
+    messageId: toTrimmedValue(response?.data?.data?.id || response?.data?.data?._id),
+  }
+}
+
 export const ensureClientSupportThread = async ({
   clientEmail = '',
   clientName = 'Client User',
@@ -1745,6 +2311,18 @@ export const ensureClientSupportThread = async ({
     if (sessionResult.ok) {
       await refreshSupportStateFromBackend()
       return { ok: true, ticketId: sessionResult.sessionId }
+    }
+  } else if (isLeadAliasEmail(normalizedEmail) && isBackendAnonymousSupportAvailable()) {
+    const anonymousTicketResult = await ensureBackendAnonymousSupportTicket({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      reuseActive: true,
+      forceNew: false,
+    })
+    if (anonymousTicketResult.ok && anonymousTicketResult.ticketId) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId: anonymousTicketResult.ticketId }
     }
   }
 
@@ -1786,6 +2364,18 @@ export const startNewClientSupportThread = async ({
     if (sessionResult.ok) {
       await refreshSupportStateFromBackend()
       return { ok: true, ticketId: sessionResult.sessionId }
+    }
+  } else if (isLeadAliasEmail(normalizedEmail) && isBackendAnonymousSupportAvailable()) {
+    const anonymousTicketResult = await ensureBackendAnonymousSupportTicket({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      reuseActive: false,
+      forceNew: true,
+    })
+    if (anonymousTicketResult.ok && anonymousTicketResult.ticketId) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId: anonymousTicketResult.ticketId }
     }
   }
 
@@ -1872,6 +2462,18 @@ export const requestHumanSupport = async ({
           ticketId: toTrimmedValue(escalateResponse?.data?.ticketId) || ticketId,
         }
       }
+    }
+  } else if (isLeadAliasEmail(normalizedEmail) && isBackendAnonymousSupportAvailable()) {
+    const anonymousTicketResult = await ensureBackendAnonymousSupportTicket({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      reuseActive: true,
+      forceNew: false,
+    })
+    if (anonymousTicketResult.ok && anonymousTicketResult.ticketId) {
+      await refreshSupportStateFromBackend()
+      return { ok: true, ticketId: anonymousTicketResult.ticketId }
     }
   }
 
@@ -2231,6 +2833,28 @@ export const sendClientSupportMessage = async ({
     }
   }
 
+  if (!isBackendSupportAvailable() && isLeadAliasEmail(normalizedEmail) && isBackendAnonymousSupportAvailable()) {
+    const anonymousMessageResult = await postBackendAnonymousSupportMessage({
+      clientEmail: normalizedEmail,
+      clientName,
+      businessName,
+      text: messageText,
+      attachments: normalizedAttachments,
+      forceNewTicket: false,
+    })
+    if (anonymousMessageResult.ok) {
+      if (shouldRequestAgent(messageText)) {
+        await requestHumanSupport({
+          clientEmail: normalizedEmail,
+          clientName,
+          businessName,
+          ticketId: anonymousMessageResult.ticketId,
+        })
+      }
+      return anonymousMessageResult
+    }
+  }
+
   let ticketId = ''
   let messageId = ''
   let queuedText = messageText
@@ -2420,7 +3044,7 @@ export const retrySupportMessage = async ({
     return { ok: false, message: 'Ticket and message are required.' }
   }
 
-  if (isBackendSupportAvailable()) {
+  if (isBackendSupportAvailable() || (isBackendAnonymousSupportAvailable() && toTrimmedValue(ticketId).startsWith('sup_'))) {
     await refreshSupportStateFromBackend()
     return { ok: false, message: 'Message retry is not required for delivered backend messages.' }
   }

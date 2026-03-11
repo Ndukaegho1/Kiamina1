@@ -1,15 +1,23 @@
 import { getRequestActor, isAdminActor } from "../utils/request-actor.js";
 import {
+  createAnonymousSupportTicket,
   createSupportTicketForActor,
   getSupportTicketByTicketIdForActor,
+  listAnonymousSupportMessagesForTicket,
+  listAnonymousSupportTickets,
   listSupportMessagesForTicket,
   listSupportTicketsForActor,
+  postAnonymousSupportMessageForTicket,
   postSupportMessageForTicket,
   updateSupportTicketForActor
 } from "../services/support.service.js";
 import { publishRealtimeEvent } from "../services/realtime-events.service.js";
 import {
   buildSupportTicketUpdatePayload,
+  validateAnonymousSupportMessagesListQuery,
+  validateAnonymousSupportTicketListQuery,
+  validateCreateAnonymousSupportMessagePayload,
+  validateCreateAnonymousSupportTicketPayload,
   validateCreateSupportMessagePayload,
   validateCreateSupportTicketPayload,
   validateSupportMessagesListQuery,
@@ -35,6 +43,23 @@ const emitSupportEvent = (eventPayload = {}) => {
     console.error("support realtime emit warning:", error.message);
   }
 };
+
+const resolveRequestIpAddress = (req) => {
+  const forwardedHeader = String(req.headers["x-forwarded-for"] || "").trim();
+  if (forwardedHeader) {
+    const [first] = forwardedHeader
+      .split(",")
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (first) {
+      return first;
+    }
+  }
+
+  return String(req.ip || req.socket?.remoteAddress || "").trim();
+};
+
+const resolveUserAgent = (req) => String(req.headers["user-agent"] || "").trim();
 
 export const createTicket = async (req, res, next) => {
   try {
@@ -76,6 +101,49 @@ export const createTicket = async (req, res, next) => {
   }
 };
 
+export const createAnonymousTicket = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateCreateAnonymousSupportTicketPayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const result = await createAnonymousSupportTicket({
+      payload,
+      sourceIp: resolveRequestIpAddress(req),
+      userAgent: resolveUserAgent(req)
+    });
+
+    emitSupportEvent({
+      eventType: "support.ticket.created",
+      topic: "support",
+      actor: {
+        uid: `anonymous:${payload.sessionId}`,
+        email: payload.contactEmail || "",
+        roles: ["anonymous"]
+      },
+      audience: {
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        ticketId: result.ticket.ticketId,
+        status: result.ticket.status,
+        priority: result.ticket.priority,
+        anonymous: true
+      }
+    });
+
+    return res.status(201).json({
+      message: "Support ticket created.",
+      ticket: result.ticket,
+      thread: result.thread,
+      initialMessage: result.initialMessage
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const listTickets = async (req, res, next) => {
   try {
     const actor = requireActor(req, res);
@@ -89,6 +157,23 @@ export const listTickets = async (req, res, next) => {
     const tickets = await listSupportTicketsForActor({
       actor,
       isAdmin: isAdminActor(actor),
+      query: payload
+    });
+
+    return res.status(200).json(tickets);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const listAnonymousTickets = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateAnonymousSupportTicketListQuery(req.query);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const tickets = await listAnonymousSupportTickets({
       query: payload
     });
 
@@ -213,6 +298,47 @@ export const postTicketMessage = async (req, res, next) => {
   }
 };
 
+export const postAnonymousTicketMessage = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateCreateAnonymousSupportMessagePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const message = await postAnonymousSupportMessageForTicket({
+      ticketId: req.params.ticketId,
+      payload
+    });
+
+    emitSupportEvent({
+      eventType: "support.message.created",
+      topic: "support",
+      actor: {
+        uid: `anonymous:${payload.sessionId}`,
+        email: "",
+        roles: ["anonymous"]
+      },
+      audience: {
+        roles: ["admin", "owner", "superadmin", "manager"]
+      },
+      payload: {
+        ticketId: req.params.ticketId,
+        messageId: message.id,
+        senderType: message.senderType,
+        visibility: message.visibility,
+        anonymous: true
+      }
+    });
+
+    return res.status(201).json({
+      message: "Support message sent.",
+      data: message
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const listTicketMessages = async (req, res, next) => {
   try {
     const actor = requireActor(req, res);
@@ -227,6 +353,25 @@ export const listTicketMessages = async (req, res, next) => {
       ticketId: req.params.ticketId,
       actor,
       isAdmin: isAdminActor(actor),
+      limit: payload.limit
+    });
+
+    return res.status(200).json(messages);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const listAnonymousTicketMessages = async (req, res, next) => {
+  try {
+    const { errors, payload } = validateAnonymousSupportMessagesListQuery(req.query);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const messages = await listAnonymousSupportMessagesForTicket({
+      ticketId: req.params.ticketId,
+      sessionId: payload.sessionId,
       limit: payload.limit
     });
 

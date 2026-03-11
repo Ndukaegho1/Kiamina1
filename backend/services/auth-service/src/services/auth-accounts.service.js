@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 import {
+  countAuthAccountsByRoles,
+  deleteAuthAccountByUid,
   findAuthAccountByEmail,
   findAuthAccountByUid,
+  listAuthAccounts,
   updateAuthAccountLoginMeta,
   upsertAuthAccountByUid
 } from "../repositories/auth-accounts.repository.js";
@@ -10,9 +13,11 @@ import {
   findActiveAuthSessionBySessionId,
   findAuthSessionBySessionId,
   revokeAuthSession,
+  revokeAuthSessionsByUid,
   updateAuthSessionBySessionId
 } from "../repositories/auth-sessions.repository.js";
 import { compareRefreshTokenHash } from "./auth-tokens.service.js";
+import { deleteFirebaseUserByUid } from "./firebase-admin.service.js";
 
 const createNotFoundError = (message) => {
   const error = new Error(message);
@@ -41,6 +46,34 @@ const createUnauthorizedError = (message) => {
 const generateLocalUid = () => `local_${crypto.randomUUID().replace(/-/g, "")}`;
 
 const generateSessionId = () => crypto.randomUUID().replace(/-/g, "");
+
+export const getOwnerBootstrapEligibility = async () => {
+  const adminAccountCount = await countAuthAccountsByRoles([
+    "admin",
+    "owner",
+    "superadmin"
+  ]);
+
+  return {
+    adminAccountCount,
+    canBootstrapOwner: adminAccountCount === 0
+  };
+};
+
+export const listRegisteredAuthAccounts = async ({
+  limit = 200
+} = {}) => listAuthAccounts({
+  sort: { updatedAt: -1, createdAt: -1 },
+  limit
+});
+
+export const getRegisteredAuthAccountByEmail = async (email = "") => {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail) {
+    return null;
+  }
+  return findAuthAccountByEmail(normalizedEmail);
+};
 
 export const registerOrUpdateAuthAccount = async ({
   uid,
@@ -246,5 +279,35 @@ export const refreshSessionTokenHash = async ({
   return {
     account,
     session: updatedSession || session
+  };
+};
+
+export const deleteAuthAccountForUid = async ({ uid, reason = "account-deleted" }) => {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid) {
+    throw createUnauthorizedError("Missing authenticated user id.");
+  }
+
+  const account = await findAuthAccountByUid(normalizedUid);
+  const revokeResult = await revokeAuthSessionsByUid({
+    uid: normalizedUid,
+    reason
+  });
+  const firebaseResult = await deleteFirebaseUserByUid(normalizedUid);
+  if (!account) {
+    return {
+      account: null,
+      deleted: false,
+      revokedSessionCount: Number(revokeResult?.modifiedCount || 0),
+      firebase: firebaseResult
+    };
+  }
+
+  const deletedAccount = await deleteAuthAccountByUid(normalizedUid);
+  return {
+    account,
+    deleted: Boolean(deletedAccount),
+    revokedSessionCount: Number(revokeResult?.modifiedCount || 0),
+    firebase: firebaseResult
   };
 };

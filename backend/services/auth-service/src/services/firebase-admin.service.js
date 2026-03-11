@@ -68,3 +68,159 @@ export const verifyFirebaseIdToken = async (idToken) => {
     return null;
   }
 };
+
+export const deleteFirebaseUserByUid = async (uid) => {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid) {
+    return {
+      attempted: false,
+      deleted: false,
+      skipped: true,
+      reason: "missing-uid"
+    };
+  }
+
+  const isReady = initializeFirebaseAdmin();
+  if (!isReady) {
+    return {
+      attempted: false,
+      deleted: false,
+      skipped: true,
+      reason: "firebase-admin-unavailable"
+    };
+  }
+
+  try {
+    await admin.auth().deleteUser(normalizedUid);
+    return {
+      attempted: true,
+      deleted: true,
+      skipped: false,
+      reason: ""
+    };
+  } catch (error) {
+    if (error?.code === "auth/user-not-found") {
+      return {
+        attempted: true,
+        deleted: false,
+        skipped: false,
+        reason: "firebase-user-not-found"
+      };
+    }
+
+    console.error("Firebase user deletion failed:", error.message);
+    return {
+      attempted: true,
+      deleted: false,
+      skipped: false,
+      reason: String(error?.message || "firebase-user-delete-failed")
+    };
+  }
+};
+
+export const generateFirebasePasswordResetLink = async (email) => {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail) {
+    return {
+      ok: false,
+      link: "",
+      reason: "missing-email"
+    };
+  }
+
+  const isReady = initializeFirebaseAdmin();
+  if (!isReady) {
+    return {
+      ok: false,
+      link: "",
+      reason: "firebase-admin-unavailable"
+    };
+  }
+
+  try {
+    const link = await admin.auth().generatePasswordResetLink(normalizedEmail);
+    return {
+      ok: true,
+      link: String(link || "").trim(),
+      reason: ""
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      link: "",
+      reason: String(error?.message || "password-reset-link-generation-failed")
+    };
+  }
+};
+
+export const generateFirebaseEmailVerificationLink = async (email) => {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  if (!normalizedEmail) {
+    return {
+      ok: false,
+      link: "",
+      reason: "missing-email"
+    };
+  }
+
+  const isReady = initializeFirebaseAdmin();
+  if (!isReady) {
+    return {
+      ok: false,
+      link: "",
+      reason: "firebase-admin-unavailable"
+    };
+  }
+
+  try {
+    const link = await admin.auth().generateEmailVerificationLink(normalizedEmail);
+    return {
+      ok: true,
+      link: String(link || "").trim(),
+      reason: ""
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      link: "",
+      reason: String(error?.message || "email-verification-link-generation-failed")
+    };
+  }
+};
+
+export const updateFirebaseUserPassword = async ({
+  uid,
+  newPassword
+}) => {
+  const normalizedUid = String(uid || "").trim();
+  const normalizedPassword = String(newPassword || "");
+  if (!normalizedUid || !normalizedPassword) {
+    return {
+      ok: false,
+      reason: "missing-uid-or-password"
+    };
+  }
+
+  const isReady = initializeFirebaseAdmin();
+  if (!isReady) {
+    return {
+      ok: false,
+      reason: "firebase-admin-unavailable"
+    };
+  }
+
+  try {
+    await admin.auth().updateUser(normalizedUid, {
+      password: normalizedPassword
+    });
+    return {
+      ok: true,
+      reason: ""
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: String(error?.message || "password-update-failed")
+    };
+  }
+};

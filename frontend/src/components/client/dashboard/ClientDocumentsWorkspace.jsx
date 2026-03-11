@@ -34,6 +34,34 @@ const normalizeRuntimePreviewUrl = (value = '', { allowBlob = false } = {}) => {
   return normalized
 }
 
+const triggerBrowserDownload = ({
+  url = '',
+  blob = null,
+  fileName = 'document',
+} = {}) => {
+  const downloadUrl = blob instanceof Blob ? URL.createObjectURL(blob) : String(url || '').trim()
+  if (!downloadUrl) return false
+
+  const link = document.createElement('a')
+  link.href = downloadUrl
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+
+  if (blob instanceof Blob) {
+    window.setTimeout(() => {
+      try {
+        URL.revokeObjectURL(downloadUrl)
+      } catch {
+        // ignore object URL cleanup failures
+      }
+    }, 0)
+  }
+
+  return true
+}
+
 const updateNestedFile = (records = [], folderId, fileId, updater) => (
   records.map((record) => {
     if (!record?.isFolder || record.id !== folderId) return record
@@ -132,6 +160,7 @@ const collectEditedFieldLabels = (previousFile = {}, updatedFile = {}) => {
 }
 
 const buildFileSnapshot = (file = {}) => ({
+  fileId: file.fileId || '',
   filename: file.filename || 'Document',
   extension: file.extension || (file.filename?.split('.').pop()?.toUpperCase() || 'FILE'),
   status: file.status || 'Pending Review',
@@ -144,6 +173,9 @@ const buildFileSnapshot = (file = {}) => ({
   fileCacheKey: file.fileCacheKey || '',
   folderId: file.folderId || '',
   folderName: file.folderName || '',
+  backendDocumentId: file.backendDocumentId || '',
+  backendStorageProvider: file.backendStorageProvider || '',
+  backendStoragePath: file.backendStoragePath || '',
   previewUrl: file.previewUrl || null,
 })
 
@@ -721,8 +753,47 @@ function SideDrawer({ title, subtitle, onClose, children }) {
   )
 }
 
-function VersionHistoryDrawer({ file, onClose, downloadNamePrefix = '' }) {
+function VersionHistoryDrawer({
+  file,
+  onClose,
+  downloadNamePrefix = '',
+  onEnsureFileAvailable,
+}) {
   const versions = Array.isArray(file?.versions) ? file.versions : []
+  const handleDownloadVersion = async (version = {}) => {
+    const snapshot = version.fileSnapshot && typeof version.fileSnapshot === 'object'
+      ? version.fileSnapshot
+      : {}
+    const downloadFilename = buildClientDownloadFilename({
+      businessName: downloadNamePrefix,
+      fileName: snapshot.filename || file?.filename || 'document',
+    })
+    const directUrl = normalizeRuntimePreviewUrl(snapshot.previewUrl || version.previewUrl || '', { allowBlob: false })
+    if (directUrl) {
+      triggerBrowserDownload({ url: directUrl, fileName: downloadFilename })
+      return
+    }
+
+    if (typeof onEnsureFileAvailable !== 'function') {
+      return
+    }
+
+    const ensured = await onEnsureFileAvailable({
+      ...file,
+      ...snapshot,
+      backendDocumentId: snapshot.backendDocumentId || version.backendDocumentId || file?.backendDocumentId || '',
+      filename: snapshot.filename || file?.filename || 'document',
+      extension: snapshot.extension || file?.extension || 'FILE',
+    })
+    if (!(ensured?.ok && ensured.blob instanceof Blob)) {
+      return
+    }
+    triggerBrowserDownload({
+      blob: ensured.blob,
+      fileName: downloadFilename,
+    })
+  }
+
   return (
     <SideDrawer
       title="Version History"
@@ -751,7 +822,12 @@ function VersionHistoryDrawer({ file, onClose, downloadNamePrefix = '' }) {
                 const { date, time } = formatLogDateTime(version.timestamp)
                 const snapshot = version.fileSnapshot || {}
                 const downloadUrl = normalizeRuntimePreviewUrl(snapshot.previewUrl || '', { allowBlob: false })
-                const canDownload = Boolean(downloadUrl) && !file?.isDeleted
+                const canDownload = !file?.isDeleted && Boolean(
+                  downloadUrl
+                  || snapshot.backendDocumentId
+                  || version.backendDocumentId
+                  || file?.backendDocumentId,
+                )
                 const downloadFilename = buildClientDownloadFilename({
                   businessName: downloadNamePrefix,
                   fileName: snapshot.filename || file?.filename || 'document',
@@ -765,13 +841,13 @@ function VersionHistoryDrawer({ file, onClose, downloadNamePrefix = '' }) {
                     <td className="px-3 py-2 text-sm text-text-secondary">{time}</td>
                     <td className="px-3 py-2 text-sm">
                       {canDownload ? (
-                        <a
-                          href={downloadUrl}
-                          download={downloadFilename}
+                        <button
+                          type="button"
+                          onClick={() => void handleDownloadVersion(version)}
                           className="inline-flex h-7 px-2.5 items-center rounded border border-border text-xs text-text-primary hover:bg-background"
                         >
                           Download
-                        </a>
+                        </button>
                       ) : (
                         <span className="text-xs text-text-muted">Unavailable</span>
                       )}
@@ -872,6 +948,7 @@ function DocumentFoldersPage({
   impersonationBusinessName = '',
   showToast,
   onRecordUploadHistory,
+  onDeleteBackendDocuments,
   globalSearchTerm = '',
   onGlobalSearchTermChange,
 }) {
@@ -1024,12 +1101,17 @@ function DocumentFoldersPage({
     }))
   }
 
-  const handleConfirmFolderAction = () => {
+  const handleConfirmFolderAction = async () => {
     if (!actionFolder) return
     const folderName = actionFolder.folderName || 'Untitled Folder'
     const fileCount = actionFolder.files?.length || 0
 
     if (pendingFolderAction.type === 'delete') {
+      const deleteResult = await onDeleteBackendDocuments?.(actionFolder.files || [])
+      if (deleteResult && !deleteResult.ok) {
+        showToast?.('error', deleteResult.message || 'Unable to delete this folder right now.')
+        return
+      }
       setRecords((prev) => prev.filter((record) => record.id !== actionFolder.id))
       onLogActivity?.(
         'Deleted folder',
@@ -1058,6 +1140,11 @@ function DocumentFoldersPage({
     }
 
     if (pendingFolderAction.type === 'permanent-delete') {
+      const deleteResult = await onDeleteBackendDocuments?.(actionFolder.files || [])
+      if (deleteResult && !deleteResult.ok) {
+        showToast?.('error', deleteResult.message || 'Unable to delete this folder right now.')
+        return
+      }
       setRecords((prev) => prev.filter((record) => record.id !== actionFolder.id))
       onLogActivity?.(
         'Deleted folder',
@@ -1319,6 +1406,10 @@ function FolderFilesPage({
   impersonationBusinessName = '',
   downloadBusinessName = '',
   showToast,
+  onRecordUploadHistory,
+  onEnsureFileAvailable,
+  onDeleteBackendDocuments,
+  onUploadDocumentToBackend,
   globalSearchTerm = '',
   onGlobalSearchTermChange,
 }) {
@@ -1572,36 +1663,37 @@ function FolderFilesPage({
     onOpenFolder?.(folder.id)
   }
 
-  const downloadFile = (targetFile) => {
+  const downloadFile = async (targetFile) => {
     if (!targetFile) return
     if (targetFile.isDeleted) {
       showToast?.('error', 'This file has been deleted and cannot be downloaded.')
       return
     }
-    const runtimeUrl = targetFile.rawFile instanceof File ? URL.createObjectURL(targetFile.rawFile) : ''
+    const runtimeBlob = targetFile.rawFile instanceof Blob ? targetFile.rawFile : null
     const persistedUrl = normalizeRuntimePreviewUrl(targetFile.previewUrl || '', { allowBlob: false })
-    const url = runtimeUrl || persistedUrl
-    if (!url) {
+    if (!runtimeBlob && !persistedUrl && typeof onEnsureFileAvailable === 'function') {
+      const ensured = await onEnsureFileAvailable(targetFile)
+      if (!(ensured?.ok && ensured.blob instanceof Blob)) {
+        showToast?.('error', ensured?.message || 'Download URL is not available for this file.')
+        return
+      }
+      triggerBrowserDownload({
+        blob: ensured.blob,
+        fileName: buildClientDownloadFilename({
+          businessName: downloadBusinessName,
+          fileName: targetFile.filename || 'document',
+        }),
+      })
+    } else if (!triggerBrowserDownload({
+      blob: runtimeBlob,
+      url: persistedUrl,
+      fileName: buildClientDownloadFilename({
+        businessName: downloadBusinessName,
+        fileName: targetFile.filename || 'document',
+      }),
+    })) {
       showToast?.('error', 'Download URL is not available for this file.')
       return
-    }
-    const link = document.createElement('a')
-    link.href = url
-    link.download = buildClientDownloadFilename({
-      businessName: downloadBusinessName,
-      fileName: targetFile.filename || 'document',
-    })
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    if (runtimeUrl) {
-      setTimeout(() => {
-        try {
-          URL.revokeObjectURL(runtimeUrl)
-        } catch {
-          // ignore object URL cleanup failures
-        }
-      }, 0)
     }
     const actorName = getActorName(targetFile)
     const trackedFile = appendFileActivityOnly(targetFile, {
@@ -1630,6 +1722,24 @@ function FolderFilesPage({
       },
     })
     setRecords((prev) => updateNestedFile(prev, folder.id, targetFile.fileId, () => updatedFile))
+  }
+
+  const handleDeleteFile = async (targetFile, { closeViewer = false } = {}) => {
+    if (!targetFile || targetFile.isDeleted || isApprovedFileLocked(targetFile)) return
+
+    const deleteResult = await onDeleteBackendDocuments?.(targetFile)
+    if (deleteResult && !deleteResult.ok) {
+      showToast?.('error', deleteResult.message || 'Unable to delete this file right now.')
+      return
+    }
+
+    softDeleteFile(targetFile)
+    onLogActivity?.('Deleted file', `Deleted file "${targetFile.filename}" (${targetFile.fileId}) from folder "${folder.folderName}".`)
+    showToast?.('success', 'File deleted successfully.')
+    clearSelections()
+    if (closeViewer) {
+      setViewingFile(null)
+    }
   }
 
   const toggleSelectOne = (fileId) => {
@@ -1704,8 +1814,14 @@ function FolderFilesPage({
     clearSelections()
   }
 
-  const confirmBulkDelete = () => {
+  const confirmBulkDelete = async () => {
     if (selectedCount === 0) return
+    const targetFiles = files.filter((file) => selectedFileIds.includes(file.fileId) && !file.isDeleted && !isApprovedFileLocked(file))
+    const deleteResult = await onDeleteBackendDocuments?.(targetFiles)
+    if (deleteResult && !deleteResult.ok) {
+      showToast?.('error', deleteResult.message || 'Unable to delete the selected files right now.')
+      return
+    }
     setRecords((prev) => updateNestedFiles(prev, folder.id, selectedFileIds, (file) => {
       if (isApprovedFileLocked(file)) return file
       const actorName = getActorName(file)
@@ -2106,10 +2222,7 @@ function FolderFilesPage({
                               type="button"
                               onClick={() => {
                                 if (!confirm('Are you sure you want to delete this file?')) return
-                                softDeleteFile(file)
-                                onLogActivity?.('Deleted file', `Deleted file "${file.filename}" (${file.fileId}) from folder "${folder.folderName}".`)
-                                showToast?.('success', 'File deleted successfully.')
-                                clearSelections()
+                                void handleDeleteFile(file)
                               }}
                               className="w-8 h-8 border border-border rounded-md text-text-secondary hover:border-error hover:text-error inline-flex items-center justify-center"
                               title="Delete"
@@ -2136,7 +2249,7 @@ function FolderFilesPage({
         onClose={() => setFileContextMenu(null)}
         onOpenFile={() => withContextFile((file) => openFile(file))}
         onOpenFolder={() => withContextFile(openContainingFolder)}
-        onDownload={() => withContextFile((file) => downloadFile(file))}
+        onDownload={() => withContextFile((file) => void downloadFile(file))}
         onViewDetails={() => withContextFile((file) => setViewingFile({ ...file, folderId: folder.id, folderName: folder.folderName }))}
         onVersionHistory={() => withContextFile((file) => setVersionHistoryFile(file))}
         onActivityLog={() => withContextFile((file) => setActivityLogFile(file))}
@@ -2146,10 +2259,7 @@ function FolderFilesPage({
             return
           }
           if (!confirm('Are you sure you want to delete this file?')) return
-          softDeleteFile(file)
-          onLogActivity?.('Deleted file', `Deleted file "${file.filename}" (${file.fileId}) from folder "${folder.folderName}".`)
-          showToast?.('success', 'File deleted successfully.')
-          clearSelections()
+          void handleDeleteFile(file)
         })}
       />
 
@@ -2159,6 +2269,7 @@ function FolderFilesPage({
           downloadNamePrefix={downloadBusinessName}
           tagOptions={classOptions.map((option) => option.value)}
           readOnly={isArchivedFolder || isApprovedFileLocked(viewingFile)}
+          onEnsureFileAvailable={onEnsureFileAvailable}
           onClose={() => setViewingFile(null)}
           onSave={isArchivedFolder ? undefined : (updated) => {
             const previousFile = (folder.files || []).find((item) => item.fileId === updated.fileId) || {}
@@ -2200,14 +2311,9 @@ function FolderFilesPage({
               return
             }
             if (!confirm('Are you sure you want to delete this file?')) return
-            const targetFileName = target?.filename || viewingFile?.filename || 'file'
-            if (previousFile) softDeleteFile(previousFile)
-            onLogActivity?.(
-              'Deleted file',
-              `Deleted file "${targetFileName}" (${targetFileId}) from folder "${folder.folderName}".`,
-            )
-            showToast?.('success', 'File deleted successfully.')
-            setViewingFile(null)
+            if (previousFile) {
+              void handleDeleteFile(previousFile, { closeViewer: true })
+            }
           }}
           onResubmit={isArchivedFolder ? undefined : async (target, replacementFile) => {
             if (!target?.fileId || !(replacementFile instanceof File)) return
@@ -2215,6 +2321,27 @@ function FolderFilesPage({
               setShowApprovedLockNotice(true)
               return
             }
+            const currentFile = (folder.files || []).find((item) => item.fileId === target.fileId) || target
+            let backendDocument = null
+            try {
+              backendDocument = await onUploadDocumentToBackend?.({
+                file: replacementFile,
+                category: categoryId,
+                className: target.class || target.className || '',
+                metadata: {
+                  folderId: folder.id,
+                  folderName: folder.folderName,
+                  fileId: target.fileId,
+                  ownerName: getActorName(currentFile),
+                  uploadSource: 'resubmission',
+                  replacedBackendDocumentId: currentFile.backendDocumentId || '',
+                },
+              })
+            } catch (error) {
+              showToast?.('error', String(error?.message || 'Unable to upload the replacement file right now.'))
+              return
+            }
+            if (!backendDocument) return
             const fileCacheKey = target.fileCacheKey || buildFileCacheKey({ fileId: target.fileId })
             if (fileCacheKey) {
               await putCachedFileBlob(fileCacheKey, replacementFile, { filename: replacementFile.name })
@@ -2253,6 +2380,9 @@ function FolderFilesPage({
                   filename: replacementFile.name,
                   extension,
                   fileCacheKey,
+                  backendDocumentId: backendDocument?.id || '',
+                  backendStorageProvider: backendDocument?.storageProvider || '',
+                  backendStoragePath: backendDocument?.storagePath || '',
                   previewUrl,
                   rawFile: replacementFile,
                   date: submittedAt,
@@ -2306,6 +2436,7 @@ function FolderFilesPage({
         <VersionHistoryDrawer
           file={versionHistoryFile}
           downloadNamePrefix={downloadBusinessName}
+          onEnsureFileAvailable={onEnsureFileAvailable}
           onClose={() => setVersionHistoryFile(null)}
         />
       )}

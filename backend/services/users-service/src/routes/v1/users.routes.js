@@ -1,13 +1,16 @@
 import express from "express";
 import {
+  deleteAdminClientManagementClient,
   getAdminClientManagement,
   getAdminClientManagementClient,
+  getPublicPhoneAvailability,
   getMeAdminDashboard,
   getMeClientDashboard,
   getMeClientDashboardOverview,
   getMeClientWorkspace,
   getById,
   getMe,
+  removeMe,
   patchAdminClientManagementClient,
   patchMeAdminDashboard,
   patchMeClientDashboard,
@@ -20,8 +23,10 @@ import {
 
 const router = express.Router();
 
+router.get("/public/phone-availability", getPublicPhoneAvailability);
 router.post("/sync-from-auth", syncFromAuth);
 router.get("/me", getMe);
+router.delete("/me", removeMe);
 router.patch("/me/profile", patchMeProfile);
 router.get("/me/client-dashboard", getMeClientDashboard);
 router.get("/me/client-dashboard/overview", getMeClientDashboardOverview);
@@ -33,6 +38,7 @@ router.patch("/me/admin-dashboard", patchMeAdminDashboard);
 router.get("/admin/client-management", getAdminClientManagement);
 router.get("/admin/client-management/clients/:uid", getAdminClientManagementClient);
 router.patch("/admin/client-management/clients/:uid", patchAdminClientManagementClient);
+router.delete("/admin/client-management/clients/:uid", deleteAdminClientManagementClient);
 router.get("/:id", getById);
 router.put("/:id", putById);
 router.delete("/:id", removeById);

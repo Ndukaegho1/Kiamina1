@@ -8,6 +8,9 @@ import { notFoundMiddleware } from "./middleware/not-found.js";
 import authRoutes from "./routes/v1/auth.routes.js";
 
 const app = express();
+const helmetOptions = {
+  crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" }
+};
 
 const isAllowedOrigin = (origin = "") => {
   if (!origin) return true;
@@ -18,7 +21,7 @@ const isAllowedOrigin = (origin = "") => {
   return false;
 };
 
-app.use(helmet());
+app.use(helmet(helmetOptions));
 app.use(
   cors({
     credentials: true,

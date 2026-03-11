@@ -85,6 +85,22 @@ export const dispatchPasswordResetLink = async ({ email, resetLink }) =>
     message: `Use this secure link to reset your password: ${resetLink}`
   });
 
+export const dispatchEmailVerificationLink = async ({
+  email,
+  verificationLink
+}) =>
+  dispatchEmailMessage({
+    email,
+    subject: "Verify your Kiamina email address",
+    message: [
+      "Verify your email address to activate your Kiamina client account.",
+      "",
+      `Verification link: ${verificationLink}`,
+      "",
+      "If you did not create this account, you can ignore this email."
+    ].join("\n")
+  });
+
 export const dispatchOtpEmail = async ({ email, otp, purpose, expiryMinutes }) => {
   const normalizedPurpose = String(purpose || "").trim().toLowerCase();
   const purposeLabel =

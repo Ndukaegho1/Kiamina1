@@ -120,6 +120,9 @@ export const updateAccountingRecordById = async (id, payload) =>
 export const deleteAccountingRecordById = async (id) =>
   AccountingRecord.findByIdAndDelete(id);
 
+export const deleteAccountingRecordsByOwner = async (ownerUserId) =>
+  AccountingRecord.deleteMany({ ownerUserId });
+
 export const listAccountingRecords = async ({
   ownerUserId,
   category,
