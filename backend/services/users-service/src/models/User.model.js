@@ -109,6 +109,17 @@ const verificationSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const signupCaptureSchema = new mongoose.Schema(
+  {
+    signupIp: { type: String, default: "" },
+    signupLocation: { type: String, default: "" },
+    signupSource: { type: String, default: "" },
+    capturePage: { type: String, default: "" },
+    capturePath: { type: String, default: "" }
+  },
+  { _id: false }
+);
+
 const notificationPreferencesSchema = new mongoose.Schema(
   {
     inAppEnabled: { type: Boolean, default: true },
@@ -158,6 +169,7 @@ const clientWorkspaceSchema = new mongoose.Schema(
         sales: [],
         bankStatements: [],
         uploadHistory: [],
+        resolvedDocuments: [],
         expenseClassOptions: [],
         salesClassOptions: []
       })
@@ -192,6 +204,10 @@ const clientWorkspaceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: () => ({})
     },
+    notifications: {
+      type: [mongoose.Schema.Types.Mixed],
+      default: []
+    },
     accountSettings: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({})
@@ -212,6 +228,21 @@ const clientWorkspaceSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const adminAccessSchema = new mongoose.Schema(
+  {
+    adminLevel: { type: String, default: "" },
+    adminPermissions: {
+      type: [String],
+      default: []
+    },
+    mustChangePassword: {
+      type: Boolean,
+      default: false
+    }
+  },
+  { _id: false }
+);
+
 const adminProfileSchema = new mongoose.Schema(
   {
     firstName: { type: String, default: "" },
@@ -225,6 +256,17 @@ const adminProfileSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const adminSecurityPreferencesSchema = new mongoose.Schema(
+  {
+    sessionTimeout: { type: String, default: "30" },
+    emailNotificationPreference: { type: Boolean, default: true },
+    activityAlertPreference: { type: Boolean, default: true },
+    twoFactorEnabled: { type: Boolean, default: true },
+    notificationSoundEnabled: { type: Boolean, default: true }
+  },
+  { _id: false }
+);
+
 const supportLeadSchema = new mongoose.Schema(
   {
     leadId: { type: String, default: "" },
@@ -232,6 +274,11 @@ const supportLeadSchema = new mongoose.Schema(
     email: { type: String, default: "" },
     companyName: { type: String, default: "" },
     phone: { type: String, default: "" },
+    leadIpAddress: { type: String, default: "" },
+    leadCountry: { type: String, default: "" },
+    leadLocation: { type: String, default: "" },
+    capturePage: { type: String, default: "" },
+    capturePath: { type: String, default: "" },
     source: { type: String, default: "support-form" },
     status: {
       type: String,
@@ -251,6 +298,11 @@ const newsletterRecipientSchema = new mongoose.Schema(
   {
     email: { type: String, default: "" },
     fullName: { type: String, default: "" },
+    leadIpAddress: { type: String, default: "" },
+    leadCountry: { type: String, default: "" },
+    leadLocation: { type: String, default: "" },
+    capturePage: { type: String, default: "" },
+    capturePath: { type: String, default: "" },
     status: {
       type: String,
       enum: ["subscribed", "unsubscribed", "bounced"],
@@ -278,6 +330,10 @@ const adminDashboardSchema = new mongoose.Schema(
     favoritePages: {
       type: [String],
       default: []
+    },
+    securityPreferences: {
+      type: adminSecurityPreferencesSchema,
+      default: () => ({})
     },
     lastVisitedPage: { type: String, default: "admin-dashboard" },
     lastVisitedAt: { type: Date, default: null },
@@ -343,12 +399,20 @@ const userSchema = new mongoose.Schema(
       type: verificationSchema,
       default: () => ({})
     },
+    signupCapture: {
+      type: signupCaptureSchema,
+      default: () => ({})
+    },
     notificationPreferences: {
       type: notificationPreferencesSchema,
       default: () => ({})
     },
     adminProfile: {
       type: adminProfileSchema,
+      default: () => ({})
+    },
+    adminAccess: {
+      type: adminAccessSchema,
       default: () => ({})
     },
     adminDashboard: {

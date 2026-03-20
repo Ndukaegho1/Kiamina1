@@ -6,7 +6,7 @@ It provides two workspaces in one app:
 1. Client workspace (document uploads, folders, history, support, settings)
 2. Admin workspace (RBAC, review, support inbox, leads, notifications, work-hours, activity)
 
-The codebase is local-first and persists most state in `localStorage` and `IndexedDB` (file blobs), with optional backend API calls for OTP/email and notifications.
+The app is backend-first for authentication, workspace sync, document storage, support, notifications, and lead capture, with scoped local cache fallback for offline continuity and transient UI state.
 
 ## Preliminary Corporate Site
 
@@ -88,12 +88,21 @@ npm run build
 npm run preview
 ```
 
+### Useful Local Routes
+
+- Public site: `http://localhost:5173/`
+- Client login: `http://localhost:5173/login`
+- Client signup: `http://localhost:5173/signup`
+- Owner admin setup (first admin only): `http://localhost:5173/admin/setup`
+- Admin login: `http://localhost:5173/admin/login`
+
 ### Notes
 
 - Dev app runs via Vite.
 - Backend APIs are the primary path for auth, workspace sync, and admin client management.
 - Local demo auth bypass seeding has been removed from `App.jsx`.
-- Client/admin auth flows now require Firebase token issuance + backend session/OTP verification.
+- Client auth supports email/password and Google, with email verification, forgot/reset password, and OTP-based security flows.
+- Admin auth uses `/admin/setup` for the first owner account and `/admin/login` for subsequent sign-in, with backend session + OTP verification.
 
 ## 4) App Entry And Routing Model
 
@@ -112,13 +121,24 @@ Primary route state constants:
 
 - Client pages: `dashboard`, `expenses`, `sales`, `bank-statements`, `upload-history`, `recent-activities`, `support`, `settings`
 - Admin pages from `src/components/admin/adminConfig.js`
+- Public/auth routes:
+  - `/`
+  - `/login`
+  - `/signup`
+  - `/login?mode=forgot-password`
+  - `/login?mode=reset-password`
+  - `/login?mode=email-verification`
+  - `/admin/setup`
+  - `/admin/login`
 
 ## 5) Core Feature Map
 
 - Authentication and OTP:
-  - Client login/signup with OTP
-  - Admin login with OTP
-  - Invite-based admin onboarding + OTP
+  - Client email/password and Google signup/login
+  - Email verification + forgot/reset password + in-session password change
+  - OTP-based security flows and server-side credential lockout
+  - Owner admin bootstrap at `/admin/setup`
+  - Admin login at `/admin/login`
 - Document operations:
   - Upload by category and folder
   - Mandatory owner
@@ -210,6 +230,7 @@ Implemented behavior:
 `ClientSettingsPage.jsx`
 
 - Profile, business, tax, address, notifications, verification docs
+- Account security controls for password change, two-step verification, and account deletion
 - Some fields become lock-protected after being set
 - Scoped persistence by account email
 - Verification UI is 3-step with progress:
@@ -225,11 +246,13 @@ Implemented behavior:
 
 `ClientOnboardingExperience.jsx`
 
-- 5-step onboarding flow
-- Business/tax/profile/verification/preferences
-- Persists onboarding state and settings data
-- Uses "ID Card Number" label in verification step
-- Business registration upload in onboarding is shown only for Business/Non-Profit entity types
+- 2-step onboarding flow
+- Step 1: profile confirmation
+  - First name, last name, other name, work email, phone number, role in company, preferred language
+- Step 2: business and accounting setup
+  - Business type, legal business name, country, industry, conditional registration number, financial year start, reporting cycle, base currency
+- Prefills from signup/social-auth data where available
+- Persists onboarding state and merges into client settings/workspace data
 
 ## 7) Admin Workspace
 
@@ -432,7 +455,6 @@ Server-side RBAC is enforced on protected/admin APIs (gateway identity + service
 - `settingsFormData[:email]`
 - `profilePhoto[:email]`
 - `companyLogo[:email]`
-- `notificationSettings[:email]`
 - `verificationDocs[:email]`
 
 ### 10.3 Admin Domain
@@ -523,7 +545,9 @@ Used endpoint patterns:
 
 ## 12) File Handling And Preview Pipeline
 
-- Upload writes metadata to scoped records and blobs to IndexedDB cache
+- Client document uploads are sent to the backend `documents-service`
+- Stored document files are persisted in MongoDB by the backend documents service
+- Frontend cache utilities are still used for support attachments and preview helpers where appropriate
 - `buildFileCacheKey` binds blobs to `ownerEmail + fileId`
 - Download naming utility:
   - `buildClientDownloadFilename({ businessName, fileName })`
@@ -585,12 +609,13 @@ src/
 - OTP and password-reset delivery can be made strict with `VITE_STRICT_BACKEND_DELIVERY=true`.
 - Admin login-email change requires backend SMS OTP endpoints (no local fallback).
 - Notification dispatch depends on backend email endpoint success.
+- Google auth should be tested from one consistent local origin (`localhost:5173`) during development.
 - Large dependency bundles (`pdfjs-dist`, `firebase`, office parsers) are split into vendor chunks by Vite build config.
 
 ## 16) Suggested Next Steps
 
 1. Finish backend persistence for remaining admin-only local drafts/trash recovery payloads.
 2. Expand backend RBAC from role-level checks to fine-grained permission scopes per admin level.
-3. Add automated tests (unit + integration + e2e).
-4. Add schema migration/versioning for local storage payloads.
-5. Add CI checks for lint/typecheck/build/test.
+3. Expand automated coverage from lint/build/backend integration tests into browser-level e2e flows.
+4. Add schema migration/versioning for remaining local cache payloads.
+5. Reduce legacy client-side cache usage where backend persistence now exists.

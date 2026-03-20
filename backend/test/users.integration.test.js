@@ -82,6 +82,13 @@ test("users integration: admin dashboard stores support leads and newsletters", 
     .set("x-user-roles", "admin")
     .send({
       defaultLandingPage: "support-leads",
+      securityPreferences: {
+        sessionTimeout: "60",
+        emailNotificationPreference: true,
+        activityAlertPreference: true,
+        twoFactorEnabled: true,
+        notificationSoundEnabled: false
+      },
       adminProfile: {
         firstName: "Ada",
         lastName: "Admin",
@@ -112,6 +119,8 @@ test("users integration: admin dashboard stores support leads and newsletters", 
 
   assert.equal(patchResponse.status, 200);
   assert.equal(patchResponse.body?.adminProfile?.firstName, "Ada");
+  assert.equal(patchResponse.body?.dashboard?.securityPreferences?.sessionTimeout, "60");
+  assert.equal(patchResponse.body?.dashboard?.securityPreferences?.notificationSoundEnabled, false);
   assert.equal(patchResponse.body?.dashboard?.supportLeads?.length, 1);
   assert.equal(patchResponse.body?.dashboard?.newsletters?.length, 2);
   assert.equal(patchResponse.body?.dashboard?.stats?.openSupportLeads, 1);
@@ -125,8 +134,70 @@ test("users integration: admin dashboard stores support leads and newsletters", 
     .set("x-user-roles", "admin");
 
   assert.equal(getResponse.status, 200);
+  assert.equal(getResponse.body?.dashboard?.securityPreferences?.notificationSoundEnabled, false);
   assert.equal(getResponse.body?.dashboard?.supportLeads?.length, 1);
   assert.equal(getResponse.body?.dashboard?.newsletters?.length, 2);
+});
+
+test("users integration: admin staff endpoint returns stored admin access metadata", async (t) => {
+  if (!ensureSetup(t)) return;
+
+  const ownerUid = "owner_uid_staff";
+  const ownerEmail = "owner-staff@example.com";
+  const adminUid = "admin_uid_staff";
+  const adminEmail = "admin-staff@example.com";
+
+  await User.create({
+    uid: ownerUid,
+    email: ownerEmail,
+    roles: ["owner"],
+    displayName: "Owner Staff",
+    adminAccess: {
+      adminLevel: "owner",
+      adminPermissions: ["manage_admins"],
+      mustChangePassword: false
+    }
+  });
+
+  await User.create({
+    uid: adminUid,
+    email: adminEmail,
+    roles: ["admin"],
+    displayName: "Area Admin",
+    status: "active",
+    adminProfile: {
+      displayName: "Area Admin",
+      jobTitle: "Area Accountant",
+      department: "Operations",
+      phone: "+234 8012345678"
+    },
+    adminAccess: {
+      adminLevel: "area-accountant",
+      adminPermissions: ["view_clients"],
+      mustChangePassword: true
+    },
+    adminDashboard: {
+      securityPreferences: {
+        sessionTimeout: "15",
+        notificationSoundEnabled: false
+      }
+    }
+  });
+
+  const response = await request(app)
+    .get("/api/v1/users/admin/staff")
+    .set("x-user-id", ownerUid)
+    .set("x-user-email", ownerEmail)
+    .set("x-user-roles", "owner");
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body?.total, 2);
+  const staffRow = response.body?.staff?.find((entry) => entry.uid === adminUid);
+  assert.ok(staffRow);
+  assert.equal(staffRow?.adminProfile?.jobTitle, "Area Accountant");
+  assert.equal(staffRow?.adminAccess?.mustChangePassword, true);
+  assert.equal(staffRow?.dashboardSecurityPreferences?.sessionTimeout, "15");
+  assert.equal(staffRow?.dashboardSecurityPreferences?.notificationSoundEnabled, false);
 });
 
 test("users integration: non-admin actor cannot access admin dashboard endpoint", async (t) => {

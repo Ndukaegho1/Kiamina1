@@ -669,6 +669,7 @@ function PreliminaryCorporateSite({
   onGetStarted,
   onLogin,
   onOpenAdminPortal,
+  onOpenOwnerSetup,
   isAuthenticated = false,
   onOpenDashboard,
 }) {
@@ -1102,7 +1103,7 @@ function PreliminaryCorporateSite({
     return errors
   }
 
-  const submitNewsletterLead = (event) => {
+  const submitNewsletterLead = async (event) => {
     event.preventDefault()
     const nextErrors = validateNewsletterForm(newsletterLeadForm)
     setNewsletterErrors(nextErrors)
@@ -1110,9 +1111,12 @@ function PreliminaryCorporateSite({
       setNewsletterSubmitted(false)
       return
     }
-    const registration = registerNewsletterSubscriberLead({
+    const registration = await registerNewsletterSubscriberLead({
       contactEmail: newsletterLeadForm.email,
       fullName: newsletterLeadForm.fullName,
+      serviceFocus: newsletterLeadForm.serviceFocus,
+      capturePage: resolvedPage,
+      capturePath: window.location.pathname,
     })
     if (!registration.ok) {
       setNewsletterSubmitted(false)
@@ -2568,6 +2572,7 @@ function PreliminaryCorporateSite({
                   Get Started
                 </button>
                 <button type="button" onClick={onLogin} className={secondaryButtonClass}>Login</button>
+                <button type="button" onClick={onOpenOwnerSetup} className={secondaryButtonClass}>Owner Setup</button>
               </>
             )}
           </div>
@@ -2614,6 +2619,7 @@ function PreliminaryCorporateSite({
                       Get Started
                     </button>
                     <button type="button" onClick={onLogin} className={secondaryButtonClass}>Login</button>
+                    <button type="button" onClick={onOpenOwnerSetup} className={secondaryButtonClass}>Owner Setup</button>
                   </>
                 )}
               </div>
@@ -2718,6 +2724,9 @@ function PreliminaryCorporateSite({
               <button type="button" onClick={() => handleNavigate('services')} className="transition-colors hover:text-white">Services</button>
               <button type="button" onClick={() => handleNavigate('insights')} className="transition-colors hover:text-white">Insights</button>
               <button type="button" onClick={() => handleNavigate('contact')} className="transition-colors hover:text-white">Contact</button>
+              <button type="button" onClick={onOpenOwnerSetup} className="rounded-full border border-white/20 px-3 py-1.5 font-semibold text-blue-100 hover:bg-white/10">
+                Owner Setup
+              </button>
               <button type="button" onClick={onOpenAdminPortal} className="rounded-full border border-white/30 px-3 py-1.5 font-semibold text-blue-50 hover:bg-white/10">
                 Admin Portal
               </button>

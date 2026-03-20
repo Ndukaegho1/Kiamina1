@@ -154,6 +154,7 @@ function useClientSupportSession({
       clientEmail: normalizedEmail,
       clientName: normalizedName,
       businessName: normalizedBusinessName,
+      ticketId: activeTicket?.id || '',
       text,
       attachments,
     }),
@@ -434,7 +435,7 @@ function ClientSupportExperience({ clientEmail = '', clientName = 'Client User',
     if (!canCompose) return
     if (embedded && !isOpen) return
     void support.ensureThread()
-  }, [canCompose, embedded, isOpen, nowMs])
+  }, [canCompose, embedded, isOpen])
 
   const handleSend = async () => {
     if (!canCompose) {

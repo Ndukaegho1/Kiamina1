@@ -150,6 +150,7 @@ export const syncAuthenticatedUserToBackend = async ({
   email = '',
   displayName = '',
   roles = [],
+  signupCapture = undefined,
 } = {}) => (
   postJson('/api/users/sync-from-auth', {
     uid: String(uid || '').trim(),
@@ -160,6 +161,11 @@ export const syncAuthenticatedUserToBackend = async ({
         .map((role) => String(role || '').trim().toLowerCase())
         .filter(Boolean)
       : [],
+    ...(signupCapture && typeof signupCapture === 'object'
+      ? {
+          signupCapture,
+        }
+      : {}),
   }, {
     authorizationToken: String(authorizationToken || '').trim(),
   })
@@ -178,13 +184,28 @@ export const persistClientOnboardingToBackend = async ({
   }
 
   const fallbackFullName = String(fullName || onboardingData?.primaryContact || '').trim()
-  const nameParts = splitNameParts(fallbackFullName)
+  const explicitNameParts = {
+    firstName: String(onboardingData?.firstName || '').trim(),
+    lastName: String(onboardingData?.lastName || '').trim(),
+    otherNames: String(onboardingData?.otherNames || '').trim(),
+  }
+  const nameParts = (
+    explicitNameParts.firstName
+    || explicitNameParts.lastName
+    || explicitNameParts.otherNames
+  )
+    ? explicitNameParts
+    : splitNameParts(fallbackFullName)
   const businessType = normalizeBusinessType(onboardingData?.businessType)
+  const normalizedPhone = String(onboardingData?.phone || '').replace(/\D/g, '').slice(0, 11)
 
   const profilePayload = {
     firstName: nameParts.firstName,
     lastName: nameParts.lastName,
     otherNames: nameParts.otherNames,
+    phoneCountryCode: '+234',
+    phoneLocalNumber: normalizedPhone,
+    roleInCompany: String(onboardingData?.roleInCompany || '').trim(),
     language: String(onboardingData?.language || '').trim() || 'English',
     businessType,
     businessName: String(onboardingData?.businessName || '').trim(),
@@ -194,6 +215,8 @@ export const persistClientOnboardingToBackend = async ({
     industryOther: String(onboardingData?.industryOther || '').trim(),
     cacNumber: String(onboardingData?.cacNumber || '').trim(),
     tin: String(onboardingData?.tin || '').trim(),
+    reportingCycle: String(onboardingData?.reportingCycle || '').trim(),
+    startMonth: String(onboardingData?.startMonth || '').trim(),
   }
   const dashboardPayload = {
     defaultLandingPage: String(defaultLandingPage || 'dashboard').trim() || 'dashboard',

@@ -176,6 +176,11 @@ const ensureAccessTokenRefreshed = async () => {
   return refreshAccessTokenPromise
 }
 
+const clearInvalidSessionCredentials = () => {
+  clearApiAccessToken()
+  clearApiSessionId()
+}
+
 export const apiFetch = async (path, options = {}) => {
   const requestOptions = { ...options }
   delete requestOptions.skipAuthRefreshRetry
@@ -206,6 +211,9 @@ export const apiFetch = async (path, options = {}) => {
 
   const refreshResult = await ensureAccessTokenRefreshed()
   if (!refreshResult.ok) {
+    if (refreshResult.status === 400 || refreshResult.status === 401) {
+      clearInvalidSessionCredentials()
+    }
     return initialResponse
   }
 

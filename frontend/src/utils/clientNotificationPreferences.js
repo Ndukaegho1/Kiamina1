@@ -1,5 +1,3 @@
-import { getScopedStorageKey } from './storage'
-
 export const CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY = 'notificationSettings'
 
 export const DEFAULT_CLIENT_NOTIFICATION_SETTINGS = Object.freeze({
@@ -71,39 +69,31 @@ export const normalizeClientNotificationSettings = (payload = {}) => {
   })
 }
 
-const tryParseSettings = (rawValue = '') => {
-  try {
-    const parsed = JSON.parse(rawValue)
-    if (!parsed || typeof parsed !== 'object') return null
-    return parsed
-  } catch {
-    return null
+const clearLegacyNotificationSettingsCache = (email = '') => {
+  if (typeof localStorage === 'undefined') return
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const keysToRemove = new Set([CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY])
+  if (normalizedEmail) {
+    keysToRemove.add(`${CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY}:${normalizedEmail}`)
   }
+
+  keysToRemove.forEach((key) => {
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      // Ignore storage cleanup failures.
+    }
+  })
 }
 
 export const readClientNotificationSettings = (email = '') => {
-  if (typeof localStorage === 'undefined') {
-    return normalizeClientNotificationSettings()
-  }
-  const normalizedEmail = String(email || '').trim().toLowerCase()
-  const scopedKey = getScopedStorageKey(CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY, normalizedEmail)
-  const keysToCheck = scopedKey === CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY
-    ? [CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY]
-    : [scopedKey, CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY]
-  for (const key of keysToCheck) {
-    const parsed = tryParseSettings(localStorage.getItem(key) || '')
-    if (!parsed) continue
-    return normalizeClientNotificationSettings(parsed)
-  }
+  clearLegacyNotificationSettingsCache(email)
   return normalizeClientNotificationSettings()
 }
 
 export const persistClientNotificationSettings = (email = '', payload = {}) => {
   const normalizedSettings = normalizeClientNotificationSettings(payload)
-  if (typeof localStorage === 'undefined') return normalizedSettings
-  const normalizedEmail = String(email || '').trim().toLowerCase()
-  const scopedKey = getScopedStorageKey(CLIENT_NOTIFICATION_SETTINGS_STORAGE_KEY, normalizedEmail)
-  localStorage.setItem(scopedKey, JSON.stringify(normalizedSettings))
+  clearLegacyNotificationSettingsCache(email)
   return normalizedSettings
 }
 

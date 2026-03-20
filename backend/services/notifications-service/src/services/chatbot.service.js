@@ -32,8 +32,90 @@ const assertCanAccessSession = ({ session, actorUid, isAdmin }) => {
   }
 };
 
-const buildFallbackAssistantReply = (message) =>
-  `I noted your request: "${message}". I can help with general guidance or escalate to support.`;
+const SUPPORT_WORKING_HOURS_TEXT =
+  "Mon-Fri 8:00 AM - 6:00 PM, Sat-Sun 9:00 AM - 1:00 PM (WAT)";
+
+const CURATED_REPLY_RULES = [
+  {
+    patterns: ["upload", "document", "file"],
+    reply:
+      "To upload documents, open Expenses, Sales, or Bank Statements, choose the correct folder, upload the file, complete the required class or metadata, then submit it for review."
+  },
+  {
+    patterns: ["expense"],
+    reply:
+      "For expenses, go to the Expenses workspace, upload into the correct folder, complete the class and supporting details, then monitor the review status in the folder view and upload history."
+  },
+  {
+    patterns: ["sales", "invoice", "revenue"],
+    reply:
+      "For sales documents, go to Sales, upload the file, complete the class and invoice details, then track the review outcome from the workspace."
+  },
+  {
+    patterns: ["bank"],
+    reply:
+      "For bank statements, open Bank Statements, upload the statement, set the correct period details, then monitor the review status from the workspace."
+  },
+  {
+    patterns: ["setting", "profile", "account"],
+    reply:
+      "Settings is where you manage your profile, business details, tax information, verification records, notification preferences, and account security."
+  },
+  {
+    patterns: ["verification", "identity", "kyc"],
+    reply:
+      "For verification, open Settings and go to the verification section. Upload the requested records and submit them for review."
+  },
+  {
+    patterns: ["onboarding", "workspace setup"],
+    reply:
+      "Kiamina onboarding first confirms your profile, then collects the business and accounting details needed to prepare your workspace correctly."
+  },
+  {
+    patterns: ["tax", "vat", "compliance", "tin"],
+    reply:
+      "Kiamina supports tax compliance, filing readiness, and finance-control setup. Keeping your tax details current in Settings helps document reviews stay aligned."
+  },
+  {
+    patterns: ["payroll", "salary"],
+    reply:
+      "Kiamina payroll support covers payroll processing, compliance checks, payroll journals, and reconciliation support."
+  },
+  {
+    patterns: ["bookkeeping", "financial reporting", "financial modeling", "service", "advisory"],
+    reply:
+      "Kiamina service lines include bookkeeping, financial reporting, financial modeling, payroll processing, and tax compliance delivered with a structured, audit-ready approach."
+  },
+  {
+    patterns: ["hours", "open", "working hour", "time"],
+    reply: `Human support working hours are ${SUPPORT_WORKING_HOURS_TEXT}. Outside those hours, Kiamina can still capture your details and inquiry for follow-up.`
+  },
+  {
+    patterns: ["agent", "human", "representative", "support team"],
+    reply:
+      "If you need a human agent, say so clearly in chat and Kiamina will escalate the conversation. During offline hours, your details and inquiry can still be captured for follow-up."
+  }
+];
+
+const findCuratedAssistantReply = (message = "") => {
+  const normalizedMessage = String(message || "").trim().toLowerCase();
+  if (!normalizedMessage) return "";
+
+  const matchedRule = CURATED_REPLY_RULES.find(({ patterns = [] }) =>
+    patterns.some((pattern) => normalizedMessage.includes(pattern))
+  );
+
+  return matchedRule?.reply || "";
+};
+
+const buildFallbackAssistantReply = (message) => {
+  const curatedReply = findCuratedAssistantReply(message);
+  if (curatedReply) {
+    return curatedReply;
+  }
+
+  return "I can help with Kiamina services, onboarding, uploads, tax, payroll, settings, and verification. I can also help escalate to human support.";
+};
 
 const buildKnowledgeAssistantReply = (article) => {
   const title = String(article.title || "").trim();
@@ -131,9 +213,12 @@ export const postChatMessageForSession = async ({
   });
 
   const primaryArticle = suggestions[0];
-  const assistantContent = primaryArticle
-    ? buildKnowledgeAssistantReply(primaryArticle)
-    : buildFallbackAssistantReply(payload.message);
+  const curatedReply = findCuratedAssistantReply(payload.message);
+  const assistantContent = primaryArticle && curatedReply
+    ? `${curatedReply} I also found a related help article: ${String(primaryArticle.title || "").trim()}${String(primaryArticle.summary || "").trim() ? `. ${String(primaryArticle.summary || "").trim()}` : "."}`
+    : primaryArticle
+      ? buildKnowledgeAssistantReply(primaryArticle)
+      : buildFallbackAssistantReply(payload.message);
 
   const assistantMessage = await createChatMessage({
     sessionId,

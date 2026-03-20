@@ -2,8 +2,10 @@ import { env } from "../config/env.js";
 import { issueOtpChallenge, verifyOtpChallenge } from "../services/otp.service.js";
 import { issueSmsOtpChallenge, verifySmsOtpChallenge } from "../services/sms-otp.service.js";
 import {
+  createFirebaseUser,
   generateFirebaseEmailVerificationLink,
   generateFirebasePasswordResetLink,
+  updateFirebaseUserProfile,
   updateFirebaseUserPassword,
   verifyFirebaseIdToken
 } from "../services/firebase-admin.service.js";
@@ -17,7 +19,8 @@ import {
   listRegisteredAuthAccounts,
   refreshSessionTokenHash,
   registerOrUpdateAuthAccount,
-  revokeSessionForUid
+  revokeSessionForUid,
+  updateManagedAuthAccountByUid
 } from "../services/auth-accounts.service.js";
 import {
   assertCredentialLoginAllowed,
@@ -167,6 +170,73 @@ const getRequestIpAddress = (req) =>
       req.socket.remoteAddress ||
       ""
   );
+
+const MANAGED_ACCOUNT_ROLES = new Set(["admin", "owner", "superadmin"]);
+const MANAGED_ACCOUNT_STATUSES = new Set(["active", "disabled", "suspended", "pending"]);
+
+const buildManagedAccountCreatePayload = (source = {}) => {
+  const payload = source && typeof source === "object" ? source : {};
+  const email = String(payload.email || "").trim().toLowerCase();
+  const fullName = String(payload.fullName || "").trim();
+  const password = String(payload.password || "");
+  const role = String(payload.role || "admin").trim().toLowerCase();
+  const status = String(payload.status || "active").trim().toLowerCase();
+  const errors = [];
+
+  if (!email) errors.push("email is required");
+  if (!fullName) errors.push("fullName is required");
+  if (!password) errors.push("password is required");
+  if (!MANAGED_ACCOUNT_ROLES.has(role)) {
+    errors.push("role must be one of: admin, owner, superadmin");
+  }
+  if (!MANAGED_ACCOUNT_STATUSES.has(status)) {
+    errors.push("status must be one of: active, disabled, suspended, pending");
+  }
+
+  return {
+    errors,
+    payload: { email, fullName, password, role, status }
+  };
+};
+
+const buildManagedAccountUpdatePayload = (source = {}) => {
+  const payload = source && typeof source === "object" ? source : {};
+  const nextPayload = {};
+  const errors = [];
+
+  if (payload.email !== undefined) {
+    const email = String(payload.email || "").trim().toLowerCase();
+    if (!email) {
+      errors.push("email cannot be empty");
+    } else {
+      nextPayload.email = email;
+    }
+  }
+
+  if (payload.fullName !== undefined) {
+    nextPayload.fullName = String(payload.fullName || "").trim();
+  }
+
+  if (payload.role !== undefined) {
+    const role = String(payload.role || "").trim().toLowerCase();
+    if (!MANAGED_ACCOUNT_ROLES.has(role)) {
+      errors.push("role must be one of: admin, owner, superadmin");
+    } else {
+      nextPayload.role = role;
+    }
+  }
+
+  if (payload.status !== undefined) {
+    const status = String(payload.status || "").trim().toLowerCase();
+    if (!MANAGED_ACCOUNT_STATUSES.has(status)) {
+      errors.push("status must be one of: active, disabled, suspended, pending");
+    } else {
+      nextPayload.status = status;
+    }
+  }
+
+  return { errors, payload: nextPayload };
+};
 
 const toCookieOptions = (maxAgeMs) => ({
   httpOnly: true,
@@ -470,6 +540,169 @@ export const listAccounts = async (req, res, next) => {
         updatedAt: account.updatedAt,
         lastLoginAt: account.lastLoginAt
       }))
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const createManagedAccount = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+    if (!isElevatedAdminActor(req)) {
+      return res.status(403).json({
+        message: "Only owner or superadmin users can create managed auth accounts."
+      });
+    }
+
+    const { errors, payload } = buildManagedAccountCreatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    const createdFirebaseUser = await createFirebaseUser({
+      email: payload.email,
+      password: payload.password,
+      displayName: payload.fullName
+    });
+    if (!createdFirebaseUser.ok || !createdFirebaseUser.uid) {
+      return res.status(503).json({
+        message: "Unable to create managed auth account right now."
+      });
+    }
+
+    const result = await registerOrUpdateAuthAccount({
+      uid: createdFirebaseUser.uid,
+      email: payload.email,
+      fullName: payload.fullName,
+      role: payload.role,
+      provider: "email-password",
+      status: payload.status,
+      emailVerified: false,
+      phoneVerified: false
+    });
+
+    return res.status(result.created ? 201 : 200).json({
+      message: result.created ? "Managed auth account created." : "Managed auth account updated.",
+      account: {
+        uid: result.account.uid,
+        email: result.account.email,
+        fullName: result.account.fullName,
+        role: result.account.role,
+        provider: result.account.provider,
+        status: result.account.status
+      }
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const updateManagedAccount = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+    if (!isElevatedAdminActor(req)) {
+      return res.status(403).json({
+        message: "Only owner or superadmin users can update managed auth accounts."
+      });
+    }
+
+    const targetUid = String(req.params.uid || "").trim();
+    if (!targetUid) {
+      return res.status(400).json({ message: "uid is required." });
+    }
+
+    const { errors, payload } = buildManagedAccountUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message: "Provide at least one field: email, fullName, role, status"
+      });
+    }
+
+    const firebaseUpdate = await updateFirebaseUserProfile({
+      uid: targetUid,
+      email: payload.email,
+      displayName: payload.fullName,
+      disabled: payload.status !== undefined
+        ? payload.status === "disabled" || payload.status === "suspended"
+        : undefined
+    });
+    if (!firebaseUpdate.ok) {
+      return res.status(503).json({
+        message: "Unable to update managed auth account right now."
+      });
+    }
+
+    const updated = await updateManagedAuthAccountByUid({
+      uid: targetUid,
+      email: payload.email,
+      fullName: payload.fullName,
+      role: payload.role,
+      status: payload.status
+    });
+
+    return res.status(200).json({
+      message: "Managed auth account updated.",
+      account: {
+        uid: updated.uid,
+        email: updated.email,
+        fullName: updated.fullName,
+        role: updated.role,
+        provider: updated.provider,
+        status: updated.status
+      }
+    });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const resetManagedAccountPassword = async (req, res, next) => {
+  try {
+    const actorUid = getActorUid(req);
+    if (!actorUid) {
+      return res.status(401).json({
+        message: "Missing x-user-id header from authenticated gateway request"
+      });
+    }
+    if (!isElevatedAdminActor(req)) {
+      return res.status(403).json({
+        message: "Only owner or superadmin users can reset managed auth account passwords."
+      });
+    }
+
+    const targetUid = String(req.params.uid || "").trim();
+    if (!targetUid) {
+      return res.status(400).json({ message: "uid is required." });
+    }
+
+    const temporaryPassword = `Temp@${Math.floor(100000 + Math.random() * 900000)}`;
+    const updateResult = await updateFirebaseUserPassword({
+      uid: targetUid,
+      newPassword: temporaryPassword
+    });
+    if (!updateResult.ok) {
+      return res.status(503).json({
+        message: "Unable to reset password right now."
+      });
+    }
+
+    return res.status(200).json({
+      message: "Managed auth account password reset.",
+      temporaryPassword
     });
   } catch (error) {
     return next(error);

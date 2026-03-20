@@ -2,12 +2,14 @@ import express from "express";
 import {
   authenticatePassword,
   changePassword,
+  createManagedAccount,
   deleteAccount,
   deleteAccountByUid,
   getBootstrapOwnerStatus,
   listAccounts,
   getSocialAuthAccountStatus,
   logoutSession,
+  resetManagedAccountPassword,
   refreshToken,
   recordLoginSession,
   registerAccount,
@@ -15,6 +17,7 @@ import {
   sendPasswordResetLink,
   sendOtp,
   sendSmsOtp,
+  updateManagedAccount,
   verifyOtp,
   verifySmsOtp,
   verifyToken
@@ -24,6 +27,9 @@ const router = express.Router();
 
 router.get("/bootstrap-owner-status", getBootstrapOwnerStatus);
 router.get("/accounts", listAccounts);
+router.post("/admin/accounts", createManagedAccount);
+router.patch("/admin/accounts/:uid", updateManagedAccount);
+router.post("/admin/accounts/:uid/reset-password", resetManagedAccountPassword);
 router.post("/authenticate-password", authenticatePassword);
 router.post("/register-account", registerAccount);
 router.post("/login-session", recordLoginSession);

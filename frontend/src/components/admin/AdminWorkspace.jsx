@@ -21,6 +21,7 @@ import AdminSettingsPage from './settings/AdminSettingsPage'
 import AdminInsightsPage from './insights/AdminInsightsPage'
 import { ADMIN_DEFAULT_PAGE } from './adminConfig'
 import { isOwnerAdminLevel } from './adminIdentity'
+import { apiFetch } from '../../utils/apiClient'
 import { getNetworkAwareDurationMs } from '../../utils/networkRuntime'
 import DotLottiePreloader from '../common/DotLottiePreloader'
 import { getSupportCenterSnapshot, subscribeSupportCenter } from '../../utils/supportCenter'
@@ -445,6 +446,25 @@ function AdminWorkspace({
   const openClientContext = (client) => {
     if (!client) return
     setSelectedClientContext(client)
+    const normalizedUid = String(client?.uid || '').trim()
+    if (!normalizedUid) return
+    void (async () => {
+      try {
+        const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedUid)}`, {
+          method: 'GET',
+        })
+        if (!response.ok) return
+        const detail = await response.json().catch(() => null)
+        if (!detail || typeof detail !== 'object') return
+        setSelectedClientContext((previous) => (
+          previous && String(previous.uid || '').trim() === normalizedUid
+            ? { ...previous, ...detail }
+            : previous
+        ))
+      } catch {
+        // fall back to the currently selected client context
+      }
+    })()
   }
 
   useEffect(() => {

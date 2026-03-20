@@ -5,12 +5,16 @@ import {
   getClientPhoneAvailability,
   getClientManagementClientByUidForAdmin,
   listClientManagementClientsForAdmin,
+  listAdminStaffForAdmin,
   getAdminDashboardByUid,
   getClientDashboardByUid,
   getClientDashboardOverviewByUid,
   getClientWorkspaceByUid,
   getMeByUid,
   getUserById,
+  upsertPublicNewsletterSubscription,
+  upsertPublicSupportLead,
+  updateAdminStaffByUid,
   updateAdminDashboardByUid,
   updateClientManagementClientByUidForAdmin,
   updateClientDashboardByUid,
@@ -27,13 +31,29 @@ import {
 import {
   buildAdminClientManagementUpdatePayload,
   buildAdminDashboardUpdatePayload,
+  buildAdminStaffUpdatePayload,
   buildClientDashboardUpdatePayload,
   buildClientProfileUpdatePayload,
   buildClientWorkspaceUpdatePayload,
+  buildPublicNewsletterPayload,
+  buildPublicSupportLeadPayload,
   buildUserUpdatePayload,
   validateAdminClientManagementListQuery,
   validateSyncFromAuthPayload
 } from "../validation/users.validation.js";
+
+const resolveRequestIpAddress = (req) => {
+  const forwardedHeader = String(req.headers["x-forwarded-for"] || "").trim();
+  if (forwardedHeader) {
+    const [first] = forwardedHeader
+      .split(",")
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (first) return first;
+  }
+
+  return String(req.ip || req.socket?.remoteAddress || "").trim();
+};
 
 const resolveAccountDeletionReason = (source, fallback = "account-deleted") => {
   const payload = source && typeof source === "object" ? source : {};
@@ -54,6 +74,44 @@ export const getPublicPhoneAvailability = async (req, res, next) => {
     const phoneNumber = String(req.query?.phoneNumber || req.query?.phone || "").trim();
     const result = await getClientPhoneAvailability({ phoneNumber });
     return res.status(result.available ? 200 : 409).json(result);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const postPublicSupportLead = async (req, res, next) => {
+  try {
+    const { errors, payload } = buildPublicSupportLeadPayload(req.body);
+    if (errors.length > 0 || !payload) {
+      return res.status(400).json({ message: errors.join("; ") || "Invalid support lead payload" });
+    }
+
+    const result = await upsertPublicSupportLead({
+      payload: {
+        ...payload,
+        leadIpAddress: String(payload.leadIpAddress || resolveRequestIpAddress(req)).trim()
+      }
+    });
+    return res.status(200).json(result);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const postPublicNewsletter = async (req, res, next) => {
+  try {
+    const { errors, payload } = buildPublicNewsletterPayload(req.body);
+    if (errors.length > 0 || !payload) {
+      return res.status(400).json({ message: errors.join("; ") || "Invalid newsletter payload" });
+    }
+
+    const result = await upsertPublicNewsletterSubscription({
+      payload: {
+        ...payload,
+        leadIpAddress: String(payload.leadIpAddress || resolveRequestIpAddress(req)).trim()
+      }
+    });
+    return res.status(200).json(result);
   } catch (error) {
     return next(error);
   }
@@ -86,7 +144,13 @@ export const syncFromAuth = async (req, res, next) => {
       uid: payload.uid,
       email: payload.email,
       displayName: payload.displayName,
-      roles: roles.length > 0 ? roles : undefined
+      roles: roles.length > 0 ? roles : undefined,
+      signupCapture: payload.signupCapture
+        ? {
+            ...payload.signupCapture,
+            signupIp: String(payload.signupCapture.signupIp || resolveRequestIpAddress(req)).trim()
+          }
+        : undefined
     });
 
     return res.status(200).json(user);
@@ -168,10 +232,15 @@ export const patchMeProfile = async (req, res, next) => {
       return res.status(400).json({ message: errors.join("; ") });
     }
 
+    const hasSignupCaptureUpdate = Object.keys(payload).some((key) => key.startsWith("signupCapture."));
+    if (hasSignupCaptureUpdate && !String(payload["signupCapture.signupIp"] || "").trim()) {
+      payload["signupCapture.signupIp"] = resolveRequestIpAddress(req);
+    }
+
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({
         message:
-          "Provide at least one profile field: firstName, lastName, otherNames, phone, businessType, businessName, country, currency, reportingCycle, startMonth, address fields"
+          "Provide at least one profile field: firstName, lastName, otherNames, phone, businessType, businessName, country, currency, reportingCycle, startMonth, address fields, or signup capture fields"
       });
     }
 
@@ -323,7 +392,7 @@ export const patchMeClientWorkspace = async (req, res, next) => {
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({
         message:
-          "Provide at least one workspace field: documents, activityLog, onboardingState, settingsProfile, verificationDocs, statusControl, notificationSettings, profilePhoto, companyLogo"
+          "Provide at least one workspace field: documents, activityLog, onboardingState, settingsProfile, verificationDocs, statusControl, notificationSettings, notifications, profilePhoto, companyLogo"
       });
     }
 
@@ -421,7 +490,7 @@ export const patchAdminClientManagementClient = async (req, res, next) => {
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({
         message:
-          "Provide at least one field to update: status, roles, verificationStatus, verificationPending, businessType, businessName, country, currency, assignedToUid, assignmentNotes, statusReason, tags"
+          "Provide at least one field to update: status, roles, verificationStatus, verificationPending, businessType, businessName, country, currency, assignedToUid, assignmentNotes, statusReason, tags, documents, notifications, activityLog"
       });
     }
 
@@ -515,6 +584,26 @@ export const getMeAdminDashboard = async (req, res, next) => {
   }
 };
 
+export const getAdminStaff = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isAdminActor(actor)) {
+      return res.status(403).json({ message: "Only admin users can access admin staff." });
+    }
+
+    const payload = await listAdminStaffForAdmin();
+    return res.status(200).json(payload);
+  } catch (error) {
+    return next(error);
+  }
+};
+
 export const patchMeAdminDashboard = async (req, res, next) => {
   try {
     const actor = getRequestActor(req);
@@ -536,7 +625,7 @@ export const patchMeAdminDashboard = async (req, res, next) => {
     if (Object.keys(payload).length === 0) {
       return res.status(400).json({
         message:
-          "Provide at least one admin dashboard field: defaultLandingPage, lastVisitedPage, compactMode, widgets, favoritePages, adminProfile, supportLeads, newsletters"
+          "Provide at least one admin dashboard field: defaultLandingPage, lastVisitedPage, compactMode, widgets, favoritePages, securityPreferences, adminProfile, supportLeads, newsletters"
       });
     }
 
@@ -553,6 +642,48 @@ export const patchMeAdminDashboard = async (req, res, next) => {
     }
 
     return res.status(200).json(dashboard);
+  } catch (error) {
+    return next(error);
+  }
+};
+
+export const patchAdminStaffByUid = async (req, res, next) => {
+  try {
+    const actor = getRequestActor(req);
+    if (!actor.uid) {
+      return res
+        .status(401)
+        .json({ message: "Missing x-user-id header from authenticated gateway request" });
+    }
+
+    if (!isElevatedAdminActor(actor)) {
+      return res.status(403).json({ message: "Only owner or superadmin users can update admin staff." });
+    }
+
+    const { payload, errors } = buildAdminStaffUpdatePayload(req.body);
+    if (errors.length > 0) {
+      return res.status(400).json({ message: errors.join("; ") });
+    }
+
+    if (Object.keys(payload).length === 0) {
+      return res.status(400).json({
+        message: "Provide at least one field: status, adminProfile, adminAccess"
+      });
+    }
+
+    const updated = await updateAdminStaffByUid({
+      uid: String(req.params.uid || "").trim(),
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRoles: actor.roles,
+      payload
+    });
+
+    if (!updated) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    return res.status(200).json(updated);
   } catch (error) {
     return next(error);
   }

@@ -8,6 +8,8 @@ const PUBLIC_ROUTE_KEYS = new Set([
   "POST /notifications/support/public/tickets",
   "GET /notifications/support/public/tickets",
   "GET /users/public/phone-availability",
+  "POST /users/public/support-leads",
+  "POST /users/public/newsletters",
   "GET /auth/bootstrap-owner-status",
   "POST /auth/authenticate-password",
   "POST /auth/register-account",

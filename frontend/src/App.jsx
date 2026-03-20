@@ -58,7 +58,6 @@ import {
   applyEmailVerificationCode,
   clearFirebaseAuthSession,
   completePasswordResetWithCode,
-  consumeGoogleSignInRedirectResult,
   inspectEmailVerificationCode,
   inspectPasswordResetCode,
   startGoogleSignInRedirect,
@@ -70,7 +69,9 @@ import {
 } from './utils/clientNotificationSound'
 import {
   isClientNotificationEnabled,
+  normalizeClientNotificationSettings,
   isClientNotificationSoundEnabled,
+  persistClientNotificationSettings,
   readClientNotificationSettings,
 } from './utils/clientNotificationPreferences'
 import {
@@ -106,8 +107,10 @@ const resolvePublicSitePageFromPathname = (pathname = '/') => (
   PUBLIC_SITE_PAGE_BY_PATH[normalizeAppPathname(pathname)] || null
 )
 const CLIENT_ONBOARDING_TOTAL_STEPS = 2
+const CLIENT_ONBOARDING_STATE_VERSION = 2
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
+const ADMIN_ACTIVITY_SYNC_EVENT = 'kiamina:admin-activity-sync'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
 const IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaImpersonationSession'
 const ADMIN_IMPERSONATION_SESSION_STORAGE_KEY = 'kiaminaAdminImpersonationSession'
@@ -146,9 +149,37 @@ const inferRoleFromEmail = (email = '') => {
   return 'client'
 }
 
-const normalizeRole = (role, email = '') => {
-  if (role === 'admin' || role === 'client') return role
+const normalizeBackendRole = (role, email = '') => {
+  const normalizedRole = String(role || '').trim().toLowerCase()
+  if (
+    normalizedRole === 'client'
+    || normalizedRole === 'admin'
+    || normalizedRole === 'owner'
+    || normalizedRole === 'superadmin'
+  ) {
+    return normalizedRole
+  }
   return inferRoleFromEmail(email)
+}
+
+const normalizeRole = (role, email = '') => {
+  const normalizedRole = normalizeBackendRole(role, email)
+  if (normalizedRole === 'owner' || normalizedRole === 'superadmin') return 'admin'
+  return normalizedRole
+}
+
+const deriveBackendAdminRoleFromLevel = (adminLevel = '') => {
+  const normalizedLevel = normalizeAdminLevel(adminLevel)
+  if (normalizedLevel === ADMIN_LEVELS.OWNER) return 'owner'
+  if (normalizedLevel === ADMIN_LEVELS.SUPER) return 'superadmin'
+  return 'admin'
+}
+
+const deriveAdminLevelFromBackendRole = (role = '') => {
+  const normalizedRole = String(role || '').trim().toLowerCase()
+  if (normalizedRole === 'owner') return ADMIN_LEVELS.OWNER
+  if (normalizedRole === 'superadmin') return ADMIN_LEVELS.SUPER
+  return ADMIN_LEVELS.AREA_ACCOUNTANT
 }
 
 const normalizeAdminVerificationCountry = (value = '') => {
@@ -474,6 +505,10 @@ const appendAdminActivityLog = (entry = {}) => {
     timestamp: timestampIso,
   }
   localStorage.setItem(ADMIN_ACTIVITY_STORAGE_KEY, JSON.stringify([logEntry, ...existing]))
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(ADMIN_ACTIVITY_SYNC_EVENT))
+    window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+  }
   return {
     ...logEntry,
     timestamp: formatAdminActivityTimestamp(timestampIso),
@@ -588,6 +623,53 @@ const mergeClientNotifications = (existing = [], incoming = []) => {
       })
     })
   return Array.from(byId.values()).slice(0, 80)
+}
+
+const mapNotificationRecordToClientEntry = (item = {}, index = 0, existingById = new Map()) => {
+  const notificationId = String(item?.id || `CBN-FALLBACK-${Date.now()}-${index}`).trim()
+  if (!notificationId) return null
+  const title = String(item?.title || 'New Update').trim()
+  const body = String(item?.body || item?.message || '').trim()
+  const composedMessage = body ? `${title}: ${body}` : title
+  const sentAtIso = String(item?.sentAtIso || item?.createdAtIso || new Date().toISOString()).trim()
+  const normalizedType = String(item?.type || 'info').trim().toLowerCase()
+  const allowedLinkPage = APP_PAGE_IDS.includes(String(item?.linkPage || '').trim())
+    ? String(item.linkPage).trim()
+    : 'dashboard'
+  const linkCategoryId = CLIENT_DOCUMENT_PAGE_IDS.includes(allowedLinkPage) ? allowedLinkPage : ''
+  return {
+    id: notificationId,
+    type: normalizedType || 'info',
+    title,
+    body,
+    message: composedMessage,
+    timestamp: formatClientDocumentTimestamp(sentAtIso),
+    sentAtIso,
+    read: Boolean(item?.read || existingById.get(notificationId)?.read),
+    forceDelivery: (
+      item?.forceDelivery === true
+      || String(item?.forceDelivery || '').trim().toLowerCase() === 'true'
+    ),
+    priority: String(item?.priority || 'normal').trim().toLowerCase(),
+    link: String(item?.link || '').trim(),
+    linkPage: allowedLinkPage,
+    categoryId: String(item?.categoryId || linkCategoryId).trim(),
+    folderId: String(item?.folderId || '').trim(),
+    fileId: String(item?.fileId || '').trim(),
+    documentId: String(item?.documentId || '').trim(),
+  }
+}
+
+const mapNotificationRecordsToClientEntries = (rows = [], existingInbox = []) => {
+  const inboxById = new Map(
+    (Array.isArray(existingInbox) ? existingInbox : [])
+      .map((entry) => normalizeClientNotificationEntry(entry))
+      .filter(Boolean)
+      .map((entry) => [entry.id, entry]),
+  )
+  return (Array.isArray(rows) ? rows : [])
+    .map((item, index) => mapNotificationRecordToClientEntry(item, index, inboxById))
+    .filter(Boolean)
 }
 
 const markClientBriefNotificationRead = (email = '', notificationId = '') => {
@@ -710,6 +792,9 @@ const resolveClientVerificationState = ({
   verificationStepsCompleted = 0,
 } = {}) => {
   const normalizedAccountStatus = String(accountStatus || '').trim().toLowerCase()
+  const completedSteps = Number(verificationStepsCompleted) || 0
+  // const fullyVerified = completedSteps >= 3
+  const fullyVerified = completedSteps >= 2
   if (normalizedAccountStatus === 'suspended') return 'suspended'
 
   const statusControl = readScopedClientStatusControl(email)
@@ -722,7 +807,7 @@ const resolveClientVerificationState = ({
     return 'suspended'
   }
 
-  if (Number(verificationStepsCompleted) < 1) {
+  if (completedSteps < 1) {
     return 'unverified'
   }
 
@@ -732,7 +817,7 @@ const resolveClientVerificationState = ({
     || normalizedCompliance === 'approved'
     || normalizedCompliance === 'compliant'
   ) {
-    return 'verified'
+    return fullyVerified ? 'verified' : 'pending'
   }
 
   if (
@@ -749,6 +834,10 @@ const resolveClientVerificationState = ({
     || normalizedCompliance === 'pending'
     || normalizedCompliance.includes('awaiting')
   ) {
+    return 'pending'
+  }
+
+  if (!fullyVerified) {
     return 'pending'
   }
 
@@ -1071,6 +1160,7 @@ const createDefaultClientDocuments = () => {
     sales: [],
     bankStatements: [],
     uploadHistory: [],
+    resolvedDocuments: [],
     expenseClassOptions: [],
     salesClassOptions: [],
   }
@@ -1088,10 +1178,47 @@ const setClientWorkspaceCache = (email = '', workspace = {}) => {
   const normalizedEmail = String(email || '').trim().toLowerCase()
   if (!normalizedEmail) return
   const existing = getClientWorkspaceCache(normalizedEmail) || {}
+  const nextWorkspace = workspace && typeof workspace === 'object' ? { ...workspace } : {}
+  if (Object.prototype.hasOwnProperty.call(nextWorkspace, 'profilePhoto')) {
+    const normalizedProfilePhoto = String(nextWorkspace.profilePhoto || '').trim()
+    nextWorkspace.profilePhoto = /^blob:/i.test(normalizedProfilePhoto) ? '' : normalizedProfilePhoto
+  }
+  if (Object.prototype.hasOwnProperty.call(nextWorkspace, 'companyLogo')) {
+    const normalizedCompanyLogo = String(nextWorkspace.companyLogo || '').trim()
+    nextWorkspace.companyLogo = /^blob:/i.test(normalizedCompanyLogo) ? '' : normalizedCompanyLogo
+  }
   CLIENT_WORKSPACE_MEMORY_CACHE.set(normalizedEmail, {
     ...existing,
-    ...(workspace && typeof workspace === 'object' ? workspace : {}),
+    ...nextWorkspace,
   })
+}
+
+const readScopedStorageJson = (baseKey = '', email = '') => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const normalizedBaseKey = String(baseKey || '').trim()
+  if (!normalizedEmail || !normalizedBaseKey || typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(getScopedStorageKey(normalizedBaseKey, normalizedEmail))
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const writeScopedStorageJson = (baseKey = '', email = '', payload = null) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  const normalizedBaseKey = String(baseKey || '').trim()
+  if (!normalizedEmail || !normalizedBaseKey || typeof localStorage === 'undefined') return
+  try {
+    localStorage.setItem(
+      getScopedStorageKey(normalizedBaseKey, normalizedEmail),
+      JSON.stringify(payload && typeof payload === 'object' ? payload : {}),
+    )
+  } catch {
+    // Ignore local storage persistence failures.
+  }
 }
 
 const normalizeUploadHistoryRows = (rows = [], ownerEmail = '') => (
@@ -1103,6 +1230,7 @@ const normalizeUploadHistoryRows = (rows = [], ownerEmail = '') => (
       ownerEmail: String(row?.ownerEmail || ownerEmail || '').trim().toLowerCase(),
       categoryId: row?.categoryId || resolveCategoryIdFromHistoryLabel(row?.category || ''),
       status: normalizeDocumentWorkflowStatus(row?.status || 'Pending Review'),
+      timestampIso: String(row?.timestampIso || row?.createdAtIso || row?.updatedAtIso || row?.date || '').trim(),
     }))
 )
 
@@ -1120,6 +1248,7 @@ const readClientDocuments = (email, ownerName = '') => {
       Array.isArray(parsed.uploadHistory) ? cloneDocumentRows(parsed.uploadHistory) : fallback.uploadHistory,
       email,
     ),
+    resolvedDocuments: Array.isArray(parsed.resolvedDocuments) ? cloneDocumentRows(parsed.resolvedDocuments) : fallback.resolvedDocuments,
     expenseClassOptions: normalizeClassOptions(parsed.expenseClassOptions || fallback.expenseClassOptions),
     salesClassOptions: normalizeClassOptions(parsed.salesClassOptions || fallback.salesClassOptions),
   }
@@ -1174,6 +1303,7 @@ const persistClientDocuments = (email, documents) => {
     sales: sanitizeCategoryRows(documents.sales),
     bankStatements: sanitizeCategoryRows(documents.bankStatements),
     uploadHistory: normalizeUploadHistoryRows(documents.uploadHistory, email),
+    resolvedDocuments: Array.isArray(documents.resolvedDocuments) ? cloneDocumentRows(documents.resolvedDocuments) : [],
     expenseClassOptions: normalizeClassOptions(documents.expenseClassOptions),
     salesClassOptions: normalizeClassOptions(documents.salesClassOptions),
   }
@@ -1410,12 +1540,61 @@ const normalizeBusinessTypeForBackend = (value = '') => {
   return ''
 }
 
+const readCurrentCapturePath = () => {
+  if (typeof window === 'undefined') return '/'
+  return normalizeAppPathname(window.location.pathname || '/')
+}
+
+const resolveCapturePageFromPath = (pathname = '/') => {
+  const normalizedPath = normalizeAppPathname(pathname)
+  const resolvedPublicPage = resolvePublicSitePageFromPathname(normalizedPath)
+  if (resolvedPublicPage) return resolvedPublicPage
+  if (normalizedPath === '/login') return 'login'
+  if (normalizedPath === '/signup') return 'signup'
+  if (normalizedPath === '/admin/login') return 'admin-login'
+  if (normalizedPath === '/admin/setup') return 'admin-setup'
+  return normalizedPath.replace(/^\//, '') || 'home'
+}
+
+const normalizeSignupCapturePayload = (signupCapture = {}) => {
+  const source = signupCapture && typeof signupCapture === 'object' ? signupCapture : {}
+  return {
+    signupIp: String(source.signupIp || '').trim(),
+    signupLocation: String(source.signupLocation || '').trim(),
+    signupSource: String(source.signupSource || '').trim(),
+    capturePage: String(source.capturePage || '').trim(),
+    capturePath: String(source.capturePath || '').trim(),
+  }
+}
+
+const hasSignupCapturePayloadValues = (signupCapture = {}) => {
+  const normalized = normalizeSignupCapturePayload(signupCapture)
+  return Object.values(normalized).some((value) => Boolean(String(value || '').trim()))
+}
+
+const buildSignupCapturePayload = ({
+  signupSource = '',
+  signupLocation = '',
+  capturePage = '',
+  capturePath = '',
+} = {}) => {
+  const resolvedPath = String(capturePath || readCurrentCapturePath()).trim() || '/'
+  return {
+    signupIp: '',
+    signupLocation: String(signupLocation || '').trim(),
+    signupSource: String(signupSource || '').trim(),
+    capturePage: String(capturePage || resolveCapturePageFromPath(resolvedPath)).trim(),
+    capturePath: resolvedPath,
+  }
+}
+
 const buildClientProfilePayloadForBackend = (profile = {}) => {
   const phoneParts = normalizeClientPhoneForBackend({
     phone: profile?.phone,
     phoneCountryCode: profile?.phoneCountryCode,
     phoneLocalNumber: profile?.phoneLocalNumber,
   })
+  const signupCapture = normalizeSignupCapturePayload(profile?.signupCapture)
 
   return {
     firstName: sanitizeProfileNameFieldForBackend(profile?.firstName || ''),
@@ -1440,6 +1619,11 @@ const buildClientProfilePayloadForBackend = (profile = {}) => {
     city: String(profile?.city || '').trim(),
     postalCode: String(profile?.postalCode || '').trim(),
     addressCountry: String(profile?.addressCountry || profile?.country || '').trim(),
+    ...(hasSignupCapturePayloadValues(signupCapture)
+      ? {
+          signupCapture,
+        }
+      : {}),
   }
 }
 
@@ -1602,6 +1786,15 @@ const persistScopedAccountSettings = (email = '', settings = {}) => {
   })
 }
 
+const persistScopedNotificationSettings = (email = '', settings = {}) => {
+  const normalizedSettings = normalizeClientNotificationSettings(settings)
+  setClientWorkspaceCache(email, {
+    notificationSettings: normalizedSettings,
+  })
+  persistClientNotificationSettings(email, normalizedSettings)
+  return normalizedSettings
+}
+
 const removeScopedClientArtifacts = (email = '') => {
   const normalizedEmail = String(email || '').trim().toLowerCase()
   if (!normalizedEmail) return
@@ -1700,7 +1893,7 @@ const resolveVerificationProgress = ({
     normalizedSettingsProfile.businessType || onboardingData?.businessType || '',
   ).trim().toLowerCase()
   const isIndividualBusinessType = normalizedBusinessType === 'individual'
-  const identityStepCompleted = Boolean(mergedDocs.govId && mergedDocs.govIdType && mergedDocs.govIdNumber && mergedDocs.govIdVerifiedAt)
+  // const identityStepCompleted = Boolean(mergedDocs.govId && mergedDocs.govIdType && mergedDocs.govIdNumber && mergedDocs.govIdVerifiedAt)
   const businessStepCompleted = isIndividualBusinessType || Boolean(mergedDocs.businessReg)
   return {
     profile: normalizedSettingsProfile,
@@ -1711,14 +1904,19 @@ const resolveVerificationProgress = ({
       || profileStepCompleted,
     ),
     profileStepCompleted,
-    identityStepCompleted,
     businessStepCompleted,
-    stepsCompleted: Number(profileStepCompleted) + Number(identityStepCompleted) + Number(businessStepCompleted),
+    stepsCompleted: Number(profileStepCompleted) + Number(businessStepCompleted),
   }
 }
 
 function App() {
   const defaultOnboardingData = {
+    firstName: '',
+    lastName: '',
+    otherNames: '',
+    email: '',
+    phone: '',
+    roleInCompany: '',
     businessType: '',
     businessName: '',
     country: '',
@@ -1747,8 +1945,12 @@ function App() {
 
   const getSavedScopedJson = (baseKey, email) => {
     const workspaceCache = getClientWorkspaceCache(email) || {}
-    if (baseKey === 'settingsFormData') return workspaceCache.settingsProfile || null
-    if (baseKey === 'kiaminaOnboardingState') return workspaceCache.onboardingState || null
+    if (baseKey === 'settingsFormData') {
+      return workspaceCache.settingsProfile || readScopedStorageJson(baseKey, email) || null
+    }
+    if (baseKey === 'kiaminaOnboardingState') {
+      return workspaceCache.onboardingState || readScopedStorageJson(baseKey, email) || null
+    }
     return null
   }
   const getSavedCompanyName = (email, fallback = '') => {
@@ -1763,8 +1965,8 @@ function App() {
   }
   const getSavedScopedString = (baseKey, email) => {
     const workspaceCache = getClientWorkspaceCache(email) || {}
-    if (baseKey === 'profilePhoto') return workspaceCache.profilePhoto || ''
-    if (baseKey === 'companyLogo') return workspaceCache.companyLogo || ''
+    if (baseKey === 'profilePhoto') return normalizePersistentClientAssetUrl(workspaceCache.profilePhoto || '')
+    if (baseKey === 'companyLogo') return normalizePersistentClientAssetUrl(workspaceCache.companyLogo || '')
     return null
   }
   const getSavedProfilePhoto = (email) => getSavedScopedString('profilePhoto', email)
@@ -1783,6 +1985,29 @@ function App() {
     } catch {
       return []
     }
+  }
+  const resetStoredClientAndAdminSessions = () => {
+    const savedAccounts = getSavedAccounts()
+    const adminAccounts = savedAccounts.filter((account) => (
+      normalizeRole(account?.role, account?.email || '') === 'admin'
+    ))
+    savedAccounts.forEach((account) => {
+      const normalizedEmail = String(account?.email || '').trim().toLowerCase()
+      if (!normalizedEmail) return
+      removeScopedClientArtifacts(normalizedEmail)
+    })
+    localStorage.setItem('kiaminaAccounts', JSON.stringify(adminAccounts))
+    sessionStorage.removeItem('kiaminaAuthUser')
+    localStorage.removeItem('kiaminaAuthUser')
+    clearApiAccessToken()
+    clearApiSessionId()
+    persistImpersonationSession(null)
+    persistAdminImpersonationSession(null)
+    window.sessionStorage.removeItem(IMPERSONATION_SESSION_STORAGE_KEY)
+    window.localStorage.removeItem(IMPERSONATION_SESSION_STORAGE_KEY)
+    window.sessionStorage.removeItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY)
+    window.localStorage.removeItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY)
+    void clearFirebaseAuthSession()
   }
   const getSavedAdminInvites = () => {
     try {
@@ -1813,27 +2038,212 @@ function App() {
       return null
     }
   }
+  const resetStoredAdminBootstrapState = () => {
+    const savedAccounts = getSavedAccounts()
+    const nonAdminAccounts = savedAccounts.filter((account) => (
+      normalizeRole(account?.role, account?.email || '') !== 'admin'
+    ))
+    localStorage.setItem('kiaminaAccounts', JSON.stringify(nonAdminAccounts))
+
+    localStorage.removeItem(ADMIN_INVITES_STORAGE_KEY)
+    localStorage.removeItem(ADMIN_ACTIVITY_STORAGE_KEY)
+    localStorage.removeItem(ADMIN_SETTINGS_STORAGE_KEY)
+    localStorage.removeItem(CLIENT_ASSIGNMENTS_STORAGE_KEY)
+    window.localStorage.removeItem(IMPERSONATION_SESSION_STORAGE_KEY)
+    window.localStorage.removeItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY)
+    window.sessionStorage.removeItem(IMPERSONATION_SESSION_STORAGE_KEY)
+    window.sessionStorage.removeItem(ADMIN_IMPERSONATION_SESSION_STORAGE_KEY)
+
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith('kiaminaAdminProfile:'))
+      .forEach((key) => localStorage.removeItem(key))
+
+    const storedAuthUser = getStoredAuthUser()
+    const shouldClearStoredAdminSession = normalizeRole(
+      storedAuthUser?.role,
+      storedAuthUser?.email || '',
+    ) === 'admin'
+
+    if (shouldClearStoredAdminSession) {
+      sessionStorage.removeItem('kiaminaAuthUser')
+      localStorage.removeItem('kiaminaAuthUser')
+      clearApiAccessToken()
+      clearApiSessionId()
+      void clearFirebaseAuthSession()
+    }
+
+    persistImpersonationSession(null)
+    persistAdminImpersonationSession(null)
+
+    return {
+      clearedAdminSession: shouldClearStoredAdminSession,
+      removedAdminAccounts: Math.max(0, savedAccounts.length - nonAdminAccounts.length),
+    }
+  }
+  const normalizeBooleanish = (value, fallback = false) => {
+    if (value === undefined || value === null || value === '') return fallback
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'number') return value !== 0
+    const normalized = String(value || '').trim().toLowerCase()
+    if (['true', '1', 'yes'].includes(normalized)) return true
+    if (['false', '0', 'no'].includes(normalized)) return false
+    return fallback
+  }
+  const normalizePersistentClientAssetUrl = (value = '') => {
+    const normalized = String(value || '').trim()
+    if (!normalized) return ''
+    return /^blob:/i.test(normalized) ? '' : normalized
+  }
   const createDefaultOnboardingState = () => ({
+    version: CLIENT_ONBOARDING_STATE_VERSION,
     currentStep: 1,
     completed: false,
     skipped: false,
     verificationPending: true,
     data: { ...defaultOnboardingData },
   })
+  const mergeOnboardingDataValues = (...sources) => {
+    const merged = {}
+    Object.keys(defaultOnboardingData).forEach((key) => {
+      for (const source of sources) {
+        if (!source || typeof source !== 'object') continue
+        const nextValue = source[key]
+        if (nextValue === undefined || nextValue === null) continue
+        if (typeof nextValue === 'string' && !nextValue.trim()) continue
+        if (Array.isArray(nextValue) && nextValue.length === 0) continue
+        merged[key] = nextValue
+      }
+    })
+    return merged
+  }
+  const buildOnboardingDataSeed = ({
+    settingsProfile = {},
+    fallbackEmail = '',
+    fallbackFullName = '',
+  } = {}) => {
+    const normalizedProfile = normalizeSettingsProfile(settingsProfile)
+    const normalizedFullName = String(
+      normalizedProfile.fullName || fallbackFullName || '',
+    ).trim()
+    return {
+      ...defaultOnboardingData,
+      firstName: normalizedProfile.firstName || '',
+      lastName: normalizedProfile.lastName || '',
+      otherNames: normalizedProfile.otherNames || '',
+      email: String(normalizedProfile.email || fallbackEmail || '').trim().toLowerCase(),
+      phone: normalizedProfile.phoneLocalNumber || normalizedProfile.phone || '',
+      roleInCompany: normalizedProfile.roleInCompany || '',
+      businessType: normalizedProfile.businessType || '',
+      businessName: normalizedProfile.businessName || '',
+      country: normalizedProfile.country || normalizedProfile.addressCountry || '',
+      industry: normalizedProfile.industry || '',
+      industryOther: normalizedProfile.industryOther || '',
+      cacNumber: normalizedProfile.cacNumber || '',
+      tin: normalizedProfile.tin || '',
+      reportingCycle: normalizedProfile.reportingCycle || '',
+      startMonth: normalizedProfile.startMonth || '',
+      currency: normalizedProfile.currency || 'NGN',
+      language: normalizedProfile.language || 'English',
+      primaryContact: normalizedFullName,
+    }
+  }
+  const normalizeOnboardingState = (payload = {}, fallback = null) => {
+    const source = payload && typeof payload === 'object' ? payload : {}
+    const fallbackState = fallback && typeof fallback === 'object' ? fallback : createDefaultOnboardingState()
+    return {
+      version: CLIENT_ONBOARDING_STATE_VERSION,
+      currentStep: Math.min(
+        CLIENT_ONBOARDING_TOTAL_STEPS,
+        Math.max(1, Number(source.currentStep ?? fallbackState.currentStep) || 1),
+      ),
+      completed: source.completed !== undefined
+        ? normalizeBooleanish(source.completed, false)
+        : normalizeBooleanish(fallbackState.completed, false),
+      skipped: source.skipped !== undefined
+        ? normalizeBooleanish(source.skipped, false)
+        : normalizeBooleanish(fallbackState.skipped, false),
+      verificationPending: source.verificationPending !== undefined
+        ? normalizeBooleanish(source.verificationPending, true)
+        : normalizeBooleanish(fallbackState.verificationPending, true),
+      data: {
+        ...defaultOnboardingData,
+        ...mergeOnboardingDataValues(
+          fallbackState.data && typeof fallbackState.data === 'object' ? fallbackState.data : {},
+          source.data && typeof source.data === 'object' ? source.data : {},
+        ),
+      },
+    }
+  }
+  const mergeOnboardingStates = ({
+    savedState = null,
+    cachedState = null,
+    fetchedState = null,
+    settingsProfile = {},
+    fallbackEmail = '',
+    fallbackFullName = '',
+  } = {}) => {
+    const normalizedSavedState = normalizeOnboardingState(savedState, createDefaultOnboardingState())
+    const normalizedCachedState = normalizeOnboardingState(cachedState, normalizedSavedState)
+    const normalizedFetchedState = normalizeOnboardingState(fetchedState, normalizedCachedState)
+    const seedData = buildOnboardingDataSeed({
+      settingsProfile,
+      fallbackEmail,
+      fallbackFullName,
+    })
+
+    const completed = Boolean(
+      normalizedSavedState.completed
+      || normalizedCachedState.completed
+      || normalizedFetchedState.completed
+    )
+    const skipped = !completed && Boolean(
+      normalizedSavedState.skipped
+      || normalizedCachedState.skipped
+      || normalizedFetchedState.skipped
+    )
+    const currentStep = completed || skipped
+      ? CLIENT_ONBOARDING_TOTAL_STEPS
+      : Math.min(
+        CLIENT_ONBOARDING_TOTAL_STEPS,
+        Math.max(
+          1,
+          Number(normalizedSavedState.currentStep || 1),
+          Number(normalizedCachedState.currentStep || 1),
+          Number(normalizedFetchedState.currentStep || 1),
+        ),
+      )
+    const verificationPending = normalizeBooleanish(
+      normalizedFetchedState.verificationPending,
+      normalizeBooleanish(
+        normalizedCachedState.verificationPending,
+        normalizeBooleanish(normalizedSavedState.verificationPending, true),
+      ),
+    )
+
+    return {
+      version: CLIENT_ONBOARDING_STATE_VERSION,
+      currentStep,
+      completed,
+      skipped,
+      verificationPending,
+      data: {
+        ...seedData,
+        ...mergeOnboardingDataValues(
+          seedData,
+          normalizedSavedState.data,
+          normalizedCachedState.data,
+          normalizedFetchedState.data,
+        ),
+      },
+    }
+  }
   const getSavedOnboardingState = (email) => {
     const parsed = getSavedScopedJson('kiaminaOnboardingState', email)
-    if (!parsed) return createDefaultOnboardingState()
-    const normalizedCurrentStep = Math.min(
-      CLIENT_ONBOARDING_TOTAL_STEPS,
-      Math.max(1, Number(parsed.currentStep) || 1),
-    )
-    return {
-      currentStep: normalizedCurrentStep,
-      completed: Boolean(parsed.completed),
-      skipped: Boolean(parsed.skipped),
-      verificationPending: parsed.verificationPending !== undefined ? Boolean(parsed.verificationPending) : true,
-      data: { ...defaultOnboardingData, ...(parsed.data || {}) },
-    }
+    return mergeOnboardingStates({
+      savedState: parsed,
+      settingsProfile: getSavedScopedJson('settingsFormData', email) || {},
+      fallbackEmail: email,
+    })
   }
   const getStoredImpersonationSession = () => {
     try {
@@ -1920,6 +2330,7 @@ function App() {
     normalizeAppPathname(typeof window === 'undefined' ? '/' : window.location.pathname) === '/admin/setup'
   ))
   const [ownerBootstrapStatus, setOwnerBootstrapStatus] = useState(() => createOwnerBootstrapStatusState())
+  const [adminSetupSuccessState, setAdminSetupSuccessState] = useState(null)
   const [impersonationSession, setImpersonationSession] = useState(initialImpersonationSession)
   const [adminImpersonationSession, setAdminImpersonationSession] = useState(initialAdminImpersonationSession)
   const [pendingImpersonationClient, setPendingImpersonationClient] = useState(null)
@@ -1943,6 +2354,9 @@ function App() {
   const [accountSettingsSnapshot, setAccountSettingsSnapshot] = useState(() => (
     readScopedAccountSettings(initialScopedClientEmail)
   ))
+  const [notificationSettingsSnapshot, setNotificationSettingsSnapshot] = useState(() => (
+    readClientNotificationSettings(initialScopedClientEmail)
+  ))
   const [otpChallenge, setOtpChallenge] = useState(null)
   const [pendingGoogleSocialAuth, setPendingGoogleSocialAuth] = useState(null)
   const [passwordResetEmail, setPasswordResetEmail] = useState('')
@@ -1960,6 +2374,7 @@ function App() {
   const [expenseClassOptions, setExpenseClassOptions] = useState(() => normalizeClassOptions(initialClientDocuments.expenseClassOptions))
   const [salesClassOptions, setSalesClassOptions] = useState(() => normalizeClassOptions(initialClientDocuments.salesClassOptions))
   const [uploadHistoryRecords, setUploadHistoryRecords] = useState(initialClientDocuments.uploadHistory)
+  const [resolvedDocumentRecords, setResolvedDocumentRecords] = useState(initialClientDocuments.resolvedDocuments)
   const [clientActivityRecords, setClientActivityRecords] = useState(initialClientActivityRecords)
   const [toast, setToast] = useState(null)
   const [profilePhoto, setProfilePhoto] = useState(() => getSavedProfilePhoto(initialScopedClientEmail))
@@ -1995,7 +2410,6 @@ function App() {
   const slowRuntimeVisibleRef = useRef(false)
   const clientWorkspaceSyncSignaturesRef = useRef(new Map())
   const clientProfileSyncSignaturesRef = useRef(new Map())
-  const googleRedirectResumeAttemptedRef = useRef(false)
   
   const currentUserRole = normalizeRole(authUser?.role, authUser?.email || '')
   const isAdminView = currentUserRole === 'admin'
@@ -2127,6 +2541,25 @@ function App() {
       })
     })
 
+    ;(Array.isArray(resolvedDocumentRecords) ? resolvedDocumentRecords : []).forEach((item, index) => {
+      if (!item) return
+      pushEntry({
+        id: `resolved-${item.id || `${item.fileId || index}`}`,
+        label: item.title || item.filename || `Resolved Document ${index + 1}`,
+        description: 'Resolved Documents',
+        keywords: [
+          item.filename,
+          item.fileId,
+          item.ticketReference,
+          item.signatureName,
+          item.sentByName,
+          'resolved',
+          'document',
+        ],
+        pageId: 'resolved-documents',
+      })
+    })
+
     ;(Array.isArray(clientActivityRecords) ? clientActivityRecords : []).forEach((item, index) => {
       pushEntry({
         id: `activity-${item.id || index}`,
@@ -2151,24 +2584,9 @@ function App() {
     salesDocuments,
     bankStatementDocuments,
     uploadHistoryRecords,
+    resolvedDocumentRecords,
     clientActivityRecords,
   ])
-  const dashboardSearchSuggestions = useMemo(() => {
-    return buildKeywordSuggestions([
-      ...dashboardSearchEntries.flatMap((entry) => [entry.label, entry.description, entry.searchText]),
-      'Expenses',
-      'Sales',
-      'Bank Statements',
-      'Upload History',
-      'Resolved Documents',
-      'Recent Activities',
-      'Folders',
-      'Files',
-      'Approved',
-      'Rejected',
-      'Pending',
-    ], 26)
-  }, [dashboardSearchEntries])
   const previousClientStatusSnapshotRef = useRef(null)
 
   const isImpersonatingClient = Boolean(
@@ -2223,6 +2641,7 @@ function App() {
     return normalized === 'true' || normalized === 'yes' || normalized === '1'
   }
   const hasIsoTimestamp = (value) => Number.isFinite(Date.parse(value || ''))
+  /*
   const identityVerificationApprovedByAdmin = Boolean(
     verificationProgress.identityStepCompleted
     || normalizeBooleanFlag(scopedClientStatusControl?.identityVerificationApproved)
@@ -2232,6 +2651,7 @@ function App() {
       && verificationProgress.identityStepCompleted
     ),
   )
+  */
   const businessVerificationApprovedByAdmin = Boolean(
     normalizeBooleanFlag(scopedClientStatusControl?.businessVerificationApproved)
     || hasIsoTimestamp(scopedClientStatusControl?.businessVerificationApprovedAt)
@@ -2240,13 +2660,12 @@ function App() {
   const isIndividualBusinessType = String(
     verificationProgress.profile.businessType || onboardingState.data?.businessType || '',
   ).trim().toLowerCase() === 'individual'
-  const isIdentityVerificationComplete = Boolean(
-    verificationProgress.identityStepCompleted,
-  )
   const isBusinessVerificationComplete = Boolean(
     verificationProgress.businessStepCompleted
     && (isIndividualBusinessType || businessVerificationApprovedByAdmin),
   )
+  // const isIdentityVerificationComplete = Boolean(verificationProgress.identityStepCompleted)
+  const isIdentityVerificationComplete = Boolean(isBusinessVerificationComplete)
   const isClientVerificationLocked = Boolean(
     isAuthenticated
     && !isAdminView
@@ -2324,6 +2743,21 @@ function App() {
     }
   }
 
+  const resolveNotificationLinkPage = (notification = {}) => {
+    const rawLink = String(notification?.link || '').trim()
+    if (!rawLink || typeof window === 'undefined') return ''
+
+    try {
+      const url = new URL(rawLink, window.location.origin)
+      const normalizedPath = normalizeAppPathname(url.pathname || '/')
+      if (normalizedPath === '/' || normalizedPath === '/dashboard') return 'dashboard'
+      const pageToken = normalizedPath.replace(/^\/+/, '').split('/')[0] || ''
+      return APP_PAGE_IDS.includes(pageToken) ? pageToken : ''
+    } catch {
+      return ''
+    }
+  }
+
   useEffect(() => {
     if (!isAuthenticated || isAdminView) {
       previousClientStatusSnapshotRef.current = null
@@ -2398,13 +2832,20 @@ function App() {
     const accounts = getSavedAccounts()
     const match = accounts.find((account) => account.email.toLowerCase() === authUser.email.toLowerCase())
     if (match) return normalizeAdminAccount(match)
-    return normalizeAdminAccount({
-      fullName: authUser.fullName,
-      email: authUser.email,
-      role: 'admin',
-      adminLevel: ADMIN_LEVELS.SUPER,
-      adminPermissions: FULL_ADMIN_PERMISSION_IDS,
-      status: 'active',
+      return normalizeAdminAccount({
+        fullName: authUser.fullName,
+        email: authUser.email,
+        role: 'admin',
+        adminLevel: authUser.adminLevel || deriveAdminLevelFromBackendRole(authUser.role),
+        adminPermissions: Array.isArray(authUser.adminPermissions) ? authUser.adminPermissions : [],
+        adminSecurityPreferences: authUser.adminSecurityPreferences && typeof authUser.adminSecurityPreferences === 'object'
+          ? authUser.adminSecurityPreferences
+          : undefined,
+        roleInCompany: authUser.roleInCompany || '',
+        department: authUser.department || '',
+        phoneNumber: authUser.phoneNumber || '',
+        mustChangePassword: Boolean(authUser.mustChangePassword),
+        status: authUser.status || 'active',
     })
   }
   const currentAdminAccount = getResolvedCurrentAdminAccount()
@@ -2589,12 +3030,7 @@ function App() {
     setDashboardSearchResults([])
   }
 
-  const handleDashboardSearchTermChange = (value = '') => {
-    setDashboardSearchTerm(String(value || ''))
-    dismissDashboardSearchFeedback()
-  }
-
-  const handleDashboardSearchSubmit = (value = dashboardSearchTerm) => {
+  const runDashboardSearch = (value = dashboardSearchTerm) => {
     const nextTerm = String(value || '')
     const normalizedQuery = nextTerm.trim().toLowerCase()
     setDashboardSearchTerm(nextTerm)
@@ -2653,6 +3089,14 @@ function App() {
       setDashboardSearchResults(matches)
       setDashboardSearchState('ready')
     }, searchDelayMs)
+  }
+
+  const handleDashboardSearchTermChange = (value = '') => {
+    runDashboardSearch(value)
+  }
+
+  const handleDashboardSearchSubmit = (value = dashboardSearchTerm) => {
+    runDashboardSearch(value)
   }
 
   const handleDashboardSearchResultSelect = (result) => {
@@ -2714,6 +3158,7 @@ function App() {
     if (normalizedMode !== 'email-verification') {
       setEmailVerificationEmail('')
     }
+    setAdminSetupSuccessState(null)
     setAdminSetupToken('')
     setIsAdminSetupRouteActive(false)
     const resetEmailQuery = normalizedMode === 'reset-password' && passwordResetEmail
@@ -2754,12 +3199,82 @@ function App() {
     setPendingGoogleSocialAuth(null)
     setEmailVerificationEmail('')
     setPasswordResetEmail('')
+    setAdminSetupSuccessState(null)
     setAdminSetupToken('')
     setIsAdminSetupRouteActive(false)
     try {
       if (replace) history.replaceState({}, '', '/admin/login')
       else history.pushState({}, '', '/admin/login')
     } catch {}
+  }
+
+  const navigateToAdminSetup = ({ replace = false, inviteToken = '' } = {}) => {
+    const normalizedInviteToken = String(inviteToken || '').trim()
+    setAuthMode('login')
+    setShowAuth(false)
+    setShowAdminLogin(false)
+    setIsPublicSiteView(false)
+    setPendingGoogleSocialAuth(null)
+    setEmailVerificationEmail('')
+    setPasswordResetEmail('')
+    setAdminSetupSuccessState(null)
+    setAdminSetupToken(normalizedInviteToken)
+    setIsAdminSetupRouteActive(true)
+    try {
+      const nextPath = normalizedInviteToken
+        ? `/admin/setup?invite=${encodeURIComponent(normalizedInviteToken)}`
+        : '/admin/setup'
+      if (replace) history.replaceState({}, '', nextPath)
+      else history.pushState({}, '', nextPath)
+    } catch {}
+  }
+
+  const handleContinueToAdminFromSetup = () => {
+    setAdminSetupSuccessState(null)
+    setShowAuth(false)
+    setShowAdminLogin(false)
+    setIsPublicSiteView(false)
+    setAdminSetupToken('')
+    setIsAdminSetupRouteActive(false)
+    setPublicSitePage('home')
+    setActiveFolderRoute(null)
+    setActivePage(ADMIN_DEFAULT_PAGE)
+    try {
+      history.replaceState({}, '', `/${ADMIN_DEFAULT_PAGE}`)
+    } catch {}
+  }
+
+  const handleReturnToAdminLoginFromSetup = async () => {
+    setAdminSetupSuccessState(null)
+    if (isAuthenticated) {
+      try {
+        const activeSessionId = String(getApiSessionId() || '').trim()
+        await apiFetch('/api/auth/logout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            reason: 'admin-setup-login-redirect',
+            ...(activeSessionId ? { sessionId: activeSessionId } : {}),
+          }),
+        })
+      } catch {
+        // Best-effort remote logout; local cleanup continues.
+      }
+      setIsAuthenticated(false)
+      setAuthUser(null)
+      setImpersonationSession(null)
+      setAdminImpersonationSession(null)
+      setPendingGoogleSocialAuth(null)
+      setPendingImpersonationClient(null)
+      persistImpersonationSession(null)
+      persistAdminImpersonationSession(null)
+      sessionStorage.removeItem('kiaminaAuthUser')
+      localStorage.removeItem('kiaminaAuthUser')
+      clearApiAccessToken()
+      clearApiSessionId()
+      await clearFirebaseAuthSession()
+    }
+    navigateToAdminLogin({ replace: true })
   }
 
   useEffect(() => {
@@ -2833,6 +3348,9 @@ function App() {
     // Initialize route from URL on first load
     const syncFromLocation = () => {
       const path = normalizeAppPathname(window.location.pathname || '/')
+      if (path !== '/admin/setup') {
+        setAdminSetupSuccessState(null)
+      }
       const publicSitePageCandidate = resolvePublicSitePageFromPathname(path)
       if (publicSitePageCandidate) {
         setShowAuth(false)
@@ -2891,6 +3409,62 @@ function App() {
         setAuthMode('login')
         setPasswordResetEmail('')
         setEmailVerificationEmail('')
+        return
+      }
+      if (path === '/reset-auth') {
+        resetStoredClientAndAdminSessions()
+        setAuthUser(null)
+        setIsAuthenticated(false)
+        setShowAuth(true)
+        setShowAdminLogin(false)
+        setIsPublicSiteView(false)
+        setAdminSetupToken('')
+        setIsAdminSetupRouteActive(false)
+        setImpersonationSession(null)
+        setAdminImpersonationSession(null)
+        setPendingGoogleSocialAuth(null)
+        setPendingImpersonationClient(null)
+        setOtpChallenge(null)
+        setActiveFolderRoute(null)
+        setPublicSitePage('home')
+        setAuthMode('login')
+        setPasswordResetEmail('')
+        setEmailVerificationEmail('')
+        try {
+          history.replaceState({}, '', '/login')
+        } catch {
+          // ignore
+        }
+        return
+      }
+      if (path === '/reset-admin-setup') {
+        const resetResult = resetStoredAdminBootstrapState()
+        const currentRole = normalizeRole(authUser?.role, authUser?.email || '')
+        if (resetResult.clearedAdminSession || currentRole === 'admin') {
+          setAuthUser(null)
+          setIsAuthenticated(false)
+        }
+        setShowAuth(false)
+        setShowAdminLogin(false)
+        setIsPublicSiteView(false)
+        setAdminSetupSuccessState(null)
+        setAdminSetupToken('')
+        setIsAdminSetupRouteActive(true)
+        setImpersonationSession(null)
+        setAdminImpersonationSession(null)
+        setPendingGoogleSocialAuth(null)
+        setPendingImpersonationClient(null)
+        setOtpChallenge(null)
+        setActiveFolderRoute(null)
+        setPublicSitePage('home')
+        setAuthMode('login')
+        setPasswordResetEmail('')
+        setEmailVerificationEmail('')
+        try {
+          history.replaceState({}, '', '/admin/setup')
+        } catch {
+          // ignore
+        }
         return
       }
       const folderRouteMatch = path.match(/^\/(expenses|sales|bank-statements)\/folder\/([^/]+)$/)
@@ -3020,6 +3594,14 @@ function App() {
       setSettingsProfileSnapshot(savedVerificationProgress.profile)
       setVerificationDocsSnapshot(savedVerificationProgress.docs)
       setAccountSettingsSnapshot(readScopedAccountSettings(scopedClientEmail))
+      const scopedWorkspaceCache = getClientWorkspaceCache(scopedClientEmail) || {}
+      const scopedNotificationSettings = persistScopedNotificationSettings(
+        scopedClientEmail,
+        scopedWorkspaceCache.notificationSettings && typeof scopedWorkspaceCache.notificationSettings === 'object'
+          ? scopedWorkspaceCache.notificationSettings
+          : readClientNotificationSettings(scopedClientEmail),
+      )
+      setNotificationSettingsSnapshot(scopedNotificationSettings)
       const fallbackCompanyName = impersonationSession?.businessName || ''
       const fallbackFirstName = impersonationSession?.clientName?.trim()?.split(/\s+/)?.[0]
         || authUser?.fullName?.trim()?.split(/\s+/)?.[0]
@@ -3036,6 +3618,7 @@ function App() {
       setExpenseClassOptions(normalizeClassOptions(scopedDocuments.expenseClassOptions))
       setSalesClassOptions(normalizeClassOptions(scopedDocuments.salesClassOptions))
       setUploadHistoryRecords(scopedDocuments.uploadHistory)
+      setResolvedDocumentRecords(scopedDocuments.resolvedDocuments)
       setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
       return
     }
@@ -3053,25 +3636,28 @@ function App() {
         ? response.data.workspace
         : {}
       const existingWorkspaceCache = getClientWorkspaceCache(scopedClientEmail) || {}
+      const savedOnboardingState = getSavedOnboardingState(scopedClientEmail)
+      const mergedSettingsProfile = {
+        ...(existingWorkspaceCache.settingsProfile && typeof existingWorkspaceCache.settingsProfile === 'object'
+          ? existingWorkspaceCache.settingsProfile
+          : {}),
+        ...(fetchedWorkspace.settingsProfile && typeof fetchedWorkspace.settingsProfile === 'object'
+          ? fetchedWorkspace.settingsProfile
+          : {}),
+      }
+      const mergedOnboardingState = mergeOnboardingStates({
+        savedState: savedOnboardingState,
+        cachedState: existingWorkspaceCache.onboardingState,
+        fetchedState: fetchedWorkspace.onboardingState,
+        settingsProfile: mergedSettingsProfile,
+        fallbackEmail: scopedClientEmail,
+        fallbackFullName: authUser?.fullName || '',
+      })
       const workspace = {
         ...existingWorkspaceCache,
         ...fetchedWorkspace,
-        onboardingState: {
-          ...(existingWorkspaceCache.onboardingState && typeof existingWorkspaceCache.onboardingState === 'object'
-            ? existingWorkspaceCache.onboardingState
-            : {}),
-          ...(fetchedWorkspace.onboardingState && typeof fetchedWorkspace.onboardingState === 'object'
-            ? fetchedWorkspace.onboardingState
-            : {}),
-        },
-        settingsProfile: {
-          ...(existingWorkspaceCache.settingsProfile && typeof existingWorkspaceCache.settingsProfile === 'object'
-            ? existingWorkspaceCache.settingsProfile
-            : {}),
-          ...(fetchedWorkspace.settingsProfile && typeof fetchedWorkspace.settingsProfile === 'object'
-            ? fetchedWorkspace.settingsProfile
-            : {}),
-        },
+        onboardingState: mergedOnboardingState,
+        settingsProfile: mergedSettingsProfile,
         verificationDocs: {
           ...(existingWorkspaceCache.verificationDocs && typeof existingWorkspaceCache.verificationDocs === 'object'
             ? existingWorkspaceCache.verificationDocs
@@ -3096,6 +3682,9 @@ function App() {
             ? fetchedWorkspace.notificationSettings
             : {}),
         },
+        notifications: Array.isArray(fetchedWorkspace.notifications)
+          ? fetchedWorkspace.notifications
+          : (Array.isArray(existingWorkspaceCache.notifications) ? existingWorkspaceCache.notifications : []),
         accountSettings: {
           ...(existingWorkspaceCache.accountSettings && typeof existingWorkspaceCache.accountSettings === 'object'
             ? existingWorkspaceCache.accountSettings
@@ -3108,22 +3697,31 @@ function App() {
       setClientWorkspaceCache(scopedClientEmail, workspace)
 
       const fallbackFirstName = authUser?.fullName?.trim()?.split(/\s+/)?.[0] || 'Client'
-      const onboardingCandidate = workspace.onboardingState && typeof workspace.onboardingState === 'object'
-        ? workspace.onboardingState
-        : {}
-      const nextOnboardingState = {
-        currentStep: Math.min(CLIENT_ONBOARDING_TOTAL_STEPS, Math.max(1, Number(onboardingCandidate.currentStep) || 1)),
-        completed: Boolean(onboardingCandidate.completed),
-        skipped: Boolean(onboardingCandidate.skipped),
-        verificationPending: onboardingCandidate.verificationPending !== undefined
-          ? Boolean(onboardingCandidate.verificationPending)
-          : true,
-        data: { ...defaultOnboardingData, ...(onboardingCandidate.data || {}) },
-      }
+      const nextOnboardingState = mergeOnboardingStates({
+        savedState: savedOnboardingState,
+        cachedState: existingWorkspaceCache.onboardingState,
+        fetchedState: workspace.onboardingState,
+        settingsProfile: workspace.settingsProfile,
+        fallbackEmail: scopedClientEmail,
+        fallbackFullName: authUser?.fullName || '',
+      })
 
       const settingsProfile = normalizeSettingsProfile(workspace.settingsProfile || {})
       const verificationDocs = normalizeVerificationDocs(workspace.verificationDocs || {})
       const accountSettings = normalizeAccountSettings(workspace.accountSettings || {})
+      const mappedWorkspaceNotifications = mapNotificationRecordsToClientEntries(
+        Array.isArray(workspace.notifications) ? workspace.notifications : [],
+        readClientNotificationInbox(scopedClientEmail),
+      )
+      const nextUserNotifications = mappedWorkspaceNotifications.length > 0
+        ? mergeClientNotifications(readClientNotificationInbox(scopedClientEmail), mappedWorkspaceNotifications)
+        : readClientNotificationInbox(scopedClientEmail)
+      const notificationSettings = persistScopedNotificationSettings(
+        scopedClientEmail,
+        workspace.notificationSettings && typeof workspace.notificationSettings === 'object'
+          ? workspace.notificationSettings
+          : readClientNotificationSettings(scopedClientEmail),
+      )
       const verificationProgress = resolveVerificationProgress({
         onboardingData: nextOnboardingState.data,
         settingsDocs: verificationDocs,
@@ -3147,11 +3745,14 @@ function App() {
           notificationSettings: workspace.notificationSettings && typeof workspace.notificationSettings === 'object'
             ? workspace.notificationSettings
             : {},
+          notifications: Array.isArray(workspace.notifications)
+            ? workspace.notifications
+            : [],
           accountSettings: workspace.accountSettings && typeof workspace.accountSettings === 'object'
             ? workspace.accountSettings
             : accountSettings,
-          profilePhoto: String(workspace.profilePhoto || '').trim(),
-          companyLogo: String(workspace.companyLogo || '').trim(),
+          profilePhoto: normalizePersistentClientAssetUrl(workspace.profilePhoto || ''),
+          companyLogo: normalizePersistentClientAssetUrl(workspace.companyLogo || ''),
         }
         clientWorkspaceSyncSignaturesRef.current.set(
           normalizedScopedEmail,
@@ -3159,21 +3760,25 @@ function App() {
         )
       }
       const docs = readClientDocuments(scopedClientEmail, authUser?.fullName || fallbackFirstName)
+      writeScopedStorageJson('kiaminaOnboardingState', scopedClientEmail, nextOnboardingState)
 
       setOnboardingState(nextOnboardingState)
       setSettingsProfileSnapshot(verificationProgress.profile)
       setVerificationDocsSnapshot(verificationProgress.docs)
       setAccountSettingsSnapshot(accountSettings)
+      setNotificationSettingsSnapshot(notificationSettings)
+      setUserNotifications(nextUserNotifications)
       setCompanyName(settingsProfile.businessName?.trim() || '')
       setClientFirstName(settingsProfile.firstName || fallbackFirstName)
-      setProfilePhoto(String(workspace.profilePhoto || '').trim())
-      setCompanyLogo(String(workspace.companyLogo || '').trim())
+      setProfilePhoto(normalizePersistentClientAssetUrl(workspace.profilePhoto || ''))
+      setCompanyLogo(normalizePersistentClientAssetUrl(workspace.companyLogo || ''))
       setExpenseDocuments(ensureFolderStructuredRecords(docs.expenses, 'expenses'))
       setSalesDocuments(ensureFolderStructuredRecords(docs.sales, 'sales'))
       setBankStatementDocuments(ensureFolderStructuredRecords(docs.bankStatements, 'bankStatements'))
       setExpenseClassOptions(normalizeClassOptions(docs.expenseClassOptions))
       setSalesClassOptions(normalizeClassOptions(docs.salesClassOptions))
       setUploadHistoryRecords(docs.uploadHistory)
+      setResolvedDocumentRecords(docs.resolvedDocuments)
       setClientActivityRecords(readClientActivityLogEntries(scopedClientEmail))
     })()
 
@@ -3235,6 +3840,7 @@ function App() {
       sales: salesDocuments,
       bankStatements: bankStatementDocuments,
       uploadHistory: uploadHistoryRecords,
+      resolvedDocuments: resolvedDocumentRecords,
       expenseClassOptions,
       salesClassOptions,
     })
@@ -3244,6 +3850,7 @@ function App() {
     salesDocuments,
     bankStatementDocuments,
     uploadHistoryRecords,
+    resolvedDocumentRecords,
     expenseClassOptions,
     salesClassOptions,
   ])
@@ -3261,11 +3868,12 @@ function App() {
         sales: salesDocuments,
         bankStatements: bankStatementDocuments,
         uploadHistory: uploadHistoryRecords,
+        resolvedDocuments: resolvedDocumentRecords,
         expenseClassOptions,
         salesClassOptions,
       },
       activityLog: Array.isArray(clientActivityRecords) ? clientActivityRecords : [],
-      onboardingState,
+      onboardingState: normalizeOnboardingState(onboardingState),
       settingsProfile: workspaceCache.settingsProfile && typeof workspaceCache.settingsProfile === 'object'
         ? workspaceCache.settingsProfile
         : settingsProfileSnapshot,
@@ -3279,8 +3887,8 @@ function App() {
       accountSettings: workspaceCache.accountSettings && typeof workspaceCache.accountSettings === 'object'
         ? workspaceCache.accountSettings
         : accountSettingsSnapshot,
-      profilePhoto: String(profilePhoto || '').trim(),
-      companyLogo: String(companyLogo || '').trim(),
+      profilePhoto: normalizePersistentClientAssetUrl(profilePhoto || ''),
+      companyLogo: normalizePersistentClientAssetUrl(companyLogo || ''),
     }
 
     setClientWorkspaceCache(normalizedScopedEmail, workspacePayload)
@@ -3310,6 +3918,7 @@ function App() {
     salesDocuments,
     bankStatementDocuments,
     uploadHistoryRecords,
+    resolvedDocumentRecords,
     expenseClassOptions,
     salesClassOptions,
     clientActivityRecords,
@@ -3392,10 +4001,21 @@ function App() {
 
   const persistOnboardingState = (nextState, emailOverride) => {
     const targetEmail = emailOverride ?? scopedClientEmail
-    setOnboardingState(nextState)
-    setClientWorkspaceCache(targetEmail, {
-      onboardingState: nextState,
+    const normalizedState = mergeOnboardingStates({
+      savedState: onboardingState,
+      cachedState: getClientWorkspaceCache(targetEmail)?.onboardingState,
+      fetchedState: nextState,
+      settingsProfile: readScopedSettingsProfile(targetEmail),
+      fallbackEmail: targetEmail,
+      fallbackFullName: isImpersonatingClient
+        ? (impersonationSession?.clientName || authUser?.fullName || '')
+        : (authUser?.fullName || ''),
     })
+    setOnboardingState(normalizedState)
+    setClientWorkspaceCache(targetEmail, {
+      onboardingState: normalizedState,
+    })
+    writeScopedStorageJson('kiaminaOnboardingState', targetEmail, normalizedState)
   }
 
   const setOnboardingData = (updater) => {
@@ -3417,21 +4037,31 @@ function App() {
       ? (impersonationSession?.clientName || existing.fullName || '')
       : (authUser?.fullName || existing.fullName || '')
     const existingNameParts = resolveSettingsProfileNameParts(existing)
+    const resolvedOnboardingNames = {
+      firstName: String(nextData.firstName || existingNameParts.firstName || '').trim(),
+      lastName: String(nextData.lastName || existingNameParts.lastName || '').trim(),
+      otherNames: String(nextData.otherNames || existingNameParts.otherNames || '').trim(),
+    }
+    const resolvedFullName = buildSettingsProfileFullName(resolvedOnboardingNames)
+      || String(nextData.primaryContact || effectiveFullName).trim()
+      || effectiveFullName
+    const resolvedPhone = sanitizeClientPhoneLocalNumber(
+      Object.prototype.hasOwnProperty.call(nextData, 'phone')
+        ? nextData.phone
+        : (existing.phoneLocalNumber || existing.phone || ''),
+    )
+    const resolvedPhoneCountryCode = String(existing.phoneCountryCode || '+234').trim() || '+234'
     const merged = {
       ...existing,
-      fullName: effectiveFullName,
-      firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
-      lastName: existingNameParts.lastName || (
-        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
-          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
-          : ''
-      ),
-      otherNames: existingNameParts.otherNames || (
-        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
-          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
-          : ''
-      ),
-      email: targetEmail || existing.email || '',
+      fullName: resolvedFullName,
+      firstName: resolvedOnboardingNames.firstName,
+      lastName: resolvedOnboardingNames.lastName,
+      otherNames: resolvedOnboardingNames.otherNames,
+      email: String(targetEmail || nextData.email || existing.email || '').trim().toLowerCase(),
+      phone: resolvedPhone,
+      phoneCountryCode: resolvedPhoneCountryCode,
+      phoneLocalNumber: resolvedPhone,
+      roleInCompany: String(nextData.roleInCompany ?? existing.roleInCompany ?? '').trim(),
       businessType: nextData.businessType ?? existing.businessType ?? '',
       businessName: nextData.businessName ?? existing.businessName ?? '',
       country: nextData.country ?? existing.country ?? '',
@@ -3533,6 +4163,105 @@ function App() {
     return { ok: true, data: response.data }
   }
 
+  const refreshClientWorkspaceArtifactsFromBackend = async ({ authorizationToken = '' } = {}) => {
+    if (!isAuthenticated) return { ok: false }
+    if (isAdminView && !isImpersonatingClient) return { ok: false }
+
+    const token = String(authorizationToken || authUser?.firebaseIdToken || '').trim()
+    const normalizedScopedEmail = String(scopedClientEmail || '').trim().toLowerCase()
+    if (!token || !normalizedScopedEmail) return { ok: false }
+
+    const response = await fetchClientWorkspaceFromBackend({
+      authorizationToken: token,
+    })
+    if (!response.ok || !response.data || typeof response.data !== 'object') {
+      return { ok: false }
+    }
+
+    const fetchedWorkspace = response.data.workspace && typeof response.data.workspace === 'object'
+      ? response.data.workspace
+      : {}
+    const existingWorkspaceCache = getClientWorkspaceCache(normalizedScopedEmail) || {}
+    const nextWorkspace = {
+      ...existingWorkspaceCache,
+      ...fetchedWorkspace,
+      documents: fetchedWorkspace.documents && typeof fetchedWorkspace.documents === 'object'
+        ? fetchedWorkspace.documents
+        : existingWorkspaceCache.documents,
+      activityLog: Array.isArray(fetchedWorkspace.activityLog)
+        ? fetchedWorkspace.activityLog
+        : existingWorkspaceCache.activityLog,
+      notifications: Array.isArray(fetchedWorkspace.notifications)
+        ? fetchedWorkspace.notifications
+        : (Array.isArray(existingWorkspaceCache.notifications) ? existingWorkspaceCache.notifications : []),
+    }
+
+    setClientWorkspaceCache(normalizedScopedEmail, nextWorkspace)
+
+    const fallbackFirstName = authUser?.fullName?.trim()?.split(/\s+/)?.[0] || 'Client'
+    const documents = readClientDocuments(normalizedScopedEmail, authUser?.fullName || fallbackFirstName)
+    setExpenseDocuments(ensureFolderStructuredRecords(documents.expenses, 'expenses'))
+    setSalesDocuments(ensureFolderStructuredRecords(documents.sales, 'sales'))
+    setBankStatementDocuments(ensureFolderStructuredRecords(documents.bankStatements, 'bankStatements'))
+    setExpenseClassOptions(normalizeClassOptions(documents.expenseClassOptions))
+    setSalesClassOptions(normalizeClassOptions(documents.salesClassOptions))
+    setUploadHistoryRecords(documents.uploadHistory)
+    setResolvedDocumentRecords(documents.resolvedDocuments)
+    setClientActivityRecords(readClientActivityLogEntries(normalizedScopedEmail))
+    setUserNotifications(
+      mergeClientNotifications(
+        readClientNotificationInbox(normalizedScopedEmail),
+        mapNotificationRecordsToClientEntries(nextWorkspace.notifications, readClientNotificationInbox(normalizedScopedEmail)),
+      ),
+    )
+
+    return { ok: true, data: response.data }
+  }
+
+  const syncClientNotificationReadStateToBackend = async ({
+    nextNotifications = [],
+    authorizationToken = '',
+  } = {}) => {
+    const token = String(authorizationToken || authUser?.firebaseIdToken || '').trim()
+    const normalizedScopedEmail = String(scopedClientEmail || '').trim().toLowerCase()
+    if (!token || !normalizedScopedEmail || isImpersonatingClient || currentUserRole !== 'client') {
+      return { ok: false }
+    }
+
+    const workspaceCache = getClientWorkspaceCache(normalizedScopedEmail) || {}
+    const notificationPayload = (Array.isArray(nextNotifications) ? nextNotifications : [])
+      .map((entry) => normalizeClientNotificationEntry(entry))
+      .filter(Boolean)
+      .map((entry) => ({
+        id: entry.id,
+        type: entry.type || 'info',
+        title: entry.title || '',
+        body: entry.body || '',
+        message: entry.body || entry.message || '',
+        sentAtIso: entry.sentAtIso || '',
+        read: Boolean(entry.read),
+        forceDelivery: Boolean(entry.forceDelivery),
+        priority: entry.priority || 'normal',
+        link: entry.link || '',
+        linkPage: entry.linkPage || '',
+        categoryId: entry.categoryId || '',
+        folderId: entry.folderId || '',
+        fileId: entry.fileId || '',
+        documentId: entry.documentId || '',
+      }))
+
+    setClientWorkspaceCache(normalizedScopedEmail, {
+      notifications: notificationPayload,
+    })
+
+    return patchClientWorkspaceToBackend({
+      authorizationToken: token,
+      workspacePayload: {
+        notifications: notificationPayload,
+      },
+    })
+  }
+
   useEffect(() => {
     if (!isAuthenticated) return
     const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
@@ -3540,6 +4269,8 @@ function App() {
 
     let supportRefreshTimer = null
     let dashboardRefreshTimer = null
+    let workspaceRefreshTimer = null
+    void refreshSupportStateFromBackend()
     const scheduleSupportRefresh = () => {
       if (supportRefreshTimer) return
       supportRefreshTimer = window.setTimeout(() => {
@@ -3552,6 +4283,13 @@ function App() {
       dashboardRefreshTimer = window.setTimeout(() => {
         dashboardRefreshTimer = null
         void refreshClientDashboardOverview({ authorizationToken })
+      }, 300)
+    }
+    const scheduleClientWorkspaceRefresh = () => {
+      if (workspaceRefreshTimer) return
+      workspaceRefreshTimer = window.setTimeout(() => {
+        workspaceRefreshTimer = null
+        void refreshClientWorkspaceArtifactsFromBackend({ authorizationToken })
       }, 300)
     }
 
@@ -3582,15 +4320,32 @@ function App() {
         }
 
         if (
+          isAdminView
+          && !isImpersonatingClient
+          && eventType === 'client.workspace.updated'
+        ) {
+          window.dispatchEvent(new Event('kiamina:admin-client-management-sync'))
+          window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+        }
+
+        if (
           !isImpersonatingClient
           && currentUserRole === 'client'
           && (
             eventType === 'client.dashboard.updated'
-            || eventType === 'client.workspace.updated'
             || eventType === 'client.profile.updated'
           )
         ) {
           scheduleClientDashboardRefresh()
+        }
+
+        if (
+          !isImpersonatingClient
+          && currentUserRole === 'client'
+          && eventType === 'client.workspace.updated'
+        ) {
+          scheduleClientDashboardRefresh()
+          scheduleClientWorkspaceRefresh()
         }
       },
     })
@@ -3598,6 +4353,7 @@ function App() {
     return () => {
       if (supportRefreshTimer) window.clearTimeout(supportRefreshTimer)
       if (dashboardRefreshTimer) window.clearTimeout(dashboardRefreshTimer)
+      if (workspaceRefreshTimer) window.clearTimeout(workspaceRefreshTimer)
       subscription.close()
     }
   }, [isAuthenticated, authUser?.firebaseIdToken, isAdminView, isImpersonatingClient, currentUserRole])
@@ -3608,11 +4364,13 @@ function App() {
     fallbackFullName = '',
     fallbackRole = 'client',
     authorizationToken = '',
+    signupCapture = null,
   } = {}) => {
     const normalizedFallbackUid = String(fallbackUid || '').trim()
     const normalizedFallbackEmail = String(fallbackEmail || '').trim().toLowerCase()
     const normalizedFallbackFullName = String(fallbackFullName || '').trim()
-    const normalizedFallbackRole = normalizeRole(fallbackRole, normalizedFallbackEmail)
+    const normalizedBackendFallbackRole = normalizeBackendRole(fallbackRole, normalizedFallbackEmail)
+    const normalizedFallbackRole = normalizeRole(normalizedBackendFallbackRole, normalizedFallbackEmail)
     const token = String(authorizationToken || '').trim()
     if (!token) {
       return {
@@ -3623,6 +4381,8 @@ function App() {
           email: normalizedFallbackEmail,
           role: normalizedFallbackRole,
           status: 'active',
+          adminLevel: deriveAdminLevelFromBackendRole(normalizedFallbackRole),
+          adminPermissions: [],
           firebaseIdToken: '',
         }),
       }
@@ -3635,7 +4395,10 @@ function App() {
           uid: normalizedFallbackUid,
           email: normalizedFallbackEmail,
           displayName: normalizedFallbackFullName,
-          roles: [normalizedFallbackRole],
+          roles: [normalizedBackendFallbackRole],
+          signupCapture: hasSignupCapturePayloadValues(signupCapture)
+            ? normalizeSignupCapturePayload(signupCapture)
+            : undefined,
         })
       }
       const response = await apiFetch('/api/users/me', {
@@ -3653,6 +4416,8 @@ function App() {
             email: normalizedFallbackEmail,
             role: normalizedFallbackRole,
             status: 'active',
+            adminLevel: deriveAdminLevelFromBackendRole(normalizedFallbackRole),
+            adminPermissions: [],
             firebaseIdToken: token,
           }),
         }
@@ -3681,6 +4446,19 @@ function App() {
           email: resolvedEmail,
           role: resolvedRole,
           status: String(payload?.status || 'active').trim().toLowerCase() || 'active',
+          adminLevel: String(payload?.adminAccess?.adminLevel || '').trim() || deriveAdminLevelFromBackendRole(resolvedRole),
+          adminPermissions: Array.isArray(payload?.adminAccess?.adminPermissions)
+            ? payload.adminAccess.adminPermissions
+            : [],
+          adminSecurityPreferences: payload?.adminDashboard?.securityPreferences && typeof payload.adminDashboard.securityPreferences === 'object'
+            ? payload.adminDashboard.securityPreferences
+            : (payload?.adminSecurityPreferences && typeof payload.adminSecurityPreferences === 'object'
+              ? payload.adminSecurityPreferences
+              : undefined),
+          mustChangePassword: Boolean(payload?.adminAccess?.mustChangePassword),
+          roleInCompany: String(payload?.adminProfile?.jobTitle || '').trim(),
+          department: String(payload?.adminProfile?.department || '').trim(),
+          phoneNumber: String(payload?.adminProfile?.phone || '').trim(),
           firebaseIdToken: token,
         }),
       }
@@ -3693,6 +4471,8 @@ function App() {
           email: normalizedFallbackEmail,
           role: normalizedFallbackRole,
           status: 'active',
+          adminLevel: deriveAdminLevelFromBackendRole(normalizedFallbackRole),
+          adminPermissions: [],
           firebaseIdToken: token,
         }),
       }
@@ -3723,6 +4503,7 @@ function App() {
     setIsAuthenticated(true)
     setShowAuth(false)
     setShowAdminLogin(false)
+    setAdminSetupSuccessState(null)
     setAdminSetupToken('')
     setIsAdminSetupRouteActive(false)
     setImpersonationSession(null)
@@ -3981,6 +4762,7 @@ function App() {
     firstName = '',
     lastName = '',
     otherNames = '',
+    signupCapture = null,
   } = {}) => {
     const token = String(authorizationToken || '').trim()
     if (!token) return { ok: false, status: 0 }
@@ -3990,8 +4772,12 @@ function App() {
       lastName: sanitizeProfileNameFieldForBackend(lastName),
       otherNames: sanitizeProfileNameFieldForBackend(otherNames),
     }
+    const normalizedSignupCapture = normalizeSignupCapturePayload(signupCapture)
+    if (hasSignupCapturePayloadValues(normalizedSignupCapture)) {
+      payload.signupCapture = normalizedSignupCapture
+    }
 
-    if (!payload.firstName && !payload.lastName && !payload.otherNames) {
+    if (!payload.firstName && !payload.lastName && !payload.otherNames && !payload.signupCapture) {
       return { ok: false, status: 0 }
     }
 
@@ -4041,28 +4827,35 @@ function App() {
     }
   }
 
-  const handleSocialLogin = async (provider, providedNameDraft = null, options = {}) => {
+  const handleSocialLogin = async (provider, providedNameDraft = null) => {
     const normalizedProvider = String(provider || '').trim().toLowerCase()
     logGoogleAppDebug('handleSocialLogin:start', {
       provider: normalizedProvider,
       authMode,
       hasProvidedNameDraft: Boolean(providedNameDraft),
-      hasGoogleContext: Boolean(options?.googleContext),
+      hasGoogleContext: Boolean(pendingGoogleSocialAuth),
     })
     if (normalizedProvider !== 'google') {
       showToast('error', 'Authentication failed. Please try again.')
       return { ok: false, message: 'Authentication failed. Please try again.' }
     }
 
-    const resolvedMode = String(options?.modeOverride || authMode || 'login').trim().toLowerCase()
+    const resolvedMode = String(authMode || 'login').trim().toLowerCase()
     const isSignupMode = resolvedMode === 'signup'
+    const signupCapture = isSignupMode
+      ? buildSignupCapturePayload({
+          signupSource: `${normalizedProvider || 'social'}-signup`,
+          capturePage: 'signup',
+          capturePath: '/signup',
+        })
+      : null
     try {
       const isSubmittedFromPrompt = (
         typeof providedNameDraft === 'string'
         || (providedNameDraft && typeof providedNameDraft === 'object')
       )
 
-      let googleContext = options?.googleContext || null
+      let googleContext = null
 
       if (isSubmittedFromPrompt) {
         googleContext = pendingGoogleSocialAuth
@@ -4070,15 +4863,12 @@ function App() {
           setPendingGoogleSocialAuth(null)
           return { ok: false, message: 'Google session expired. Please continue with Google again.' }
         }
-      } else if (!googleContext) {
+      } else {
         const redirectResult = await startGoogleSignInRedirect({
           intent: isSignupMode ? 'signup' : 'login',
         })
         if (!redirectResult.ok) {
           return { ok: false, message: redirectResult.message || 'Unable to authenticate with Google right now.' }
-        }
-        if (redirectResult.pendingRedirect) {
-          return { ok: true, pendingRedirect: true }
         }
         googleContext = {
           provider: 'google',
@@ -4265,6 +5055,7 @@ function App() {
         fallbackFullName: resolvedFullName,
         fallbackRole,
         authorizationToken: googleContext.idToken,
+        signupCapture,
       })
       logGoogleAppDebug('hydrate-user', {
         ok: hydratedProfile.ok,
@@ -4293,6 +5084,7 @@ function App() {
           firstName: effectiveProfile.firstName,
           lastName: effectiveProfile.lastName,
           otherNames: effectiveProfile.otherNames,
+          signupCapture,
         })
 
         if (isSignupMode) {
@@ -4303,6 +5095,12 @@ function App() {
             verificationPending: true,
             data: {
               ...defaultOnboardingData,
+              firstName: effectiveProfile.firstName || '',
+              lastName: effectiveProfile.lastName || '',
+              otherNames: effectiveProfile.otherNames || '',
+              email: user.email || '',
+              phone: '',
+              roleInCompany: '',
               businessName: '',
               primaryContact: user.fullName || resolvedFullName,
             },
@@ -4340,66 +5138,6 @@ function App() {
       }
     }
   }
-
-  useEffect(() => {
-    if (isAuthenticated || googleRedirectResumeAttemptedRef.current) return undefined
-
-    googleRedirectResumeAttemptedRef.current = true
-    let isDisposed = false
-
-    const resumeGoogleRedirect = async () => {
-      let redirectResult = null
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        redirectResult = await consumeGoogleSignInRedirectResult()
-        logGoogleAppDebug('resumeGoogleRedirect:attempt', {
-          attempt: attempt + 1,
-          hasResult: Boolean(redirectResult?.hasResult),
-          pendingRedirect: Boolean(redirectResult?.pendingRedirect),
-          intent: redirectResult?.intent || '',
-          message: redirectResult?.message || '',
-        })
-        if (isDisposed) return
-        if (redirectResult?.hasResult || !redirectResult?.pendingRedirect) {
-          break
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 500))
-      }
-      if (isDisposed || !redirectResult?.hasResult) return
-
-      const redirectMode = redirectResult.intent === 'signup' ? 'signup' : 'login'
-      const googleContext = {
-        provider: 'google',
-        idToken: redirectResult.idToken,
-        uid: redirectResult.uid,
-        email: redirectResult.email,
-        profile: normalizeClientNameDraft({
-          fullName: redirectResult.fullName,
-          firstName: redirectResult.firstName,
-          lastName: redirectResult.lastName,
-          otherNames: redirectResult.otherNames,
-        }),
-      }
-
-      setShowAuth(true)
-      setShowAdminLogin(false)
-      setIsPublicSiteView(false)
-      setAuthMode(redirectMode)
-
-      const result = await handleSocialLogin('google', null, {
-        googleContext,
-        modeOverride: redirectMode,
-      })
-      if (isDisposed) return
-      if (!result?.ok && !result?.requiresProfileCompletion) {
-        showToast('error', result?.message || 'Unable to authenticate with Google right now. Please try again.')
-      }
-    }
-
-    void resumeGoogleRedirect()
-    return () => {
-      isDisposed = true
-    }
-  }, [isAuthenticated])
 
   const handleLogin = async ({ email, password, remember }) => {
     const loginFailureMessage = 'Incorrect email or password'
@@ -4531,6 +5269,58 @@ function App() {
       }
     }
 
+    const persistedAdminAccount = getSavedAccounts().find((account) => (
+      String(account?.email || '').trim().toLowerCase() === normalizedEmail
+      && normalizeRole(account?.role, account?.email || '') === 'admin'
+    ))
+    const normalizedPersistedAdminAccount = persistedAdminAccount
+      ? normalizeAdminAccount(persistedAdminAccount)
+      : null
+    const desiredBackendAdminRole = normalizedPersistedAdminAccount
+      ? deriveBackendAdminRoleFromLevel(normalizedPersistedAdminAccount.adminLevel)
+      : 'admin'
+
+    if (normalizedPersistedAdminAccount) {
+      const upgradeResult = await registerAuthAccountRecord({
+        uid: firebaseAuthResult.uid || '',
+        email: firebaseAuthResult.email || normalizedEmail,
+        fullName: normalizedPersistedAdminAccount.fullName || normalizedEmail,
+        role: desiredBackendAdminRole,
+        provider: 'email-password',
+        status: 'active',
+      })
+      if (!upgradeResult.ok) {
+        return { ok: false, message: loginFailureMessage }
+      }
+    }
+
+    const adminAccountStatus = await fetchSocialAuthAccountStatus({
+      idToken: firebaseAuthResult.idToken,
+      provider: 'email-password',
+    })
+    const normalizedBackendAccountRole = String(adminAccountStatus?.data?.role || '').trim().toLowerCase()
+    const isBackendAdminAccount = (
+      adminAccountStatus.ok
+      && Boolean(adminAccountStatus?.data?.accountExists)
+      && (
+        normalizedBackendAccountRole === 'admin'
+        || normalizedBackendAccountRole === 'owner'
+        || normalizedBackendAccountRole === 'superadmin'
+      )
+      && String(adminAccountStatus?.data?.status || 'active').trim().toLowerCase() === 'active'
+    )
+    if (!isBackendAdminAccount) {
+      return { ok: false, message: loginFailureMessage }
+    }
+
+    if (normalizedBackendAccountRole === 'owner') {
+      const normalizedOwnerPrivateKey = String(ownerPrivateKey || '').trim()
+      const expectedOwnerPrivateKey = String(normalizedPersistedAdminAccount?.ownerPrivateKey || '').trim()
+      if (!normalizedOwnerPrivateKey || !expectedOwnerPrivateKey || normalizedOwnerPrivateKey !== expectedOwnerPrivateKey) {
+        return { ok: false, message: loginFailureMessage }
+      }
+    }
+
     const otpResult = await issueEmailOtp(normalizedEmail, 'admin-login')
     if (!otpResult.ok) {
       return { ok: false, message: otpResult.message || 'Unable to send OTP right now.' }
@@ -4544,6 +5334,7 @@ function App() {
       firebaseIdToken: firebaseAuthResult.idToken,
       uid: firebaseAuthResult.uid,
       ownerPrivateKey: String(ownerPrivateKey || '').trim(),
+      backendRole: normalizedBackendAccountRole || desiredBackendAdminRole,
       previewOtp: otpResult.previewOtp || '',
       dispatchQueued: otpResult.dispatchQueued !== false,
       deliveryError: otpResult.deliveryError || '',
@@ -4584,6 +5375,7 @@ function App() {
     setAuthUser(null)
     setImpersonationSession(null)
     setAdminImpersonationSession(null)
+    setAdminSetupSuccessState(null)
     setPendingGoogleSocialAuth(null)
     setPendingImpersonationClient(null)
     persistImpersonationSession(null)
@@ -4612,7 +5404,6 @@ function App() {
     acknowledgedPermanentDeletion = false,
   } = {}) => {
     const normalizedEmail = String(authUser?.email || '').trim().toLowerCase()
-    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
     if (!normalizedEmail || currentUserRole !== 'client') {
       return { ok: false, message: 'Unable to delete this account.' }
     }
@@ -4623,39 +5414,34 @@ function App() {
     const deletionReason = String(reason || '').trim() || 'Not provided'
     const deletionReasonDetail = String(reasonOther || '').trim()
     const retentionResponse = String(retentionIntent || '').trim() || 'Not provided'
-    const canUseBackendDeletion = Boolean(authorizationToken)
 
-    if (canUseBackendDeletion) {
-      try {
-        const deleteUserResponse = await apiFetch('/api/users/me', {
-          method: 'DELETE',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authorizationToken}`,
-          },
-          body: JSON.stringify({
-            reason: deletionReason,
-            reasonOther: deletionReasonDetail,
-            retentionIntent: retentionResponse,
-          }),
-        })
-        if (!deleteUserResponse.ok && deleteUserResponse.status !== 404) {
-          const message = await readErrorMessageFromResponse(deleteUserResponse)
-          return { ok: false, message: message || 'Unable to delete account right now.' }
+    try {
+      const deleteUserResponse = await apiFetch('/api/users/me', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          reason: deletionReason,
+          reasonOther: deletionReasonDetail,
+          retentionIntent: retentionResponse,
+        }),
+      })
+      if (!deleteUserResponse.ok) {
+        const message = await readErrorMessageFromResponse(deleteUserResponse)
+        if (deleteUserResponse.status === 401) {
+          return { ok: false, message: message || 'Please sign in again before deleting your account.' }
         }
-      } catch {
-        return { ok: false, message: 'Unable to delete account right now.' }
+        return { ok: false, message: message || 'Unable to delete account right now.' }
       }
+    } catch {
+      return { ok: false, message: 'Unable to delete account right now.' }
     }
 
     const accounts = getSavedAccounts()
     const targetAccount = accounts.find((account) => (
       String(account?.email || '').trim().toLowerCase() === normalizedEmail
     ))
-    if (!targetAccount && !canUseBackendDeletion) {
-      return { ok: false, message: 'Account not found.' }
-    }
-
     if (targetAccount) {
       const nextAccounts = accounts.filter((account) => (
         String(account?.email || '').trim().toLowerCase() !== normalizedEmail
@@ -4668,7 +5454,7 @@ function App() {
       adminName: 'Client Self-Service',
       adminEmail: normalizedEmail,
       adminLevel: ADMIN_LEVELS.SUPER,
-      action: canUseBackendDeletion ? 'Client account deleted (backend)' : 'Client account deleted',
+      action: 'Client account deleted (backend)',
       affectedUser: targetAccount?.businessName || targetAccount?.fullName || normalizedEmail,
       details: [
         `Reason: ${deletionReason}${deletionReasonDetail ? ` (${deletionReasonDetail})` : ''}`,
@@ -4844,35 +5630,9 @@ function App() {
           .map((entry) => [entry.id, entry]),
       )
       const clientNotificationSettings = readClientNotificationSettings(normalizedEmail)
-      const mapped = unseen.map((item, index) => {
-        const notificationId = String(item?.id || `CBN-FALLBACK-${Date.now()}-${index}`).trim()
-        const title = String(item?.title || 'New Update').trim()
-        const body = String(item?.message || '').trim()
-        const composedMessage = body ? `${title}: ${body}` : title
-        const sentAtIso = String(item?.sentAtIso || new Date().toISOString()).trim()
-        const normalizedType = String(item?.type || 'info').trim().toLowerCase()
-        const allowedLinkPage = APP_PAGE_IDS.includes(String(item?.linkPage || '').trim())
-          ? String(item.linkPage).trim()
-          : 'dashboard'
-        const linkCategoryId = CLIENT_DOCUMENT_PAGE_IDS.includes(allowedLinkPage) ? allowedLinkPage : ''
-        return {
-          id: notificationId,
-          type: normalizedType || 'info',
-          message: composedMessage,
-          timestamp: formatClientDocumentTimestamp(sentAtIso),
-          read: Boolean(item?.read || inboxById.get(notificationId)?.read),
-          forceDelivery: (
-            item?.forceDelivery === true
-            || String(item?.forceDelivery || '').trim().toLowerCase() === 'true'
-          ),
-          priority: String(item?.priority || 'normal').trim().toLowerCase(),
-          linkPage: allowedLinkPage,
-          categoryId: String(item?.categoryId || linkCategoryId).trim(),
-          folderId: String(item?.folderId || '').trim(),
-          fileId: String(item?.fileId || '').trim(),
-          documentId: String(item?.documentId || '').trim(),
-        }
-      }).filter((entry) => isClientNotificationEnabled(entry, clientNotificationSettings))
+      const mapped = unseen
+        .map((item, index) => mapNotificationRecordToClientEntry(item, index, inboxById))
+        .filter((entry) => entry && isClientNotificationEnabled(entry, clientNotificationSettings))
       if (mapped.length === 0) return
 
       const freshUnread = mapped.filter((entry) => !entry.read && !inboxById.has(entry.id))
@@ -4920,6 +5680,12 @@ function App() {
     const normalizedCompanyName = String(companyName || '').trim()
     const normalizedBusinessType = String(businessType || '').trim()
     const normalizedCountry = String(country || '').trim()
+    const signupCapture = buildSignupCapturePayload({
+      signupSource: 'email-signup',
+      signupLocation: normalizedCountry,
+      capturePage: 'signup',
+      capturePath: '/signup',
+    })
     if (
       !normalizedFullName
       || !email.trim()
@@ -4990,6 +5756,7 @@ function App() {
         password,
         role: 'client',
         createdAt: new Date().toISOString(),
+        signupCapture,
       },
     })
     return { ok: true, requiresOtp: true }
@@ -5127,7 +5894,7 @@ function App() {
         residentialAddress: normalizedResidentialAddress,
         ownerPrivateKey: isOwnerInvite ? normalizedOwnerPrivateKey : '',
         password,
-        role: 'admin',
+        role: deriveBackendAdminRoleFromLevel(invitedAdminLevel),
         ownerBootstrap: isOwnerBootstrapFlow,
         adminLevel: invitedAdminLevel,
         adminPermissions: invitePermissions,
@@ -5152,6 +5919,7 @@ function App() {
     if (!normalizedEmail || !normalizedCode) {
       return { ok: false, message: 'Incorrect verification code.' }
     }
+    let adminSetupSuccessPayload = null
 
     if (normalizedTransport === 'sms') {
       const smsVerifyResult = await verifySmsOtpChallengeCode({
@@ -5248,6 +6016,27 @@ function App() {
       }
 
       if (normalizedPurpose === 'signup' && fallbackRole === 'client') {
+        await syncAuthenticatedUserToBackend({
+          authorizationToken: firebaseSignupResult.idToken,
+          uid: firebaseSignupResult.uid || '',
+          email: pendingSignup.email,
+          displayName: pendingSignupFullName,
+          roles: [fallbackRole],
+          signupCapture: normalizeSignupCapturePayload(pendingSignup.signupCapture),
+        })
+        await persistClientProfileToBackend({
+          authorizationToken: firebaseSignupResult.idToken,
+          profile: {
+            firstName: pendingSignupNameDraft.firstName,
+            lastName: pendingSignupNameDraft.lastName,
+            otherNames: pendingSignupNameDraft.otherNames,
+            phone: pendingSignup.phoneNumber || '',
+            businessType: pendingSignup.businessType || '',
+            businessName: pendingSignup.companyName || '',
+            country: pendingSignup.country || '',
+            signupCapture: pendingSignup.signupCapture || {},
+          },
+        })
         syncProfileToSettings(pendingSignupFullName, pendingSignup.email, pendingSignupNameDraft)
         setClientWorkspaceCache(pendingSignup.email, {
           settingsProfile: {
@@ -5260,6 +6049,7 @@ function App() {
             phone: pendingSignup.phoneNumber || '',
             phoneCountryCode: '+234',
             phoneLocalNumber: pendingSignup.phoneNumber || '',
+            roleInCompany: pendingSignup.roleInCompany || '',
             businessType: pendingSignup.businessType || '',
             businessName: pendingSignup.companyName || '',
             country: pendingSignup.country || '',
@@ -5272,6 +6062,12 @@ function App() {
           verificationPending: true,
           data: {
             ...defaultOnboardingData,
+            firstName: pendingSignupNameDraft.firstName,
+            lastName: pendingSignupNameDraft.lastName,
+            otherNames: pendingSignupNameDraft.otherNames,
+            email: pendingSignup.email,
+            phone: pendingSignup.phoneNumber || '',
+            roleInCompany: pendingSignup.roleInCompany || '',
             businessType: pendingSignup.businessType || '',
             businessName: pendingSignup.companyName || '',
             country: pendingSignup.country || '',
@@ -5364,6 +6160,12 @@ function App() {
           verificationPending: true,
           data: {
             ...defaultOnboardingData,
+            firstName: pendingSignupNameDraft.firstName,
+            lastName: pendingSignupNameDraft.lastName,
+            otherNames: pendingSignupNameDraft.otherNames,
+            email: user.email || '',
+            phone: pendingSignup.phoneNumber || '',
+            roleInCompany: pendingSignup.roleInCompany || '',
             businessName: '',
             primaryContact: user.fullName || pendingSignupFullName,
           },
@@ -5451,6 +6253,15 @@ function App() {
             message: 'Owner bootstrap is disabled because an admin account already exists.',
           })
         }
+
+        adminSetupSuccessPayload = {
+          fullName: user.fullName || pendingSignupFullName,
+          email: String(pendingSignup.email || user.email || '').trim().toLowerCase(),
+          roleInCompany: String(pendingSignup.roleInCompany || user.roleInCompany || '').trim(),
+          department: String(pendingSignup.department || user.department || '').trim(),
+          adminLevel: normalizeAdminLevel(pendingSignup.adminLevel || user.adminLevel || ADMIN_LEVELS.AREA_ACCOUNTANT),
+          isOwnerBootstrap: Boolean(pendingSignup?.ownerBootstrap),
+        }
       }
 
       if (user.role === 'client' && firebaseSignupResult.idToken) {
@@ -5467,7 +6278,9 @@ function App() {
         return { ok: false, message: identityResult.message || 'Unable to verify token.' }
       }
 
-      const fallbackRole = normalizedPurpose === 'admin-login' ? 'admin' : 'client'
+      const fallbackRole = normalizedPurpose === 'admin-login'
+        ? normalizeBackendRole(String(otpChallenge?.backendRole || '').trim() || 'admin', normalizedEmail)
+        : 'client'
       const resolvedEmail = identityResult.email || normalizedEmail
       const registerResult = await registerAuthAccountRecord({
         uid: identityResult.uid || '',
@@ -5536,6 +6349,29 @@ function App() {
     }
 
     setOtpChallenge(null)
+    if (adminSetupSuccessPayload) {
+      setAdminSetupSuccessState(adminSetupSuccessPayload)
+      setShowAuth(false)
+      setShowAdminLogin(false)
+      setIsPublicSiteView(false)
+      setAdminSetupToken('')
+      setIsAdminSetupRouteActive(true)
+      setPublicSitePage('home')
+      setActiveFolderRoute(null)
+      setActivePage(ADMIN_DEFAULT_PAGE)
+      try {
+        history.replaceState({}, '', '/admin/setup')
+      } catch {
+        // ignore
+      }
+      showToast(
+        'success',
+        adminSetupSuccessPayload.isOwnerBootstrap
+          ? 'Owner account created successfully.'
+          : 'Admin account created successfully.',
+      )
+      return { ok: true, adminSetupCompleted: true }
+    }
     showToast('success', 'Verification successful.')
     return { ok: true }
   }
@@ -6255,6 +7091,19 @@ function App() {
     })
   }
 
+  const handleNotificationSettingsChange = (nextSettings = {}) => {
+    const targetEmail = String(scopedClientEmail || '').trim().toLowerCase()
+    const normalizedSettings = targetEmail
+      ? persistScopedNotificationSettings(targetEmail, nextSettings)
+      : normalizeClientNotificationSettings(nextSettings)
+    setNotificationSettingsSnapshot((previous) => {
+      if (JSON.stringify(previous || {}) === JSON.stringify(normalizedSettings || {})) {
+        return previous
+      }
+      return normalizedSettings
+    })
+  }
+
   const handleSettingsProfileChange = async (nextProfile = {}) => {
     const normalizedProfile = normalizeSettingsProfile(nextProfile)
     const targetEmail = String(scopedClientEmail || normalizedProfile.email || '').trim().toLowerCase()
@@ -6307,13 +7156,29 @@ function App() {
     return { ok: true, profile: normalizedProfile }
   }
 
-  const handleSkipOnboarding = () => {
-    persistOnboardingState({
+  const handleSkipOnboarding = async () => {
+    const nextSkippedState = {
       ...onboardingState,
       skipped: true,
       completed: false,
       verificationPending: true,
-    }, scopedClientEmail)
+    }
+    persistOnboardingState(nextSkippedState, scopedClientEmail)
+    const authorizationToken = String(authUser?.firebaseIdToken || '').trim()
+    if (!isImpersonatingClient && currentUserRole === 'client' && authorizationToken) {
+      await patchClientWorkspaceToBackend({
+        authorizationToken,
+        workspacePayload: {
+          onboardingState: mergeOnboardingStates({
+            savedState: onboardingState,
+            fetchedState: nextSkippedState,
+            settingsProfile: readScopedSettingsProfile(scopedClientEmail),
+            fallbackEmail: scopedClientEmail,
+            fallbackFullName: authUser?.fullName || '',
+          }),
+        },
+      })
+    }
     if (isImpersonatingClient) {
       logAdminActivity({
         adminName: impersonationSession?.adminName || authUser?.fullName || 'Admin User',
@@ -6332,7 +7197,8 @@ function App() {
       settingsDocs: readScopedVerificationDocs(scopedClientEmail),
       settingsProfile: readScopedSettingsProfile(scopedClientEmail),
     })
-    const verificationPending = finalVerificationProgress.stepsCompleted < 3
+    // const verificationPending = finalVerificationProgress.stepsCompleted < 3
+    const verificationPending = finalVerificationProgress.stepsCompleted < 2
 
     persistOnboardingState({
       currentStep: CLIENT_ONBOARDING_TOTAL_STEPS,
@@ -6353,21 +7219,31 @@ function App() {
       ? (impersonationSession?.clientName || existing.fullName || '')
       : (authUser?.fullName || existing.fullName || '')
     const existingNameParts = resolveSettingsProfileNameParts(existing)
+    const resolvedOnboardingNames = {
+      firstName: String(finalData.firstName || existingNameParts.firstName || '').trim(),
+      lastName: String(finalData.lastName || existingNameParts.lastName || '').trim(),
+      otherNames: String(finalData.otherNames || existingNameParts.otherNames || '').trim(),
+    }
+    const resolvedFullName = buildSettingsProfileFullName(resolvedOnboardingNames)
+      || String(finalData.primaryContact || effectiveFullName).trim()
+      || effectiveFullName
+    const resolvedPhone = sanitizeClientPhoneLocalNumber(
+      Object.prototype.hasOwnProperty.call(finalData, 'phone')
+        ? finalData.phone
+        : (existing.phoneLocalNumber || existing.phone || ''),
+    )
+    const resolvedPhoneCountryCode = String(existing.phoneCountryCode || '+234').trim() || '+234'
     const merged = {
       ...existing,
-      fullName: effectiveFullName,
-      firstName: existingNameParts.firstName || String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean)[0] || '',
-      lastName: existingNameParts.lastName || (
-        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 1
-          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(-1)[0]
-          : ''
-      ),
-      otherNames: existingNameParts.otherNames || (
-        String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).length > 2
-          ? String(effectiveFullName || '').trim().split(/\s+/).filter(Boolean).slice(1, -1).join(' ')
-          : ''
-      ),
-      email: scopedClientEmail || existing.email || '',
+      fullName: resolvedFullName,
+      firstName: resolvedOnboardingNames.firstName,
+      lastName: resolvedOnboardingNames.lastName,
+      otherNames: resolvedOnboardingNames.otherNames,
+      email: String(scopedClientEmail || finalData.email || existing.email || '').trim().toLowerCase(),
+      phone: resolvedPhone,
+      phoneCountryCode: resolvedPhoneCountryCode,
+      phoneLocalNumber: resolvedPhone,
+      roleInCompany: String(finalData.roleInCompany ?? existing.roleInCompany ?? '').trim(),
       businessType: finalData.businessType,
       businessName: finalData.businessName,
       country: finalData.country,
@@ -6398,7 +7274,7 @@ function App() {
       await persistClientOnboardingToBackend({
         authorizationToken,
         email: scopedClientEmail || authUser?.email || '',
-        fullName: authUser?.fullName || finalData.primaryContact || '',
+        fullName: merged.fullName || authUser?.fullName || finalData.primaryContact || '',
         onboardingData: finalData,
         defaultLandingPage,
       })
@@ -6426,8 +7302,10 @@ function App() {
     if (!isIdentityVerificationComplete) {
       routeClientToVerificationSettings({
         replace: true,
-        section: 'identity',
-        toastMessage: 'Complete identity verification before uploading documents.',
+        // section: 'identity',
+        section: 'business-profile',
+        // toastMessage: 'Complete identity verification before uploading documents.',
+        toastMessage: 'Complete business verification before uploading documents.',
       })
       return
     }
@@ -6633,7 +7511,8 @@ function App() {
     individualDetails = {},
   }) => {
     if (!isIdentityVerificationComplete) {
-      return { ok: false, message: 'Complete identity verification before uploading documents.' }
+      // return { ok: false, message: 'Complete identity verification before uploading documents.' }
+      return { ok: false, message: 'Complete business verification before uploading documents.' }
     }
     if (!category) return { ok: false, message: 'Please select a document category.' }
     if (!folderName?.trim()) return { ok: false, message: 'Please provide a folder name.' }
@@ -6973,6 +7852,7 @@ function App() {
           type: extension || 'FILE',
           categoryId,
           category: title,
+          timestampIso: timestamp,
           date: formatClientDocumentTimestamp(timestamp),
           user: uploadedBy || authUser?.fullName || clientFirstName || 'Client User',
           ownerEmail: String(ownerEmail || normalizedScopedClientEmail || scopedClientEmail || authUser?.email || '').trim().toLowerCase(),
@@ -7085,7 +7965,8 @@ function App() {
       case 'resolved-documents':
         return (
           <ClientResolvedDocumentsPage
-            clientEmail={normalizedScopedClientEmail}
+            records={resolvedDocumentRecords}
+            onRecordsChange={setResolvedDocumentRecords}
             downloadBusinessName={downloadBusinessName}
             showToast={showClientToast}
             globalSearchTerm={dashboardSearchTerm}
@@ -7111,6 +7992,7 @@ function App() {
         )
       case 'settings':
         return (
+          // identityApprovedByAdmin={identityVerificationApprovedByAdmin}
           <ClientSettingsPage
             showToast={showClientToast}
             profilePhoto={profilePhoto}
@@ -7123,15 +8005,16 @@ function App() {
             clientEmail={normalizedScopedClientEmail}
             clientName={isImpersonatingClient ? (impersonationSession?.clientName || authUser?.fullName || '') : (authUser?.fullName || '')}
             verificationState={dashboardVerificationState}
-            identityApprovedByAdmin={identityVerificationApprovedByAdmin}
             businessApprovedByAdmin={businessVerificationApprovedByAdmin}
             clientTeamRole={isImpersonatingClient ? 'owner' : (authUser?.clientTeamRole || 'owner')}
             initialSettingsProfile={settingsProfileSnapshot}
             initialVerificationDocs={verificationDocsSnapshot}
             initialAccountSettings={accountSettingsSnapshot}
+            initialNotificationSettings={notificationSettingsSnapshot}
             onSettingsProfileChange={handleSettingsProfileChange}
             onVerificationDocsChange={handleSettingsVerificationDocsChange}
             onAccountSettingsChange={handleAccountSettingsChange}
+            onNotificationSettingsChange={handleNotificationSettingsChange}
             verificationLockEnforced={isClientVerificationLocked}
             canManageAccountSecurity={!isImpersonatingClient && !isAdminView}
             onRequestPasswordResetLink={issuePasswordResetLink}
@@ -7163,7 +8046,7 @@ function App() {
     : null
   const adminLoginOtpChallenge = otpChallenge?.purpose === 'admin-login' ? otpChallenge : null
   const adminSetupOtpChallenge = otpChallenge?.purpose === 'admin-setup' ? otpChallenge : null
-  const shouldShowAdminSetupScreen = Boolean(isAdminSetupRouteActive && !isAuthenticated)
+  const shouldShowAdminSetupScreen = Boolean(isAdminSetupRouteActive && (!isAuthenticated || adminSetupSuccessState))
 
   const needsOnboarding = isAuthenticated
     && (isImpersonatingClient || !isAdminView)
@@ -7292,12 +8175,14 @@ function App() {
         <AdminAccountSetup
           invite={activeAdminInvite}
           ownerBootstrapStatus={ownerBootstrapStatus}
+          successState={adminSetupSuccessState}
           otpChallenge={adminSetupOtpChallenge}
           onCreateAccount={handleAdminSetupCreateAccount}
           onVerifyOtp={handleVerifyOtp}
           onResendOtp={handleResendOtp}
           onCancelOtp={handleCancelOtp}
-          onReturnToAdminLogin={() => navigateToAdminLogin({ replace: true })}
+          onContinueToAdmin={handleContinueToAdminFromSetup}
+          onReturnToAdminLogin={handleReturnToAdminLoginFromSetup}
         />
       ) : !isAuthenticated ? (
         showAdminLogin ? (
@@ -7307,6 +8192,7 @@ function App() {
             onVerifyOtp={handleVerifyOtp}
             onResendOtp={handleResendOtp}
             onCancelOtp={handleCancelOtp}
+            onStartOwnerSetup={() => navigateToAdminSetup()}
             onSwitchToClientLogin={() => navigateToAuth('login', { replace: true })}
           />
         ) : showAuth ? (
@@ -7338,6 +8224,7 @@ function App() {
             onGetStarted={() => handlePublicGetStarted()}
             onLogin={() => navigateToAuth('login')}
             onOpenAdminPortal={() => navigateToAdminLogin()}
+            onOpenOwnerSetup={() => navigateToAdminSetup()}
             isAuthenticated={false}
             onOpenDashboard={() => handleSetActivePage('dashboard')}
           />
@@ -7349,6 +8236,7 @@ function App() {
           onGetStarted={() => handleSetActivePage('dashboard')}
           onLogin={() => handleSetActivePage('dashboard')}
           onOpenAdminPortal={() => navigateToAdminLogin()}
+          onOpenOwnerSetup={() => navigateToAdminSetup()}
           isAuthenticated
           onOpenDashboard={() => handleSetActivePage('dashboard')}
         />
@@ -7465,16 +8353,22 @@ function App() {
                 profilePhoto={isImpersonatingClient ? null : profilePhoto}
                 clientFirstName={clientFirstName}
                 activePage={activePage}
+                showDashboardGreeting={clientDashboardOverview?.dashboard?.showGreeting !== false}
                 isIdentityVerified={isIdentityVerificationComplete}
                 notifications={userNotifications}
                 onOpenSidebar={() => setIsMobileSidebarOpen(true)}
                 onOpenProfile={() => handleSetActivePage('settings')}
                 onNotificationClick={(notification) => {
-                  setUserNotifications((prev) => prev.map((item) => (
-                    item.id === notification.id ? { ...item, read: true } : item
-                  )))
+                  let nextNotifications = []
+                  setUserNotifications((prev) => {
+                    nextNotifications = prev.map((item) => (
+                      item.id === notification.id ? { ...item, read: true } : item
+                    ))
+                    return nextNotifications
+                  })
                   markClientBriefNotificationRead(normalizedScopedClientEmail, notification?.id)
                   markClientNotificationInboxRead(normalizedScopedClientEmail, notification?.id)
+                  void syncClientNotificationReadStateToBackend({ nextNotifications })
                   const resolvedLocation = resolveNotificationDocumentLocation(notification)
                   if (resolvedLocation.categoryId && resolvedLocation.folderId) {
                     handleOpenFolderRoute(resolvedLocation.categoryId, resolvedLocation.folderId, { replace: true })
@@ -7488,14 +8382,24 @@ function App() {
                     handleSetActivePage(notification.linkPage, { replace: true })
                     return
                   }
+                  const linkedPage = resolveNotificationLinkPage(notification)
+                  if (linkedPage) {
+                    handleSetActivePage(linkedPage, { replace: true })
+                    return
+                  }
                   if (notification.documentId || notification.fileId) {
                     handleSetActivePage('upload-history', { replace: true })
                   }
                 }}
                 onMarkAllRead={() => {
-                  setUserNotifications(prev => prev.map(n => ({ ...n, read: true })))
+                  let nextNotifications = []
+                  setUserNotifications(prev => {
+                    nextNotifications = prev.map(n => ({ ...n, read: true }))
+                    return nextNotifications
+                  })
                   markAllClientBriefNotificationsRead(normalizedScopedClientEmail)
                   markAllClientNotificationInboxRead(normalizedScopedClientEmail)
+                  void syncClientNotificationReadStateToBackend({ nextNotifications })
                 }}
                 isImpersonationMode={isImpersonatingClient}
                 roleLabel={isImpersonatingClient ? 'Client (Admin View)' : 'Client'}
@@ -7504,7 +8408,6 @@ function App() {
                 onSearchTermChange={handleDashboardSearchTermChange}
                 onSearchSubmit={handleDashboardSearchSubmit}
                 searchPlaceholder="Search folders, files, upload history, and activities..."
-                searchSuggestions={dashboardSearchSuggestions}
                 searchState={dashboardSearchState}
                 searchResults={dashboardSearchResults}
                 onSearchResultSelect={handleDashboardSearchResultSelect}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowLeft, CheckCircle2, Loader2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CheckCircle2, Crown, Loader2, Mail, ShieldCheck, Sparkles } from 'lucide-react'
 import {
   ADMIN_LEVELS,
   ADMIN_PERMISSION_DEFINITIONS,
@@ -38,14 +38,28 @@ const formatPhoneNumber = (countryCode = '+234', number = '') => {
   return `${normalizedCode} ${normalizedNumber}`.trim()
 }
 
+const OWNER_SETUP_STEPS = [
+  'Create the primary owner identity',
+  'Secure the workspace with a private key',
+  'Verify the email OTP and enter the admin workspace',
+]
+
+const INVITED_ADMIN_SETUP_STEPS = [
+  'Confirm invite details and role assignment',
+  'Complete profile and verification requirements',
+  'Verify the email OTP to activate admin access',
+]
+
 function AdminAccountSetup({
   invite,
   ownerBootstrapStatus,
+  successState,
   otpChallenge,
   onCreateAccount,
   onVerifyOtp,
   onResendOtp,
   onCancelOtp,
+  onContinueToAdmin,
   onReturnToAdminLogin,
 }) {
   const inviteEmail = String(invite?.email || '').trim()
@@ -101,6 +115,8 @@ function AdminAccountSetup({
       .map((permissionId) => ADMIN_PERMISSION_DEFINITIONS.find((permission) => permission.id === permissionId)?.label)
       .filter(Boolean)
   }, [invite, inviteAdminLevel, isOwnerBootstrapMode])
+  const setupSteps = isOwnerBootstrapMode ? OWNER_SETUP_STEPS : INVITED_ADMIN_SETUP_STEPS
+  const brandedShellStyle = { fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }
 
   useEffect(() => {
     if (!inviteEmail) return
@@ -204,6 +220,111 @@ function AdminAccountSetup({
     setIsSubmitting(false)
   }
 
+  if (successState) {
+    const successRoleLabel = getAdminLevelLabel(successState.adminLevel || inviteAdminLevel)
+    const successTitle = successState.isOwnerBootstrap
+      ? 'Owner Account Created'
+      : 'Admin Account Created'
+    const successMessage = successState.isOwnerBootstrap
+      ? 'Your primary owner admin account is ready. Continue to open the admin workspace with full system access.'
+      : 'Your admin account is ready. Continue to open the admin workspace.'
+
+    return (
+      <div
+        className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(21,53,133,0.16),transparent_38%),radial-gradient(circle_at_bottom_right,rgba(21,53,133,0.12),transparent_42%),linear-gradient(180deg,#eef3fb,#f8fbff)] flex items-center justify-center px-4 py-10"
+        style={brandedShellStyle}
+      >
+        <div className="w-full max-w-3xl overflow-hidden rounded-[28px] border border-[#153585]/12 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.16)]">
+          <div className="bg-[linear-gradient(135deg,#0f2458,#153585_58%,#2d67d1)] px-8 py-8 text-white">
+            <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-blue-50">
+              <Sparkles className="h-3.5 w-3.5" />
+              Setup Complete
+            </div>
+            <div className="mt-5 flex items-start gap-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/14 text-white">
+                <ShieldCheck className="h-7 w-7" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-semibold">{successTitle}</h1>
+                <p className="mt-3 max-w-2xl text-sm leading-6 text-blue-50">{successMessage}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-6 px-8 py-8 lg:grid-cols-[1.15fr,0.85fr]">
+            <div className="space-y-5">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Admin Identity</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Full Name</p>
+                    <p className="mt-1 text-sm font-semibold text-slate-900">{successState.fullName || 'Admin User'}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Access Level</p>
+                    <p className="mt-1 inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
+                      <Crown className="h-4 w-4 text-[#153585]" />
+                      {successRoleLabel}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3 sm:col-span-2">
+                    <p className="text-xs uppercase tracking-wide text-slate-500">Work Email</p>
+                    <p className="mt-1 inline-flex items-center gap-2 text-sm font-semibold text-slate-900 break-all">
+                      <Mail className="h-4 w-4 text-[#153585]" />
+                      {successState.email || ''}
+                    </p>
+                  </div>
+                  {successState.roleInCompany ? (
+                    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Role In Company</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{successState.roleInCompany}</p>
+                    </div>
+                  ) : null}
+                  {successState.department ? (
+                    <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+                      <p className="text-xs uppercase tracking-wide text-slate-500">Department</p>
+                      <p className="mt-1 text-sm font-semibold text-slate-900">{successState.department}</p>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
+                <p className="text-sm font-semibold text-emerald-800">Next sign-ins</p>
+                <p className="mt-2 text-sm leading-6 text-emerald-700">
+                  Use your work email and password on the admin portal. Owner accounts also require the owner private key during sign-in, so keep it secure and available.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-[#153585]/10 bg-[linear-gradient(180deg,#f8fbff,#eef4ff)] p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#153585]">Ready To Continue</p>
+              <h2 className="mt-3 text-xl font-semibold text-slate-900">Open the admin workspace</h2>
+              <p className="mt-3 text-sm leading-6 text-slate-600">
+                Your account has been activated and the admin session is already prepared. Continue when you&apos;re ready to land in the admin dashboard.
+              </p>
+              <button
+                type="button"
+                onClick={onContinueToAdmin}
+                className="mt-6 inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-[#153585] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#2147a3]"
+              >
+                Continue to Admin
+                <ArrowRight className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onReturnToAdminLogin}
+                className="mt-3 inline-flex h-11 w-full items-center justify-center rounded-xl border border-slate-300 bg-white px-5 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+              >
+                Sign Out to Admin Login
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (hasInviteToken && !isInviteValid) {
     return (
       <div
@@ -298,35 +419,61 @@ function AdminAccountSetup({
       className="min-h-screen bg-[#F4F6FB] flex items-center justify-center px-4 py-10"
       style={{ fontFamily: "'Helvetica Now', 'Helvetica Neue', Helvetica, Arial, sans-serif" }}
     >
-      <div className="w-full max-w-2xl bg-white border border-border-light rounded-xl shadow-card p-8">
-        <div className="flex items-center justify-center mb-6">
-          <KiaminaLogo className="h-12 w-auto" />
-        </div>
+      <div className="w-full max-w-6xl overflow-hidden rounded-[28px] border border-[#153585]/12 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.16)]">
+        <div className="grid lg:grid-cols-[0.95fr,1.35fr]">
+          <div className="bg-[linear-gradient(145deg,#0f2458,#153585_58%,#2d67d1)] px-8 py-8 text-white">
+            <div className="flex items-center justify-between gap-3">
+              <KiaminaLogo className="h-12 w-auto" />
+              <div className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-blue-50">
+                {isOwnerBootstrapMode ? <Crown className="h-3.5 w-3.5" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                {isOwnerBootstrapMode ? 'Owner Bootstrap' : 'Admin Invite'}
+              </div>
+            </div>
 
-        <h1 className="text-2xl font-semibold text-text-primary text-center">Admin Account Setup</h1>
-        <p className="text-sm text-text-secondary text-center mt-2 mb-6">
-          {isOwnerBootstrapMode
-            ? 'Create the first owner admin account for this workspace.'
-            : 'Complete your invited admin profile.'}
-        </p>
+            <div className="mt-8">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-100">Kiamina Admin Access</p>
+              <h1 className="mt-3 text-3xl font-semibold leading-tight">
+                {isOwnerBootstrapMode
+                  ? 'Launch the first owner workspace'
+                  : 'Activate your invited admin profile'}
+              </h1>
+              <p className="mt-4 text-sm leading-6 text-blue-50">
+                {isOwnerBootstrapMode
+                  ? 'Set up the primary owner account with full system access, secure the workspace with your private key, and enter the admin portal.'
+                  : 'Complete your role-based admin profile, verify the required identity details, and activate your access securely.'}
+              </p>
+            </div>
 
-        <div className="rounded-lg border border-border-light bg-[#FAFBFF] p-4 mb-6">
-          <p className="text-xs uppercase tracking-wide text-text-muted">Assigned Role</p>
-          <p className="text-sm font-semibold text-text-primary mt-1">{getAdminLevelLabel(inviteAdminLevel)}</p>
-          <div className="mt-3">
-            <p className="text-xs uppercase tracking-wide text-text-muted">Granted Permissions</p>
-            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {invitePermissions.map((label) => (
-                <div key={label} className="h-8 px-2.5 rounded border border-border-light bg-white text-xs text-text-secondary inline-flex items-center gap-2">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-success" />
-                  {label}
-                </div>
-              ))}
+            <div className="mt-8 rounded-3xl border border-white/15 bg-white/10 p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-100">Assigned Role</p>
+              <p className="mt-2 text-lg font-semibold text-white">{getAdminLevelLabel(inviteAdminLevel)}</p>
+              <div className="mt-5 space-y-3">
+                {setupSteps.map((step, index) => (
+                  <div key={step} className="flex items-start gap-3">
+                    <div className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-full border border-white/20 bg-white/10 text-xs font-semibold text-white">
+                      {index + 1}
+                    </div>
+                    <p className="text-sm leading-6 text-blue-50">{step}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-3xl border border-white/15 bg-white/10 p-5">
+              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-100">Granted Permissions</p>
+              <div className="mt-4 grid gap-2">
+                {invitePermissions.map((label) => (
+                  <div key={label} className="inline-flex items-center gap-2 rounded-2xl border border-white/12 bg-white/8 px-3 py-2 text-sm text-blue-50">
+                    <CheckCircle2 className="h-4 w-4 text-white" />
+                    {label}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
 
-        <form className="space-y-4" onSubmit={submitSetup}>
+          <div className="px-8 py-8">
+            <form className="space-y-4" onSubmit={submitSetup}>
           <div>
             <label className="block text-sm font-medium text-text-primary mb-1.5">Full Name</label>
             <input
@@ -570,25 +717,27 @@ function AdminAccountSetup({
             </div>
           )}
 
-          <div className="pt-2 flex items-center justify-between">
-            <button
-              type="button"
-              onClick={onReturnToAdminLogin}
-              className="text-sm text-text-secondary hover:text-text-primary inline-flex items-center gap-2"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Return to Admin Login
-            </button>
-            <button
-              type="submit"
-              disabled={isSubmitting || isIdentityVerifying}
-              className="h-11 px-5 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-            >
-              {isSubmitting && <DotLottiePreloader size={18} />}
-              {isSubmitting ? 'Processing...' : 'Create Admin Account'}
-            </button>
+              <div className="pt-2 flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={onReturnToAdminLogin}
+                  className="text-sm text-text-secondary hover:text-text-primary inline-flex items-center gap-2"
+                >
+                  <ArrowLeft className="w-4 h-4" />
+                  Return to Admin Login
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting || isIdentityVerifying}
+                  className="h-11 px-5 bg-primary text-white rounded-md text-sm font-semibold hover:bg-primary-light transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                >
+                  {isSubmitting && <DotLottiePreloader size={18} />}
+                  {isSubmitting ? 'Processing...' : 'Create Admin Account'}
+                </button>
+              </div>
+            </form>
           </div>
-        </form>
+        </div>
       </div>
 
       {otpChallenge && (

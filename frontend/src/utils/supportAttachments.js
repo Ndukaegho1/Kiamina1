@@ -127,7 +127,7 @@ export const createSupportAttachmentsFromFiles = async (
     }
 
     let previewDataUrl = ''
-    if (!storedToCache && Number(file.size || 0) <= MAX_INLINE_DATA_URL_BYTES) {
+    if (Number(file.size || 0) <= MAX_INLINE_DATA_URL_BYTES) {
       previewDataUrl = await readFileAsDataUrl(file)
     }
 

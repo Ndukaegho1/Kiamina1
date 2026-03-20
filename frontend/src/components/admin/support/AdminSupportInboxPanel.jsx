@@ -5,6 +5,7 @@ import {
   formatSupportSlaCountdown,
   getSupportCenterSnapshot,
   markSupportTicketReadByAdmin,
+  refreshSupportStateFromBackend,
   reopenSupportTicket,
   resolveSupportTicket,
   retrySupportMessage,
@@ -147,6 +148,7 @@ function AdminSupportInboxPanel({
   const currentAdminEmail = toTrimmedValue(currentAdminAccount?.email).toLowerCase()
 
   useEffect(() => {
+    void refreshSupportStateFromBackend()
     const unsubscribe = subscribeSupportCenter((snapshot) => {
       setSupportSnapshot(snapshot)
     })

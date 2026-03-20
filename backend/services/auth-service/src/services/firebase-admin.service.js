@@ -224,3 +224,103 @@ export const updateFirebaseUserPassword = async ({
     };
   }
 };
+
+export const createFirebaseUser = async ({
+  email,
+  password,
+  displayName = ""
+}) => {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const normalizedPassword = String(password || "");
+  const normalizedDisplayName = String(displayName || "").trim();
+  if (!normalizedEmail || !normalizedPassword) {
+    return {
+      ok: false,
+      reason: "missing-email-or-password",
+      uid: ""
+    };
+  }
+
+  const isReady = initializeFirebaseAdmin();
+  if (!isReady) {
+    return {
+      ok: false,
+      reason: "firebase-admin-unavailable",
+      uid: ""
+    };
+  }
+
+  try {
+    const createdUser = await admin.auth().createUser({
+      email: normalizedEmail,
+      password: normalizedPassword,
+      displayName: normalizedDisplayName || undefined
+    });
+
+    return {
+      ok: true,
+      reason: "",
+      uid: String(createdUser?.uid || "").trim()
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: String(error?.message || "firebase-user-create-failed"),
+      uid: ""
+    };
+  }
+};
+
+export const updateFirebaseUserProfile = async ({
+  uid,
+  email,
+  displayName,
+  disabled
+}) => {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid) {
+    return {
+      ok: false,
+      reason: "missing-uid"
+    };
+  }
+
+  const updatePayload = {};
+  if (email !== undefined) {
+    updatePayload.email = String(email || "").trim().toLowerCase();
+  }
+  if (displayName !== undefined) {
+    updatePayload.displayName = String(displayName || "").trim();
+  }
+  if (disabled !== undefined) {
+    updatePayload.disabled = Boolean(disabled);
+  }
+
+  if (Object.keys(updatePayload).length === 0) {
+    return {
+      ok: true,
+      reason: ""
+    };
+  }
+
+  const isReady = initializeFirebaseAdmin();
+  if (!isReady) {
+    return {
+      ok: false,
+      reason: "firebase-admin-unavailable"
+    };
+  }
+
+  try {
+    await admin.auth().updateUser(normalizedUid, updatePayload);
+    return {
+      ok: true,
+      reason: ""
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: String(error?.message || "firebase-user-update-failed")
+    };
+  }
+};

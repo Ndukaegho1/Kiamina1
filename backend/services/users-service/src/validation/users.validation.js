@@ -211,6 +211,28 @@ const ADMIN_PROFILE_INPUT_SCHEMA = Joi.object({
   timezone: Joi.string().trim().allow("").max(90).default("Africa/Lagos")
 });
 
+const ADMIN_ACCESS_INPUT_SCHEMA = Joi.object({
+  adminLevel: Joi.string().trim().allow("").max(60).default(""),
+  adminPermissions: Joi.array().items(Joi.string().trim().max(80)).default([]),
+  mustChangePassword: Joi.boolean().default(false)
+});
+
+const ADMIN_SECURITY_PREFERENCES_INPUT_SCHEMA = Joi.object({
+  sessionTimeout: Joi.string().trim().valid("15", "30", "60", "120").default("30"),
+  emailNotificationPreference: Joi.boolean().default(true),
+  activityAlertPreference: Joi.boolean().default(true),
+  twoFactorEnabled: Joi.boolean().default(true),
+  notificationSoundEnabled: Joi.boolean().default(true)
+});
+
+const SIGNUP_CAPTURE_INPUT_SCHEMA = Joi.object({
+  signupIp: Joi.string().trim().allow("").max(120).default(""),
+  signupLocation: Joi.string().trim().allow("").max(255).default(""),
+  signupSource: Joi.string().trim().allow("").max(120).default(""),
+  capturePage: Joi.string().trim().allow("").max(120).default(""),
+  capturePath: Joi.string().trim().allow("").max(255).default("")
+});
+
 const SUPPORT_LEAD_INPUT_SCHEMA = Joi.object({
   leadId: Joi.string().trim().allow("").max(120).default(""),
   fullName: Joi.string().trim().allow("").max(140).default(""),
@@ -222,6 +244,11 @@ const SUPPORT_LEAD_INPUT_SCHEMA = Joi.object({
     .default(""),
   companyName: Joi.string().trim().allow("").max(180).default(""),
   phone: Joi.string().trim().allow("").max(40).default(""),
+  leadIpAddress: Joi.string().trim().allow("").max(120).default(""),
+  leadCountry: Joi.string().trim().allow("").max(120).default(""),
+  leadLocation: Joi.string().trim().allow("").max(255).default(""),
+  capturePage: Joi.string().trim().allow("").max(120).default(""),
+  capturePath: Joi.string().trim().allow("").max(255).default(""),
   source: Joi.string().trim().allow("").max(90).default("support-form"),
   status: Joi.string().trim().lowercase().valid(...SUPPORT_LEAD_STATUSES).default("new"),
   interest: Joi.string().trim().allow("").max(180).default(""),
@@ -239,6 +266,11 @@ const NEWSLETTER_INPUT_SCHEMA = Joi.object({
     .email({ tlds: { allow: false } })
     .default(""),
   fullName: Joi.string().trim().allow("").max(140).default(""),
+  leadIpAddress: Joi.string().trim().allow("").max(120).default(""),
+  leadCountry: Joi.string().trim().allow("").max(120).default(""),
+  leadLocation: Joi.string().trim().allow("").max(255).default(""),
+  capturePage: Joi.string().trim().allow("").max(120).default(""),
+  capturePath: Joi.string().trim().allow("").max(255).default(""),
   status: Joi.string().trim().lowercase().valid(...NEWSLETTER_STATUSES).default("subscribed"),
   source: Joi.string().trim().allow("").max(90).default("website"),
   tags: Joi.array().items(Joi.string().trim().max(60)).default([]),
@@ -316,14 +348,129 @@ export const validateSyncFromAuthPayload = (body) => {
     }
   }
 
+  let signupCapture;
+  const hasFlatSignupCaptureFields = [
+    "signupIp",
+    "signupLocation",
+    "signupSource",
+    "capturePage",
+    "capturePath"
+  ].some((field) => source[field] !== undefined);
+
+  if (source.signupCapture !== undefined || hasFlatSignupCaptureFields) {
+    const signupCaptureSource =
+      source.signupCapture && typeof source.signupCapture === "object" && !Array.isArray(source.signupCapture)
+        ? source.signupCapture
+        : {
+            signupIp: source.signupIp,
+            signupLocation: source.signupLocation,
+            signupSource: source.signupSource,
+            capturePage: source.capturePage,
+            capturePath: source.capturePath
+          };
+    const { value, error } = SIGNUP_CAPTURE_INPUT_SCHEMA.validate(signupCaptureSource, VALIDATION_OPTIONS);
+    if (error) {
+      errors.push("signupCapture contains invalid values");
+    } else {
+      signupCapture = {
+        signupIp: normalizeString(value.signupIp),
+        signupLocation: normalizeString(value.signupLocation),
+        signupSource: normalizeString(value.signupSource),
+        capturePage: normalizeString(value.capturePage),
+        capturePath: normalizeString(value.capturePath)
+      };
+    }
+  }
+
   return {
     errors,
     payload: {
       uid,
       email,
       displayName,
-      roles
+      roles,
+      signupCapture
     }
+  };
+};
+
+export const buildPublicSupportLeadPayload = (body) => {
+  const source = normalizeSource(body);
+  const errors = [];
+  const { value, error } = SUPPORT_LEAD_INPUT_SCHEMA.validate(source, VALIDATION_OPTIONS);
+
+  if (error) {
+    errors.push("support lead payload is invalid");
+    return { payload: null, errors };
+  }
+
+  const leadId = normalizeString(value.leadId);
+  const email = normalizeString(value.email).toLowerCase();
+  if (!leadId && !email) {
+    errors.push("leadId or email is required");
+  }
+
+  return {
+    payload:
+      errors.length > 0
+        ? null
+        : {
+            leadId,
+            fullName: normalizeString(value.fullName),
+            email,
+            companyName: normalizeString(value.companyName),
+            phone: normalizeString(value.phone),
+            leadIpAddress: normalizeString(value.leadIpAddress),
+            leadCountry: normalizeString(value.leadCountry),
+            leadLocation: normalizeString(value.leadLocation),
+            capturePage: normalizeString(value.capturePage),
+            capturePath: normalizeString(value.capturePath),
+            source: normalizeString(value.source) || "support-form",
+            status: normalizeString(value.status).toLowerCase() || "new",
+            interest: normalizeString(value.interest),
+            assignedToUid: normalizeString(value.assignedToUid),
+            notes: normalizeString(value.notes),
+            createdAt: value.createdAt ? new Date(value.createdAt) : new Date(),
+            updatedAt: value.updatedAt ? new Date(value.updatedAt) : new Date()
+          },
+    errors
+  };
+};
+
+export const buildPublicNewsletterPayload = (body) => {
+  const source = normalizeSource(body);
+  const errors = [];
+  const { value, error } = NEWSLETTER_INPUT_SCHEMA.validate(source, VALIDATION_OPTIONS);
+
+  if (error) {
+    errors.push("newsletter payload is invalid");
+    return { payload: null, errors };
+  }
+
+  const email = normalizeString(value.email).toLowerCase();
+  if (!email) {
+    errors.push("email is required");
+  }
+
+  return {
+    payload:
+      errors.length > 0
+        ? null
+        : {
+            email,
+            fullName: normalizeString(value.fullName),
+            leadIpAddress: normalizeString(value.leadIpAddress),
+            leadCountry: normalizeString(value.leadCountry),
+            leadLocation: normalizeString(value.leadLocation),
+            capturePage: normalizeString(value.capturePage),
+            capturePath: normalizeString(value.capturePath),
+            status: normalizeString(value.status).toLowerCase() || "subscribed",
+            source: normalizeString(value.source) || "website",
+            tags: sanitizeStringList(value.tags),
+            subscribedAt: value.subscribedAt ? new Date(value.subscribedAt) : new Date(),
+            lastEngagedAt: value.lastEngagedAt ? new Date(value.lastEngagedAt) : new Date()
+          },
+    errors
   };
 };
 
@@ -534,6 +681,37 @@ export const buildClientProfileUpdatePayload = (body) => {
     }
   }
 
+  const hasFlatSignupCaptureFields = [
+    "signupIp",
+    "signupLocation",
+    "signupSource",
+    "capturePage",
+    "capturePath"
+  ].some((field) => source[field] !== undefined);
+
+  if (source.signupCapture !== undefined || hasFlatSignupCaptureFields) {
+    const signupCaptureSource =
+      source.signupCapture && typeof source.signupCapture === "object" && !Array.isArray(source.signupCapture)
+        ? source.signupCapture
+        : {
+            signupIp: source.signupIp,
+            signupLocation: source.signupLocation,
+            signupSource: source.signupSource,
+            capturePage: source.capturePage,
+            capturePath: source.capturePath
+          };
+    const { value, error } = SIGNUP_CAPTURE_INPUT_SCHEMA.validate(signupCaptureSource, VALIDATION_OPTIONS);
+    if (error) {
+      errors.push("signupCapture contains invalid values");
+    } else {
+      payload["signupCapture.signupIp"] = normalizeString(value.signupIp);
+      payload["signupCapture.signupLocation"] = normalizeString(value.signupLocation);
+      payload["signupCapture.signupSource"] = normalizeString(value.signupSource);
+      payload["signupCapture.capturePage"] = normalizeString(value.capturePage);
+      payload["signupCapture.capturePath"] = normalizeString(value.capturePath);
+    }
+  }
+
   return { payload, errors };
 };
 
@@ -682,6 +860,13 @@ export const buildClientWorkspaceUpdatePayload = (body) => {
     "clientWorkspace.notificationSettings",
     "notificationSettings must be an object"
   );
+  if (source.notifications !== undefined) {
+    if (!Array.isArray(source.notifications)) {
+      errors.push("notifications must be an array");
+    } else {
+      payload["clientWorkspace.notifications"] = source.notifications;
+    }
+  }
   assignObjectField(
     "accountSettings",
     "clientWorkspace.accountSettings",
@@ -780,6 +965,15 @@ export const buildAdminClientManagementUpdatePayload = (body) => {
   const payload = {};
   const errors = [];
 
+  const assignObjectField = (inputKey, targetPath, message) => {
+    if (source[inputKey] === undefined) return;
+    if (!source[inputKey] || typeof source[inputKey] !== "object" || Array.isArray(source[inputKey])) {
+      errors.push(message);
+      return;
+    }
+    payload[targetPath] = source[inputKey];
+  };
+
   if (source.status !== undefined) {
     const status = normalizeString(source.status).toLowerCase();
     if (USER_STATUS_SCHEMA.validate(status).error) {
@@ -873,6 +1067,102 @@ export const buildAdminClientManagementUpdatePayload = (body) => {
     }
   }
 
+  assignObjectField(
+    "documents",
+    "clientWorkspace.documents",
+    "documents must be an object"
+  );
+
+  if (source.notifications !== undefined) {
+    if (!Array.isArray(source.notifications)) {
+      errors.push("notifications must be an array");
+    } else {
+      payload["clientWorkspace.notifications"] = source.notifications;
+    }
+  }
+
+  if (source.activityLog !== undefined) {
+    if (!Array.isArray(source.activityLog)) {
+      errors.push("activityLog must be an array");
+    } else {
+      payload["clientWorkspace.activityLog"] = source.activityLog;
+    }
+  }
+
+  return { payload, errors };
+};
+
+export const buildAdminStaffUpdatePayload = (body) => {
+  const source = normalizeSource(body);
+  const payload = {};
+  const errors = [];
+
+  if (source.status !== undefined) {
+    const status = normalizeString(source.status).toLowerCase();
+    if (USER_STATUS_SCHEMA.validate(status).error) {
+      errors.push("status must be one of: active, disabled, suspended");
+    } else {
+      payload.status = status;
+    }
+  }
+
+  if (source.securityPreferences !== undefined) {
+    if (!source.securityPreferences || typeof source.securityPreferences !== "object" || Array.isArray(source.securityPreferences)) {
+      errors.push("securityPreferences must be an object");
+    } else {
+      const { value, error } = ADMIN_SECURITY_PREFERENCES_INPUT_SCHEMA.validate(source.securityPreferences, VALIDATION_OPTIONS);
+      if (error) {
+        errors.push("securityPreferences contains invalid values");
+      } else {
+        payload["adminDashboard.securityPreferences"] = {
+          sessionTimeout: value.sessionTimeout,
+          emailNotificationPreference: Boolean(value.emailNotificationPreference),
+          activityAlertPreference: Boolean(value.activityAlertPreference),
+          twoFactorEnabled: Boolean(value.twoFactorEnabled),
+          notificationSoundEnabled: Boolean(value.notificationSoundEnabled)
+        };
+      }
+    }
+  }
+
+  if (source.adminProfile !== undefined) {
+    if (!source.adminProfile || typeof source.adminProfile !== "object" || Array.isArray(source.adminProfile)) {
+      errors.push("adminProfile must be an object");
+    } else {
+      const { value, error } = ADMIN_PROFILE_INPUT_SCHEMA.validate(source.adminProfile, VALIDATION_OPTIONS);
+      if (error) {
+        errors.push("adminProfile contains invalid values");
+      } else {
+        payload["adminProfile.firstName"] = value.firstName;
+        payload["adminProfile.lastName"] = value.lastName;
+        payload["adminProfile.displayName"] = value.displayName;
+        payload["adminProfile.jobTitle"] = value.jobTitle;
+        payload["adminProfile.department"] = value.department;
+        payload["adminProfile.phone"] = value.phone;
+        payload["adminProfile.timezone"] = value.timezone;
+      }
+    }
+  }
+
+  if (source.adminAccess !== undefined) {
+    if (!source.adminAccess || typeof source.adminAccess !== "object" || Array.isArray(source.adminAccess)) {
+      errors.push("adminAccess must be an object");
+    } else {
+      const { value, error } = ADMIN_ACCESS_INPUT_SCHEMA.validate(source.adminAccess, VALIDATION_OPTIONS);
+      if (error) {
+        errors.push("adminAccess contains invalid values");
+      } else {
+        payload["adminAccess.adminLevel"] = value.adminLevel;
+        payload["adminAccess.adminPermissions"] = [
+          ...new Set((Array.isArray(value.adminPermissions) ? value.adminPermissions : [])
+            .map((permission) => normalizeString(permission))
+            .filter(Boolean))
+        ];
+        payload["adminAccess.mustChangePassword"] = Boolean(value.mustChangePassword);
+      }
+    }
+  }
+
   return { payload, errors };
 };
 
@@ -941,6 +1231,25 @@ export const buildAdminDashboardUpdatePayload = (body) => {
         errors.push("favoritePages contains unsupported page values");
       } else {
         payload["adminDashboard.favoritePages"] = favoritePages;
+      }
+    }
+  }
+
+  if (source.securityPreferences !== undefined) {
+    if (!source.securityPreferences || typeof source.securityPreferences !== "object" || Array.isArray(source.securityPreferences)) {
+      errors.push("securityPreferences must be an object");
+    } else {
+      const { value, error } = ADMIN_SECURITY_PREFERENCES_INPUT_SCHEMA.validate(source.securityPreferences, VALIDATION_OPTIONS);
+      if (error) {
+        errors.push("securityPreferences contains invalid values");
+      } else {
+        payload["adminDashboard.securityPreferences"] = {
+          sessionTimeout: value.sessionTimeout,
+          emailNotificationPreference: Boolean(value.emailNotificationPreference),
+          activityAlertPreference: Boolean(value.activityAlertPreference),
+          twoFactorEnabled: Boolean(value.twoFactorEnabled),
+          notificationSoundEnabled: Boolean(value.notificationSoundEnabled)
+        };
       }
     }
   }

@@ -76,16 +76,12 @@ import {
   getSupportAttachmentBlob,
   getSupportAttachmentKind,
 } from '../../utils/supportAttachments'
-import {
-  appendResolvedDocumentForClient,
-  readResolvedDocumentsForClient,
-  RESOLVED_DOCUMENTS_SYNC_EVENT,
-} from '../../utils/resolvedDocuments'
 import AdminSupportInboxPanel from './support/AdminSupportInboxPanel'
 import {
   deleteSupportLead,
   getSupportCenterSnapshot,
   LEAD_CATEGORY,
+  refreshSupportStateFromBackend,
   restoreSupportLead,
   subscribeSupportCenter,
   SUPPORT_TICKET_STATUS,
@@ -120,6 +116,7 @@ const ACCOUNT_CREATED_AT_FALLBACK_STORAGE_KEY = 'kiaminaAccountCreatedAtFallback
 const ADMIN_INVITES_STORAGE_KEY = 'kiaminaAdminInvites'
 const ADMIN_NOTIFICATIONS_SYNC_EVENT = 'kiamina:admin-notifications-sync'
 const ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT = 'kiamina:admin-client-management-sync'
+const ADMIN_ACTIVITY_SYNC_EVENT = 'kiamina:admin-activity-sync'
 const DASHBOARD_REFRESH_INTERVAL_MS = 15000
 const DASHBOARD_INVITE_EXPIRING_SOON_MS = 12 * 60 * 60 * 1000
 const DASHBOARD_SCHEDULED_SOON_MS = 24 * 60 * 60 * 1000
@@ -232,21 +229,48 @@ const mapBackendVerificationStatusToCompliance = (value = '') => {
 
 const mapBackendClientRowToClientRow = (row = {}, index = 0) => {
   const normalizedEmail = toTrimmedValue(row.email).toLowerCase()
+  const clientProfile = row?.clientProfile && typeof row.clientProfile === 'object' ? row.clientProfile : {}
+  const entityProfile = row?.entityProfile && typeof row.entityProfile === 'object' ? row.entityProfile : {}
+  const onboarding = row?.onboarding && typeof row.onboarding === 'object' ? row.onboarding : {}
+  const verification = row?.verification && typeof row.verification === 'object' ? row.verification : {}
+  const notificationPreferences = row?.notificationPreferences && typeof row.notificationPreferences === 'object'
+    ? row.notificationPreferences
+    : {}
+  const clientDashboard = row?.clientDashboard && typeof row.clientDashboard === 'object' ? row.clientDashboard : {}
+  const clientWorkspace = row?.clientWorkspace && typeof row.clientWorkspace === 'object' ? row.clientWorkspace : {}
+  const settingsProfile = clientWorkspace?.settingsProfile && typeof clientWorkspace.settingsProfile === 'object'
+    ? clientWorkspace.settingsProfile
+    : {}
   const verificationStatus = mapBackendVerificationStatusToCompliance(row.verificationStatus)
   const onboardingCompleted = Boolean(row.onboardingCompleted)
-  const displayName = toTrimmedValue(row.displayName) || normalizedEmail || `Client ${index + 1}`
-  const businessName = toTrimmedValue(row.businessName) || displayName || 'Unassigned Business'
+  const displayName = (
+    toTrimmedValue(row.displayName)
+    || toTrimmedValue(clientProfile.fullName)
+    || toTrimmedValue(settingsProfile.fullName)
+    || normalizedEmail
+    || `Client ${index + 1}`
+  )
+  const businessName = (
+    toTrimmedValue(row.businessName)
+    || toTrimmedValue(entityProfile.businessName)
+    || toTrimmedValue(settingsProfile.businessName)
+    || displayName
+    || 'Unassigned Business'
+  )
   const fallbackCriToken = toTrimmedValue(row.uid).replace(/[^A-Za-z0-9]/g, '').slice(-6).toUpperCase()
   const cri = fallbackCriToken ? `CRI-${fallbackCriToken}` : `CRI-${String(index + 1).padStart(4, '0')}`
   const createdAtIso = toTrimmedValue(row.createdAt)
   const accountStatus = toTrimmedValue(row.status).toLowerCase()
   const isSuspended = accountStatus === 'suspended'
   const settings = {
-    fullName: displayName,
+    firstName: toTrimmedValue(clientProfile.firstName) || toTrimmedValue(settingsProfile.firstName),
+    lastName: toTrimmedValue(clientProfile.lastName) || toTrimmedValue(settingsProfile.lastName),
+    otherNames: toTrimmedValue(clientProfile.otherNames) || toTrimmedValue(settingsProfile.otherNames),
+    fullName: toTrimmedValue(clientProfile.fullName) || toTrimmedValue(settingsProfile.fullName) || displayName,
     businessName,
-    country: toTrimmedValue(row.country),
-    businessType: toTrimmedValue(row.businessType),
-    currency: toTrimmedValue(row.currency) || 'NGN',
+    country: toTrimmedValue(row.country) || toTrimmedValue(entityProfile.country) || toTrimmedValue(settingsProfile.country),
+    businessType: toTrimmedValue(row.businessType) || toTrimmedValue(entityProfile.businessType) || toTrimmedValue(settingsProfile.businessType),
+    currency: toTrimmedValue(row.currency) || toTrimmedValue(entityProfile.currency) || toTrimmedValue(settingsProfile.currency) || 'NGN',
     cri,
   }
 
@@ -275,7 +299,7 @@ const mapBackendClientRowToClientRow = (row = {}, index = 0) => {
       email: normalizedEmail,
       fullName: displayName,
       businessName,
-      country: toTrimmedValue(row.country),
+      country: toTrimmedValue(row.country) || toTrimmedValue(entityProfile.country),
       status: accountStatus || 'active',
       role: 'client',
       createdAt: createdAtIso,
@@ -283,14 +307,25 @@ const mapBackendClientRowToClientRow = (row = {}, index = 0) => {
     settings,
     onboarding: {
       completed: onboardingCompleted,
-      skipped: false,
-      verificationPending: toTrimmedValue(row.verificationStatus).toLowerCase() !== 'verified',
-      data: {},
+      skipped: Boolean(onboarding.skipped),
+      verificationPending: onboarding.verificationPending ?? (toTrimmedValue(row.verificationStatus).toLowerCase() !== 'verified'),
+      data: onboarding?.data && typeof onboarding.data === 'object' ? onboarding.data : {},
     },
-    verificationDocs: {},
-    notificationSettings: {},
-    profilePhoto: '',
-    companyLogo: '',
+    verification: {
+      ...verification,
+    },
+    verificationDocs: clientWorkspace?.verificationDocs && typeof clientWorkspace.verificationDocs === 'object'
+      ? clientWorkspace.verificationDocs
+      : {},
+    notificationSettings: clientWorkspace?.notificationSettings && typeof clientWorkspace.notificationSettings === 'object'
+      ? clientWorkspace.notificationSettings
+      : notificationPreferences,
+    profilePhoto: toTrimmedValue(clientWorkspace.profilePhoto),
+    companyLogo: toTrimmedValue(clientWorkspace.companyLogo),
+    clientProfile,
+    entityProfile,
+    clientDashboard,
+    clientWorkspace,
     statusControl: {
       verificationStatus,
       assignedToUid: toTrimmedValue(row.assignedToUid),
@@ -339,6 +374,19 @@ const refreshAdminClientRowsFromBackend = async ({ force = false } = {}) => {
     })
 
   return backendClientRowsRefreshPromise
+}
+
+const fetchAdminClientRowByUidFromBackend = async (uid = '') => {
+  const normalizedUid = String(uid || '').trim()
+  if (!normalizedUid) return null
+  try {
+    const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedUid)}`)
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data || typeof data !== 'object') return null
+    return mapBackendClientRowToClientRow(data, 0)
+  } catch {
+    return null
+  }
 }
 
 const formatTimestamp = (value) => {
@@ -737,7 +785,7 @@ const migrateScopedClientData = (fromEmail, toEmail) => {
 
 const appendScopedClientActivityLog = (email, entry = {}) => {
   const normalizedEmail = (email || '').trim().toLowerCase()
-  if (!normalizedEmail) return
+  if (!normalizedEmail) return []
   const key = `${CLIENT_ACTIVITY_STORAGE_KEY}:${normalizedEmail}`
   const existing = safeParseJson(localStorage.getItem(key), [])
   const list = Array.isArray(existing) ? existing : []
@@ -749,13 +797,74 @@ const appendScopedClientActivityLog = (email, entry = {}) => {
     details: entry.details || '--',
     timestamp: new Date().toISOString(),
   }
-  localStorage.setItem(key, JSON.stringify([nextEntry, ...list]))
+  const nextList = [nextEntry, ...list]
+  localStorage.setItem(key, JSON.stringify(nextList))
+  return nextList
+}
+
+const writeClientDocumentBundle = (email = '', bundle = {}) => {
+  const normalizedEmail = String(email || '').trim().toLowerCase()
+  if (!normalizedEmail) return null
+  const key = `${CLIENT_DOCUMENTS_STORAGE_KEY}:${normalizedEmail}`
+  localStorage.setItem(key, JSON.stringify(bundle && typeof bundle === 'object' ? bundle : {}))
+  return bundle
+}
+
+const persistAdminClientWorkspaceArtifacts = async ({
+  client = {},
+  documents = null,
+  activityLog = null,
+} = {}) => {
+  const normalizedUid = String(client?.uid || '').trim()
+  if (!normalizedUid) {
+    return { ok: false, skipped: true }
+  }
+  const payload = {}
+  if (documents && typeof documents === 'object') payload.documents = documents
+  if (Array.isArray(activityLog)) payload.activityLog = activityLog
+  if (Object.keys(payload).length === 0) {
+    return { ok: false, skipped: true }
+  }
+
+  try {
+    const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedUid)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const data = await response.json().catch(() => null)
+    return { ok: response.ok, data }
+  } catch (error) {
+    return {
+      ok: false,
+      data: { message: String(error?.message || 'Unable to synchronize client workspace.') },
+    }
+  }
 }
 
 const toTrimmedValue = (value) => String(value || '').trim()
 const normalizeBooleanPreference = (value = false) => (
   value === true || String(value || '').trim().toLowerCase() === 'true'
 )
+const hasMeaningfulClientDataValue = (value) => {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return Boolean(value.trim())
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return true
+}
+const mergeClientDataObjects = (preferred = {}, fallback = {}) => {
+  const base = fallback && typeof fallback === 'object' && !Array.isArray(fallback)
+    ? { ...fallback }
+    : {}
+  if (!preferred || typeof preferred !== 'object' || Array.isArray(preferred)) return base
+  Object.entries(preferred).forEach(([key, value]) => {
+    if (hasMeaningfulClientDataValue(value)) {
+      base[key] = value
+    }
+  })
+  return base
+}
 const PHONE_COUNTRY_CODE_OPTIONS = ['+234', '+1', '+44', '+61']
 const resolvePhoneParts = (value = '', fallbackCode = '+234') => {
   const raw = String(value || '').trim()
@@ -1040,6 +1149,7 @@ const normalizeNotificationRecipient = (recipient = {}, index = 0) => {
   const normalizedEmail = String(recipient.email || '').trim().toLowerCase()
   return {
     id: toTrimmedValue(recipient.id) || `REC-${index + 1}`,
+    uid: toTrimmedValue(recipient.uid),
     fullName: toTrimmedValue(recipient.fullName) || normalizedEmail || `User ${index + 1}`,
     email: normalizedEmail,
     businessName: toTrimmedValue(recipient.businessName) || 'Unknown Business',
@@ -1067,6 +1177,7 @@ const getNotificationRecipientsDirectory = () => {
       if (normalizedRole === 'admin') return
       pushRecipient({
         id: account?.id || `ACC-${index + 1}`,
+        uid: account?.uid || '',
         fullName: account?.fullName || normalizedEmail,
         email: normalizedEmail,
         businessName: account?.businessName || account?.companyName || '',
@@ -1079,6 +1190,7 @@ const getNotificationRecipientsDirectory = () => {
   clientRows.forEach((client, index) => {
     pushRecipient({
       id: client.id || `CLI-${index + 1}`,
+      uid: client.uid || client.id || '',
       fullName: client.primaryContact || client.businessName || client.email,
       email: client.email,
       businessName: client.businessName,
@@ -1177,6 +1289,40 @@ const deliverNotificationEmail = async ({
   }
 }
 
+const deliverClientBellNotification = async ({
+  recipient,
+  notification,
+}) => {
+  const normalizedUid = String(recipient?.uid || '').trim()
+  if (!normalizedUid) return false
+
+  const notificationEntry = {
+    id: `CBN-${Date.now().toString(36).toUpperCase()}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`,
+    type: 'admin-notification',
+    title: String(notification?.title || '').trim() || 'New Update',
+    message: String(notification?.message || '').trim(),
+    body: String(notification?.message || '').trim(),
+    link: String(notification?.link || '').trim(),
+    priority: String(notification?.priority || 'normal').trim().toLowerCase() || 'normal',
+    forceDelivery: Boolean(notification?.forceDelivery),
+    sentAtIso: String(notification?.sentAtIso || new Date().toISOString()).trim(),
+    read: false,
+  }
+
+  try {
+    const response = await apiFetch(`/api/users/admin/client-management/clients/${encodeURIComponent(normalizedUid)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        notifications: [notificationEntry],
+      }),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 const dispatchAdminNotification = async ({
   mode = 'bulk',
   bulkAudience = 'all-users',
@@ -1222,41 +1368,36 @@ const dispatchAdminNotification = async ({
       deliveryOrigin,
     })),
   )
+  const bellResults = await Promise.all(
+    recipients.map((recipient) => deliverClientBellNotification({
+      recipient,
+      notification: {
+        title: normalizedTitle,
+        message: normalizedMessage,
+        link: normalizedLink,
+        priority: normalizedPriority,
+        forceDelivery: shouldForceAdminMessage,
+        sentAtIso,
+      },
+    })),
+  )
   const emailSuccessCount = emailResults.filter(Boolean).length
   const emailFailureCount = Math.max(0, recipients.length - emailSuccessCount)
-  if (emailSuccessCount <= 0) {
+  const bellSuccessCount = bellResults.filter(Boolean).length
+  const bellFailureCount = Math.max(0, recipients.length - bellSuccessCount)
+  if (emailSuccessCount <= 0 && bellSuccessCount <= 0) {
     return {
       ok: false,
-      reason: 'email-delivery-failed',
+      reason: 'notification-delivery-failed',
       recipients,
       recipientCount: recipients.length,
       sentNotification: null,
       emailSuccessCount,
       emailFailureCount,
+      bellSuccessCount,
+      bellFailureCount,
     }
   }
-
-  recipients.forEach((recipient, index) => {
-    if (!emailResults[index]) return
-    const briefEntry = {
-      id: `CBN-${Date.now().toString(36).toUpperCase()}-${index}-${Math.floor(Math.random() * 100000).toString().padStart(5, '0')}`,
-      type: 'admin-notification',
-      title: normalizedTitle,
-      message: normalizedMessage,
-      link: normalizedLink,
-      priority: normalizedPriority,
-      forceDelivery: shouldForceAdminMessage,
-      sentAtIso,
-      read: false,
-    }
-    appendClientBriefNotificationsToStorage(recipient.email, [briefEntry])
-    appendScopedClientActivityLog(recipient.email, {
-      actorName: 'Kiamina Notifications',
-      actorRole: 'system',
-      action: normalizedTitle,
-      details: normalizedMessage,
-    })
-  })
 
   const sentNotification = normalizeSentNotification({
     id: `SN-${Date.now().toString(36).toUpperCase()}`,
@@ -1265,7 +1406,7 @@ const dispatchAdminNotification = async ({
     audience: normalizedAudience,
     dateSent: formatTimestamp(sentAtIso),
     openRate: '--',
-    status: emailFailureCount > 0 ? 'Partially Delivered' : 'Delivered',
+    status: emailFailureCount > 0 || bellFailureCount > 0 ? 'Partially Delivered' : 'Delivered',
     sentAtIso,
   })
   persistAdminSentNotificationsToStorage([
@@ -1280,6 +1421,8 @@ const dispatchAdminNotification = async ({
     sentNotification,
     emailSuccessCount,
     emailFailureCount,
+    bellSuccessCount,
+    bellFailureCount,
   }
 }
 
@@ -1477,18 +1620,22 @@ const createClientDocumentFallback = () => ({
   sales: [],
   bankStatements: [],
   uploadHistory: [],
+  resolvedDocuments: [],
 })
 
 const readClientDocumentBundle = (client) => {
   const email = (client?.email || '').trim().toLowerCase()
   if (!email) return createClientDocumentFallback(client)
 
+  const workspaceDocuments = client?.clientWorkspace?.documents
   const scopedKey = `${CLIENT_DOCUMENTS_STORAGE_KEY}:${email}`
   const scopedValue = safeParseJson(localStorage.getItem(scopedKey), null)
   const fallbackValue = safeParseJson(localStorage.getItem(CLIENT_DOCUMENTS_STORAGE_KEY), null)
-  const source = scopedValue && typeof scopedValue === 'object'
-    ? scopedValue
-    : (fallbackValue && typeof fallbackValue === 'object' ? fallbackValue : null)
+  const source = workspaceDocuments && typeof workspaceDocuments === 'object'
+    ? workspaceDocuments
+    : scopedValue && typeof scopedValue === 'object'
+      ? scopedValue
+      : (fallbackValue && typeof fallbackValue === 'object' ? fallbackValue : null)
 
   if (!source) return createClientDocumentFallback(client)
 
@@ -1514,12 +1661,14 @@ const readClientDocumentBundle = (client) => {
     sales: normalizedSales.map((row) => ({ ...row, category: 'Sales' })),
     bankStatements: normalizedBankStatements.map((row) => ({ ...row, category: 'Bank Statement' })),
     uploadHistory: normalizedUploadHistory.map((row) => ({ ...row })),
+    resolvedDocuments: Array.isArray(source.resolvedDocuments) ? source.resolvedDocuments.map((row) => ({ ...row })) : [],
   }
 }
 
 const readClientActivityLogs = (client) => {
   const email = (client?.email || '').trim().toLowerCase()
-  const rawLogs = getScopedStorageArray(CLIENT_ACTIVITY_STORAGE_KEY, email)
+  const workspaceLogs = Array.isArray(client?.clientWorkspace?.activityLog) ? client.clientWorkspace.activityLog : null
+  const rawLogs = workspaceLogs || getScopedStorageArray(CLIENT_ACTIVITY_STORAGE_KEY, email)
   const normalizedLogs = rawLogs.map((entry, index) => ({
     id: entry?.id || `CLLOG-${index + 1}`,
     action: entry?.action || 'Client activity',
@@ -1699,7 +1848,6 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
   const unlockReason = toTrimmedValue(options?.unlockReason)
   const timestampIso = new Date().toISOString()
 
-  const key = `${CLIENT_DOCUMENTS_STORAGE_KEY}:${clientEmail}`
   const client = readClientRows().find((item) => item.email === clientEmail)
   if (
     requiresClientFullVerificationForReviewDecision(normalizedNextStatus)
@@ -1836,7 +1984,7 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
     [targetBucket]: nextTargetRows,
     uploadHistory: nextUploadHistory,
   }
-  localStorage.setItem(key, JSON.stringify(nextBundle))
+  writeClientDocumentBundle(clientEmail, nextBundle)
 
   const activityAction = normalizedNextStatus === DOCUMENT_REVIEW_STATUS.APPROVED
     ? 'File approved by Admin.'
@@ -1848,7 +1996,7 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
           ? `File unlocked by Super Admin - Reason: ${unlockReason}.`
           : `Document review updated to ${normalizedNextStatus}.`
 
-  appendScopedClientActivityLog(clientEmail, {
+  const nextActivityLog = appendScopedClientActivityLog(clientEmail, {
     actorName: performedBy,
     actorRole: 'admin',
     action: activityAction,
@@ -1891,7 +2039,10 @@ const updateClientDocumentReviewStatus = (document, nextStatus, notes = '', opti
     folderId: document.source?.folderId || '',
   }])
 
-  return nextBundle
+  return {
+    bundle: nextBundle,
+    activityLog: nextActivityLog,
+  }
 }
 
 const readClientRows = () => {
@@ -2823,6 +2974,7 @@ function AdminDashboardPage({ setActivePage, currentAdminAccount }) {
   useEffect(() => {
     const syncDashboard = () => setDashboard(buildAdminDashboardSnapshot(normalizedAdmin))
     const refreshDashboard = async () => {
+      await refreshSupportStateFromBackend()
       await refreshAdminClientRowsFromBackend()
       syncDashboard()
     }
@@ -3708,15 +3860,73 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   )
   const normalizedEmail = (safeClient?.email || '').trim().toLowerCase()
   const normalizedClientUid = toTrimmedValue(safeClient?.uid || safeClient?.rawAccount?.uid)
-  const settings = getScopedStorageObject('settingsFormData', normalizedEmail)
-  const onboarding = getScopedStorageObject('kiaminaOnboardingState', normalizedEmail)
-  const statusControl = getScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail)
-  const verificationDocs = getScopedStorageObject('verificationDocs', normalizedEmail)
-  const notificationSettings = getScopedStorageObject('notificationSettings', normalizedEmail)
-  const profilePhoto = getScopedStorageString('profilePhoto', normalizedEmail)
-  const companyLogo = getScopedStorageString('companyLogo', normalizedEmail)
+  const storedSettings = useMemo(
+    () => getScopedStorageObject('settingsFormData', normalizedEmail),
+    [normalizedEmail],
+  )
+  const storedOnboarding = useMemo(
+    () => getScopedStorageObject('kiaminaOnboardingState', normalizedEmail),
+    [normalizedEmail],
+  )
+  const storedStatusControl = useMemo(
+    () => getScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail),
+    [normalizedEmail],
+  )
+  const storedVerificationDocs = useMemo(
+    () => getScopedStorageObject('verificationDocs', normalizedEmail),
+    [normalizedEmail],
+  )
+  const storedNotificationSettings = useMemo(
+    () => getScopedStorageObject('notificationSettings', normalizedEmail),
+    [normalizedEmail],
+  )
+  const settings = useMemo(
+    () => mergeClientDataObjects(safeClient?.settings, storedSettings),
+    [safeClient?.settings, storedSettings],
+  )
+  const onboarding = useMemo(() => {
+    const backendOnboarding = safeClient?.onboarding && typeof safeClient.onboarding === 'object'
+      ? safeClient.onboarding
+      : {}
+    return {
+      ...storedOnboarding,
+      ...backendOnboarding,
+      data: mergeClientDataObjects(backendOnboarding?.data, storedOnboarding?.data),
+    }
+  }, [safeClient?.onboarding, storedOnboarding])
+  const statusControl = useMemo(
+    () => mergeClientDataObjects(safeClient?.statusControl, storedStatusControl),
+    [safeClient?.statusControl, storedStatusControl],
+  )
+  const verificationDocs = useMemo(
+    () => mergeClientDataObjects(safeClient?.verificationDocs, storedVerificationDocs),
+    [safeClient?.verificationDocs, storedVerificationDocs],
+  )
+  const notificationSettings = useMemo(
+    () => mergeClientDataObjects(safeClient?.notificationSettings, storedNotificationSettings),
+    [safeClient?.notificationSettings, storedNotificationSettings],
+  )
+  const profilePhoto = toTrimmedValue(safeClient?.profilePhoto) || getScopedStorageString('profilePhoto', normalizedEmail)
+  const companyLogo = toTrimmedValue(safeClient?.companyLogo) || getScopedStorageString('companyLogo', normalizedEmail)
   const onboardingData = onboarding?.data || {}
   const clientLogs = readClientActivityLogs({ ...clientSnapshot, settings, onboarding })
+
+  useEffect(() => {
+    let cancelled = false
+    if (!normalizedClientUid) return undefined
+
+    const syncClientSnapshot = async () => {
+      const refreshed = await fetchAdminClientRowByUidFromBackend(normalizedClientUid)
+      if (!cancelled && refreshed) {
+        setClientSnapshot(refreshed)
+      }
+    }
+
+    void syncClientSnapshot()
+    return () => {
+      cancelled = true
+    }
+  }, [normalizedClientUid])
 
   const [verificationStatusDraft, setVerificationStatusDraft] = useState(
     normalizeComplianceStatus(statusControl?.verificationStatus || safeClient?.verificationStatus || '', COMPLIANCE_STATUS.PENDING),
@@ -3734,8 +3944,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
   const [identityDraft, setIdentityDraft] = useState(() => ({
     profilePhoto: profilePhoto || '',
     companyLogo: companyLogo || '',
-    govId: verificationDocs.govId || '',
-    govIdType: verificationDocs.govIdType || '',
+    // govId: verificationDocs.govId || '',
+    // govIdType: verificationDocs.govIdType || '',
     businessReg: verificationDocs.businessReg || '',
   }))
   const [profileDraft, setProfileDraft] = useState(() => ({
@@ -3771,18 +3981,20 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     return normalized === 'true' || normalized === 'yes' || normalized === '1'
   }
   const hasIsoTimestamp = (value) => Number.isFinite(Date.parse(value || ''))
+  /*
   const hasIdentityDocumentSubmission = Boolean(
     toTrimmedValue(verificationDocs.govId)
     && toTrimmedValue(verificationDocs.govIdType)
     && toTrimmedValue(verificationDocs.govIdNumber),
   )
-  const hasBusinessDocumentSubmission = Boolean(toTrimmedValue(verificationDocs.businessReg))
   const identityVerifiedByAutomation = Boolean(toTrimmedValue(verificationDocs.govIdVerifiedAt))
   const identityVerificationApproved = Boolean(
     identityVerifiedByAutomation
     || normalizeBooleanFlag(statusControl?.identityVerificationApproved)
     || hasIsoTimestamp(statusControl?.identityVerificationApprovedAt),
   )
+  */
+  const hasBusinessDocumentSubmission = Boolean(toTrimmedValue(verificationDocs.businessReg))
   const businessVerificationApproved = Boolean(
     normalizeBooleanFlag(statusControl?.businessVerificationApproved)
     || hasIsoTimestamp(statusControl?.businessVerificationApprovedAt),
@@ -3829,17 +4041,16 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     setIdentityDraft({
       profilePhoto: profilePhoto || '',
       companyLogo: companyLogo || '',
-      govId: verificationDocs.govId || '',
-      govIdType: verificationDocs.govIdType || '',
       businessReg: verificationDocs.businessReg || '',
     })
     setIsEditingIdentityAssets(false)
-  }, [safeClient?.id, safeClient?.email, profilePhoto, companyLogo, verificationDocs.govId, verificationDocs.govIdType, verificationDocs.businessReg])
+  }, [safeClient?.id, safeClient?.email, profilePhoto, companyLogo, verificationDocs.businessReg])
 
   useEffect(() => {
     setProfileDraft({
       primaryContact: safeClient?.primaryContact || settings.fullName || '',
       businessName: safeClient?.businessName || settings.businessName || onboardingData.businessName || '',
+      businessType: safeClient?.businessType || settings.businessType || onboardingData.businessType || '',
       phoneCountryCode: resolvePhoneParts(settings.phone || '').code,
       phone: resolvePhoneParts(settings.phone || '').number,
       roleInCompany: settings.roleInCompany || '',
@@ -3858,7 +4069,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       addressCountry: settings.addressCountry || settings.country || onboardingData.country || '',
     })
     setIsEditingProfile(false)
-  }, [safeClient?.id, safeClient?.email])
+  }, [safeClient?.id, safeClient?.email, safeClient?.primaryContact, safeClient?.businessName, safeClient?.businessType, safeClient?.country, settings, onboardingData])
 
   if (!safeClient) {
     return (
@@ -3978,9 +4189,9 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         updatedAt: nowIso,
       }
       if (nextVerificationStatus === COMPLIANCE_STATUS.FULL) {
-        nextStatusControl.identityVerificationApproved = true
+        // nextStatusControl.identityVerificationApproved = true
         nextStatusControl.businessVerificationApproved = true
-        nextStatusControl.identityVerificationApprovedAt = currentStatusControl?.identityVerificationApprovedAt || nowIso
+        // nextStatusControl.identityVerificationApprovedAt = currentStatusControl?.identityVerificationApprovedAt || nowIso
         nextStatusControl.businessVerificationApprovedAt = currentStatusControl?.businessVerificationApprovedAt || nowIso
       }
       writeScopedStorageObject(CLIENT_STATUS_CONTROL_STORAGE_KEY, normalizedEmail, nextStatusControl)
@@ -4034,6 +4245,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     }
   }
 
+  /*
   const saveIdentityVerificationApproval = (approved) => {
     if (!canEditClientSettings) {
       showToast?.('error', 'Insufficient Permissions')
@@ -4101,6 +4313,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     }
     showToast?.('success', approved ? 'Identity verification approved.' : 'Identity verification approval revoked.')
   }
+  */
 
   const saveBusinessVerificationApproval = (approved) => {
     if (!canEditClientSettings) {
@@ -4108,10 +4321,10 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       return
     }
     if (!normalizedEmail) return
-    if (approved && !identityVerificationApproved) {
-      showToast?.('error', 'Identity verification must be completed before business verification.')
-      return
-    }
+    // if (approved && !identityVerificationApproved) {
+    //   showToast?.('error', 'Identity verification must be completed before business verification.')
+    //   return
+    // }
     if (approved && !hasBusinessDocumentSubmission) {
       showToast?.('error', 'Business registration document is required before business approval.')
       return
@@ -4157,7 +4370,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
     pushClientVerificationBellNotification({
       type: approved ? 'approved' : 'info',
       message: approved
-        ? 'Business verification approved. Stage 3 is complete.'
+        ? 'Business verification approved.'
         : 'Business verification approval was revoked.',
       priority: approved ? 'important' : 'normal',
     })
@@ -4399,8 +4612,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
 
       const nextVerificationDocs = {
         ...getScopedStorageObject('verificationDocs', normalizedEmail),
-        govId: toTrimmedValue(identityDraft.govId),
-        govIdType: toTrimmedValue(identityDraft.govIdType),
+        // govId: toTrimmedValue(identityDraft.govId),
+        // govIdType: toTrimmedValue(identityDraft.govIdType),
         businessReg: toTrimmedValue(identityDraft.businessReg),
       }
       writeScopedStorageObject('verificationDocs', normalizedEmail, nextVerificationDocs)
@@ -4408,20 +4621,20 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       appendScopedClientActivityLog(normalizedEmail, {
         actorName: 'Admin User',
         actorRole: 'admin',
-        action: 'Updated identity assets',
-        details: 'Updated profile photo, company logo, or verification document references.',
+        action: 'Updated verification assets',
+        details: 'Updated profile photo, company logo, or business verification document references.',
       })
 
       onAdminActionLog?.({
-        action: 'Edited client identity assets',
+        action: 'Edited client verification assets',
         affectedUser: safeClient.businessName || normalizedEmail,
-        details: 'Updated profile picture, company logo, and identity asset metadata.',
+        details: 'Updated profile picture, company logo, and business verification asset metadata.',
       })
 
       const refreshed = readClientRows().find((row) => row.email === normalizedEmail)
       if (refreshed) setClientSnapshot(refreshed)
       setIsEditingIdentityAssets(false)
-      showToast?.('success', 'Identity assets updated.')
+      showToast?.('success', 'Verification assets updated.')
     } finally {
       setIsSavingIdentityAssets(false)
     }
@@ -4501,7 +4714,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
             />
           </div>
         </div>
-        <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <div className="mt-4 grid grid-cols-1 gap-3">
+          {/*
           <div className="rounded-md border border-border-light bg-background p-3">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs uppercase tracking-wide text-text-muted">Identity Verification</p>
@@ -4515,6 +4729,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 : 'Waiting for Government ID type, card number, and ID image submission.'}
             </p>
           </div>
+          */}
           <div className="rounded-md border border-border-light bg-background p-3">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs uppercase tracking-wide text-text-muted">Business Verification</p>
@@ -4569,7 +4784,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
               <button
                 type="button"
                 onClick={() => saveBusinessVerificationApproval(true)}
-                disabled={!canEditClientSettings || isSavingVerificationStatus || businessVerificationApproved || !hasBusinessDocumentSubmission || !identityVerificationApproved}
+                disabled={!canEditClientSettings || isSavingVerificationStatus || businessVerificationApproved || !hasBusinessDocumentSubmission}
                 className="h-8 px-3 border border-success text-success rounded-md text-xs font-semibold hover:bg-success-bg transition-colors disabled:opacity-60"
               >
                 Approve Business
@@ -4611,8 +4826,9 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
       <div className="bg-white rounded-lg shadow-card border border-border-light p-6 mb-6">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h3 className="text-base font-semibold text-text-primary">Profile & Identity Assets</h3>
-            <p className="text-sm text-text-muted mt-1">Manage client images and verification document references.</p>
+            <h3 className="text-base font-semibold text-text-primary">Profile & Verification Assets</h3>
+            <p className="text-sm text-text-muted mt-1">Manage client images and business verification document references.</p>
+            {/* Previous title: Profile & Identity Assets */}
           </div>
           {!isEditingIdentityAssets && canEditClientSettings ? (
             <button
@@ -4631,8 +4847,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                   setIdentityDraft({
                     profilePhoto: profilePhoto || '',
                     companyLogo: companyLogo || '',
-                    govId: verificationDocs.govId || '',
-                    govIdType: verificationDocs.govIdType || '',
+                    // govId: verificationDocs.govId || '',
+                    // govIdType: verificationDocs.govIdType || '',
                     businessReg: verificationDocs.businessReg || '',
                   })
                   setIsEditingIdentityAssets(false)
@@ -4709,15 +4925,8 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 </div>
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
-              <div>
-                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Government-issued ID</label>
-                <input value={identityDraft.govId} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, govId: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
-              <div>
-                <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Government ID Type</label>
-                <input value={identityDraft.govIdType} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, govIdType: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
-              </div>
+            {/* Government-issued ID and Government ID Type inputs are intentionally commented out for now. */}
+            <div className="grid grid-cols-1 mt-6">
               <div>
                 <label className="block text-[11px] uppercase tracking-wide text-text-muted mb-1">Business Registration Document</label>
                 <input value={identityDraft.businessReg} onChange={(event) => setIdentityDraft((prev) => ({ ...prev, businessReg: event.target.value }))} className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary" />
@@ -4748,10 +4957,9 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
                 </div>
               </div>
             </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+            {/* Government-issued ID and Government ID Type display cards are intentionally commented out for now. */}
+            <div className="grid grid-cols-1 mt-6">
               {[
-                ['Government-issued ID', verificationDocs.govId],
-                ['Government ID Type', verificationDocs.govIdType],
                 ['Business Registration Document', verificationDocs.businessReg],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-md border border-border-light bg-background px-3 py-2.5">
@@ -4768,7 +4976,7 @@ function AdminClientProfilePage({ client, setActivePage, showToast, onAdminActio
         <div className="flex items-center justify-between gap-3">
           <div>
             <h3 className="text-base font-semibold text-text-primary">Client Information</h3>
-            <p className="text-sm text-text-muted mt-1">Edit client identity and business metadata from here.</p>
+            <p className="text-sm text-text-muted mt-1">Edit client profile and business metadata from here.</p>
           </div>
           {!isEditingProfile && canEditClientSettings ? (
             <button
@@ -5133,7 +5341,7 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
     setFilterType('')
   }
 
-  const handleDocumentStatusChange = (row, nextStatus) => {
+  const handleDocumentStatusChange = async (row, nextStatus) => {
     if (!canReviewDocuments) {
       showToast?.('error', 'Insufficient Permissions')
       return
@@ -5189,11 +5397,11 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
 
     const bucket = CATEGORY_BUCKET_CONFIG[activeCategory]?.bundleKey || 'expenses'
     const reviewDocument = normalizeReviewDocumentRow(safeClient, bucket, row, 0)
-    const updatedBundle = updateClientDocumentReviewStatus(reviewDocument, normalizedNextStatus, notes, {
+    const updateResult = updateClientDocumentReviewStatus(reviewDocument, normalizedNextStatus, notes, {
       performedBy: adminActorName,
       unlockReason,
     })
-    if (!updatedBundle) {
+    if (!updateResult?.bundle) {
       showToast?.(
         'error',
         requiresClientFullVerificationForReviewDecision(normalizedNextStatus)
@@ -5203,7 +5411,15 @@ function AdminClientDocumentsPage({ client, setActivePage, showToast, onAdminAct
       return
     }
 
-    setDocumentBundle(updatedBundle)
+    setDocumentBundle(updateResult.bundle)
+    const syncResult = await persistAdminClientWorkspaceArtifacts({
+      client: safeClient,
+      documents: updateResult.bundle,
+      activityLog: updateResult.activityLog,
+    })
+    if (!syncResult.ok && !syncResult.skipped) {
+      showToast?.('error', syncResult?.data?.message || 'Document status updated locally, but backend sync failed.')
+    }
     onAdminActionLog?.({
       action: 'Reviewed client document',
       affectedUser: safeClient.businessName,
@@ -5576,7 +5792,7 @@ function AdminClientResolvedDocumentsPage({
   currentAdminAccount,
 }) {
   const [searchTerm, setSearchTerm] = useState('')
-  const [records, setRecords] = useState(() => readResolvedDocumentsForClient(client?.email || ''))
+  const [records, setRecords] = useState(() => readClientDocumentBundle(client).resolvedDocuments || [])
   const [title, setTitle] = useState('')
   const [notes, setNotes] = useState('')
   const [ticketReference, setTicketReference] = useState('')
@@ -5597,36 +5813,12 @@ function AdminClientResolvedDocumentsPage({
   const adminDisplayEmail = String(resolvedAdminAccount.email || '').trim().toLowerCase()
 
   useEffect(() => {
-    if (!normalizedClientEmail) {
+    if (!safeClient) {
       setRecords([])
       return
     }
-    setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
-  }, [normalizedClientEmail])
-
-  useEffect(() => {
-    if (!normalizedClientEmail) return
-    const refresh = () => {
-      setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
-    }
-    const handleStorage = (event) => {
-      if (!event.key || event.key === `kiaminaClientResolvedDocuments:${normalizedClientEmail}`) {
-        refresh()
-      }
-    }
-    const handleSyncEvent = (event) => {
-      const syncedEmail = String(event?.detail?.email || '').trim().toLowerCase()
-      if (!syncedEmail || syncedEmail === normalizedClientEmail) {
-        refresh()
-      }
-    }
-    window.addEventListener('storage', handleStorage)
-    window.addEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
-    return () => {
-      window.removeEventListener('storage', handleStorage)
-      window.removeEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
-    }
-  }, [normalizedClientEmail])
+    setRecords(readClientDocumentBundle(safeClient).resolvedDocuments || [])
+  }, [safeClient, normalizedClientEmail])
 
   useEffect(() => {
     if (signatureName) return
@@ -5767,15 +5959,29 @@ function AdminClientResolvedDocumentsPage({
         signatureAtIso: signatureAppliedAtIso,
         signatureMode: 'typed',
       }
-      const nextRows = appendResolvedDocumentForClient(normalizedClientEmail, record)
+      const bundle = readClientDocumentBundle(safeClient)
+      const nextRows = [record, ...(Array.isArray(bundle.resolvedDocuments) ? bundle.resolvedDocuments : []).filter((item) => item.id !== record.id)]
+      const nextBundle = {
+        ...bundle,
+        resolvedDocuments: nextRows,
+      }
+      writeClientDocumentBundle(normalizedClientEmail, nextBundle)
       setRecords(nextRows)
 
-      appendScopedClientActivityLog(normalizedClientEmail, {
+      const nextActivityLog = appendScopedClientActivityLog(normalizedClientEmail, {
         actorName: adminDisplayName,
         actorRole: 'admin',
         action: 'Delivered resolved document',
         details: `${record.filename} was delivered to client with e-signature.`,
       })
+      const syncResult = await persistAdminClientWorkspaceArtifacts({
+        client: safeClient,
+        documents: nextBundle,
+        activityLog: nextActivityLog,
+      })
+      if (!syncResult.ok && !syncResult.skipped) {
+        showToast?.('error', syncResult?.data?.message || 'Resolved document delivered locally, but backend sync failed.')
+      }
       appendClientBriefNotificationsToStorage(normalizedClientEmail, [{
         id: `RSD-NOTIFY-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
         type: 'important',
@@ -6106,19 +6312,28 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
   const selectedDocumentDecisionLocked = Boolean(selectedDocument?.source?.clientEmail) && !selectedDocumentClientFullyVerified
 
   useEffect(() => {
+    let isDisposed = false
     const syncFromStorage = () => {
       const nextRows = readAllDocumentsForReview(resolvedAdminAccount)
+      if (isDisposed) return
       setDocuments(nextRows)
       setSelectedDocument((prev) => {
         if (!prev) return prev
         return nextRows.find((item) => item.id === prev.id) || null
       })
     }
-    syncFromStorage()
+    const refreshDocuments = async () => {
+      await refreshAdminClientRowsFromBackend()
+      syncFromStorage()
+    }
+    void refreshDocuments()
     window.addEventListener('storage', syncFromStorage)
+    window.addEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, refreshDocuments)
     const intervalId = window.setInterval(syncFromStorage, 4000)
     return () => {
+      isDisposed = true
       window.removeEventListener('storage', syncFromStorage)
+      window.removeEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, refreshDocuments)
       window.clearInterval(intervalId)
     }
   }, [resolvedAdminAccount.adminLevel, resolvedAdminAccount.email])
@@ -6251,7 +6466,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
     setIsProcessingReviewAction(true)
     const execute = async () => {
       await waitForNetworkAwareDelay('search')
-      work()
+      await work()
     }
     try {
       if (typeof runWithSlowRuntimeWatch === 'function') {
@@ -6340,7 +6555,7 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
     }
   }
 
-  const applyReviewStatus = (nextStatus, notes = '', options = {}) => {
+  const applyReviewStatus = async (nextStatus, notes = '', options = {}) => {
     if (!selectedDocument) return false
     const normalizedNextStatus = normalizeDocumentReviewStatus(nextStatus, DOCUMENT_REVIEW_STATUS.PENDING_REVIEW)
     const updatedNote = notes || selectedDocument.notes || ''
@@ -6357,16 +6572,27 @@ function AdminDocumentReviewCenter({ showToast, currentAdminAccount, runWithSlow
     }
 
     if (selectedDocument.source) {
-      const updatedBundle = updateClientDocumentReviewStatus(selectedDocument, normalizedNextStatus, updatedNote, {
+      const updateResult = updateClientDocumentReviewStatus(selectedDocument, normalizedNextStatus, updatedNote, {
         performedBy: adminActorName,
         unlockReason,
       })
-      if (!updatedBundle) {
+      if (!updateResult?.bundle) {
         showToast(
           'error',
           isDecisionStatus ? CLIENT_VERIFICATION_LOCK_MESSAGE : 'Unable to update document status.',
         )
         return false
+      }
+      const syncClient = readClientRows().find((row) => (
+        String(row?.email || '').trim().toLowerCase() === selectedClientEmail
+      )) || { email: selectedClientEmail, uid: selectedDocument?.source?.clientUid || '' }
+      const syncResult = await persistAdminClientWorkspaceArtifacts({
+        client: syncClient,
+        documents: updateResult.bundle,
+        activityLog: updateResult.activityLog,
+      })
+      if (!syncResult.ok && !syncResult.skipped) {
+        showToast('error', syncResult?.data?.message || 'Document status updated locally, but backend sync failed.')
       }
       const nextRows = readAllDocumentsForReview(resolvedAdminAccount)
       setDocuments(nextRows)
@@ -7085,6 +7311,7 @@ function AdminSupportLeadsPage({ setActivePage, showToast, currentAdminAccount, 
     || 'Admin User'
 
   useEffect(() => {
+    void refreshSupportStateFromBackend()
     const unsubscribe = subscribeSupportCenter((snapshot) => setSupportSnapshot(snapshot))
     return unsubscribe
   }, [])
@@ -7739,6 +7966,7 @@ function AdminCommunicationsCenter({ showToast, currentAdminAccount, onAdminActi
   }, [])
 
   useEffect(() => {
+    void refreshSupportStateFromBackend()
     const unsubscribe = subscribeSupportCenter((snapshot) => setSupportSnapshot(snapshot))
     return unsubscribe
   }, [])
@@ -9499,10 +9727,19 @@ function AdminActivityLogPage({ currentAdminAccount = null }) {
       setLogs(storedLogs)
     }
     syncLogs()
-    window.addEventListener('storage', syncLogs)
+    const handleStorage = (event) => {
+      if (!event.key || event.key === ADMIN_ACTIVITY_STORAGE_KEY) {
+        syncLogs()
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    window.addEventListener(ADMIN_ACTIVITY_SYNC_EVENT, syncLogs)
+    window.addEventListener('focus', syncLogs)
     const intervalId = window.setInterval(syncLogs, 4000)
     return () => {
-      window.removeEventListener('storage', syncLogs)
+      window.removeEventListener('storage', handleStorage)
+      window.removeEventListener(ADMIN_ACTIVITY_SYNC_EVENT, syncLogs)
+      window.removeEventListener('focus', syncLogs)
       window.clearInterval(intervalId)
     }
   }, [currentAdminAccount])
@@ -9520,10 +9757,12 @@ function AdminActivityLogPage({ currentAdminAccount = null }) {
     if (normalizedFilter === 'all') return logs
     return logs.filter((log) => {
       const level = normalizeAdminLevel(log?.adminLevel || ADMIN_LEVELS.SUPER)
-      if (normalizedFilter === 'operations') return isOperationsAdminLevel(level)
-      if (normalizedFilter === 'technical') return isTechnicalAdminLevel(level)
+      if (normalizedFilter === 'owner') return isOwnerAdminLevel(level)
       if (normalizedFilter === 'super') return isSuperAdminLevel(level)
-      return true
+      if (normalizedFilter === 'area_accountant') return level === ADMIN_LEVELS.AREA_ACCOUNTANT
+      if (normalizedFilter === 'customer_service') return level === ADMIN_LEVELS.CUSTOMER_SERVICE
+      if (normalizedFilter === 'technical_support') return level === ADMIN_LEVELS.TECHNICAL_SUPPORT
+      return false
     })
   }, [logs, scopeFilter])
 
@@ -9536,9 +9775,11 @@ function AdminActivityLogPage({ currentAdminAccount = null }) {
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {[
           { id: 'all', label: 'All' },
-          { id: 'operations', label: 'Operations' },
-          { id: 'technical', label: 'Technical' },
+          { id: 'owner', label: 'Owner' },
           { id: 'super', label: 'Super Admin' },
+          { id: 'area_accountant', label: 'Area Accountant' },
+          { id: 'customer_service', label: 'Customer Service' },
+          { id: 'technical_support', label: 'Technical Support' },
         ].map((item) => (
           <button
             key={item.id}

@@ -60,11 +60,6 @@ import KiaminaLogo from '../../common/KiaminaLogo'
 import { getCachedFileBlob } from '../../../utils/fileCache'
 import { buildClientDownloadFilename } from '../../../utils/downloadFilename'
 import { parseFirstWorksheet } from '../../../utils/excelWorkbook'
-import {
-  markResolvedDocumentDownloaded,
-  readResolvedDocumentsForClient,
-  RESOLVED_DOCUMENTS_SYNC_EVENT,
-} from '../../../utils/resolvedDocuments'
 import { ClientSupportPageExperience, ClientSupportWidgetExperience } from '../support/ClientSupportExperience'
 import DotLottiePreloader from '../../common/DotLottiePreloader'
 import { registerNewsletterSubscriberLead } from '../../../utils/supportCenter'
@@ -570,7 +565,7 @@ function Sidebar({
           <div className="w-8 h-8 rounded overflow-hidden flex-shrink-0 bg-white border border-border-light flex items-center justify-center">
             {companyLogo
               ? <img src={companyLogo} alt="Company Logo" className="w-full h-full object-contain" />
-              : <KiaminaLogo className="h-6 w-auto" alt="Kiamina logo" />}
+              : <span className="text-[9px] font-medium uppercase tracking-[0.18em] text-text-muted">No Logo</span>}
           </div>
           <div className="text-sm font-medium text-text-primary inline-flex items-center gap-1.5">
             <span>{resolvedCompanyName || 'Company Name Not Set'}</span>
@@ -652,6 +647,7 @@ function TopBar({
   profilePhoto,
   clientFirstName,
   activePage = '',
+  showDashboardGreeting = true,
   isIdentityVerified = false,
   notifications = [],
   onNotificationClick,
@@ -664,7 +660,6 @@ function TopBar({
   searchTerm = '',
   onSearchTermChange,
   searchPlaceholder = '',
-  searchSuggestions = [],
   searchState = 'idle',
   searchResults = [],
   onSearchSubmit,
@@ -672,7 +667,7 @@ function TopBar({
   onSearchResultsDismiss,
 }) {
   const displayName = clientFirstName?.trim() || 'Client'
-  const showDashboardGreeting = String(activePage || '').trim() === 'dashboard'
+  const shouldShowDashboardGreeting = showDashboardGreeting && String(activePage || '').trim() === 'dashboard'
   const greetingMeta = getDashboardGreetingMeta(displayName)
   const GreetingIcon = greetingMeta.icon
   const fallbackInitial = displayName.charAt(0).toUpperCase() || 'C'
@@ -683,11 +678,9 @@ function TopBar({
   const resolvedSearchTerm = String(searchTerm || '')
   const resolvedSearchPlaceholder = searchPlaceholder
     || (isImpersonationMode ? 'Search client data (admin view)...' : 'Search transactions, documents...')
-  const resolvedSearchSuggestions = buildSearchSuggestions(searchSuggestions, 14)
   const resolvedSearchState = String(searchState || 'idle')
   const resolvedSearchResults = Array.isArray(searchResults) ? searchResults : []
   const shouldShowSearchPanel = resolvedSearchState !== 'idle'
-  const topBarSearchListId = 'client-dashboard-topbar-search-suggestions'
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -720,7 +713,7 @@ function TopBar({
         >
           <Menu className="w-5 h-5" />
         </button>
-        {showDashboardGreeting && (
+        {shouldShowDashboardGreeting && (
           <div className="hidden lg:flex items-center gap-2.5 h-10 px-3 rounded-xl border border-primary/25 bg-gradient-to-r from-primary/10 via-white to-success/10 shadow-sm flex-shrink-0">
             <div className="w-7 h-7 rounded-full bg-white border border-primary/20 text-primary inline-flex items-center justify-center">
               <GreetingIcon className="w-4 h-4" />
@@ -748,20 +741,12 @@ function TopBar({
               }
             }}
             placeholder={resolvedSearchPlaceholder}
-            list={resolvedSearchSuggestions.length > 0 ? topBarSearchListId : undefined}
             className="w-full h-9 pl-10 pr-10 bg-background border border-border rounded-md text-sm focus:outline-none focus:border-primary focus:bg-white transition-colors"
           />
           {resolvedSearchState === 'loading' && (
             <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
               <DotLottiePreloader size={18} />
             </div>
-          )}
-          {resolvedSearchSuggestions.length > 0 && (
-            <datalist id={topBarSearchListId}>
-              {resolvedSearchSuggestions.map((item) => (
-                <option key={item} value={item} />
-              ))}
-            </datalist>
           )}
           {shouldShowSearchPanel && (
             <div className="absolute left-0 right-0 mt-1 bg-white border border-border rounded-md shadow-card z-[55] max-h-72 overflow-y-auto">
@@ -911,7 +896,10 @@ function DashboardPage({
     return Number.isFinite(parsed) ? parsed : 0
   }
   const sortedRecords = [...(Array.isArray(records) ? records : [])]
-    .sort((a, b) => parseDateValue(b.date) - parseDateValue(a.date))
+    .sort((a, b) => (
+      parseDateValue(b.updatedAtIso || b.createdAtIso || b.timestampIso || b.date)
+      - parseDateValue(a.updatedAtIso || a.createdAtIso || a.timestampIso || a.date)
+    ))
 
   const hasDocumentSummary = Boolean(
     documentSummary
@@ -1636,7 +1624,7 @@ function HomePage({ onGetStarted, onLogin }) {
   const [newsletterEmail, setNewsletterEmail] = useState('')
   const [newsletterStatus, setNewsletterStatus] = useState({ type: '', message: '' })
 
-  const handleSubscribeNewsletter = () => {
+  const handleSubscribeNewsletter = async () => {
     const normalizedEmail = String(newsletterEmail || '').trim().toLowerCase()
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
       setNewsletterStatus({
@@ -1646,9 +1634,11 @@ function HomePage({ onGetStarted, onLogin }) {
       return
     }
 
-    const result = registerNewsletterSubscriberLead({
+    const result = await registerNewsletterSubscriberLead({
       contactEmail: normalizedEmail,
       fullName: String(newsletterName || '').trim(),
+      capturePage: 'dashboard',
+      capturePath: '/dashboard',
     })
     if (!result.ok) {
       setNewsletterStatus({
@@ -2455,7 +2445,7 @@ function UploadHistoryPage({
         || String(item.fileId || '').toLowerCase().includes(query)
         || String(item.category || '').toLowerCase().includes(query)
       )
-      const itemDateMs = toDateMs(item.date)
+      const itemDateMs = toDateMs(item.timestampIso || item.date)
       const normalizedFrom = clampFilterDateToToday(dateFrom)
       const normalizedTo = clampFilterDateToToday(dateTo)
       const fromMs = toDateMs(normalizedFrom)
@@ -2476,8 +2466,8 @@ function UploadHistoryPage({
     })
     .sort((a, b) => {
       if (sortBy === 'date') {
-        const left = toDateMs(a.date)
-        const right = toDateMs(b.date)
+        const left = toDateMs(a.timestampIso || a.date)
+        const right = toDateMs(b.timestampIso || b.date)
         const safeLeft = Number.isNaN(left) ? 0 : left
         const safeRight = Number.isNaN(right) ? 0 : right
         return sortOrder === 'desc' ? safeRight - safeLeft : safeLeft - safeRight
@@ -2854,7 +2844,8 @@ function UploadHistoryPage({
 }
 
 function ResolvedDocumentsPage({
-  clientEmail = '',
+  records = [],
+  onRecordsChange,
   downloadBusinessName = '',
   showToast,
   globalSearchTerm = '',
@@ -2871,40 +2862,7 @@ function ResolvedDocumentsPage({
     }
     setLocalSearchTerm(value)
   }
-  const [records, setRecords] = useState([])
-  const normalizedClientEmail = String(clientEmail || '').trim().toLowerCase()
-
-  useEffect(() => {
-    if (!normalizedClientEmail) {
-      setRecords([])
-      return
-    }
-    setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
-  }, [normalizedClientEmail])
-
-  useEffect(() => {
-    if (!normalizedClientEmail) return
-    const refresh = () => {
-      setRecords(readResolvedDocumentsForClient(normalizedClientEmail))
-    }
-    const handleStorage = (event) => {
-      if (!event.key || event.key === `kiaminaClientResolvedDocuments:${normalizedClientEmail}`) {
-        refresh()
-      }
-    }
-    const handleSyncEvent = (event) => {
-      const syncedEmail = String(event?.detail?.email || '').trim().toLowerCase()
-      if (!syncedEmail || syncedEmail === normalizedClientEmail) {
-        refresh()
-      }
-    }
-    window.addEventListener('storage', handleStorage)
-    window.addEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
-    return () => {
-      window.removeEventListener('storage', handleStorage)
-      window.removeEventListener(RESOLVED_DOCUMENTS_SYNC_EVENT, handleSyncEvent)
-    }
-  }, [normalizedClientEmail])
+  const safeRecords = Array.isArray(records) ? records : []
 
   const toDisplayTimestamp = (value = '') => {
     const parsed = Date.parse(value || '')
@@ -2919,7 +2877,7 @@ function ResolvedDocumentsPage({
     })
   }
 
-  const filteredRecords = records
+  const filteredRecords = safeRecords
     .filter((row) => {
       const query = String(searchTerm || '').trim().toLowerCase()
       if (!query) return true
@@ -2937,7 +2895,7 @@ function ResolvedDocumentsPage({
     ))
 
   const searchSuggestions = buildSearchSuggestions(
-    records.flatMap((row) => [
+    safeRecords.flatMap((row) => [
       row.title,
       row.filename,
       row.ticketReference,
@@ -2947,8 +2905,8 @@ function ResolvedDocumentsPage({
     14,
   )
   const searchListId = 'resolved-documents-search-suggestions'
-  const totalDelivered = records.length
-  const totalDownloaded = records.filter((row) => Number(row.downloadCount || 0) > 0).length
+  const totalDelivered = safeRecords.length
+  const totalDownloaded = safeRecords.filter((row) => Number(row.downloadCount || 0) > 0).length
 
   const handleDownload = async (row = {}) => {
     const cacheKey = String(row.fileCacheKey || '').trim()
@@ -2972,11 +2930,18 @@ function ResolvedDocumentsPage({
     anchor.click()
     document.body.removeChild(anchor)
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
-
-    const nextRows = markResolvedDocumentDownloaded(normalizedClientEmail, row.id || row.fileId || '')
-    if (Array.isArray(nextRows) && nextRows.length > 0) {
-      setRecords(nextRows)
-    }
+    const nextTimestampIso = new Date().toISOString()
+    onRecordsChange?.((previousRows) => (
+      (Array.isArray(previousRows) ? previousRows : []).map((item) => {
+        const matches = item.id === row.id || item.fileId === row.fileId
+        if (!matches) return item
+        return {
+          ...item,
+          downloadCount: Math.max(0, Number(item.downloadCount || 0)) + 1,
+          lastDownloadedAtIso: nextTimestampIso,
+        }
+      })
+    ))
   }
 
   return (

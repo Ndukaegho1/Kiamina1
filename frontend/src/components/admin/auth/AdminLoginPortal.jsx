@@ -10,6 +10,7 @@ function AdminLoginPortal({
   onVerifyOtp,
   onResendOtp,
   onCancelOtp,
+  onStartOwnerSetup,
   onSwitchToClientLogin,
 }) {
   const [formState, setFormState] = useState({
@@ -125,6 +126,20 @@ function AdminLoginPortal({
             {isSubmitting ? 'Processing...' : 'Sign In to Admin Portal'}
           </button>
         </form>
+
+        <div className="mt-5 rounded-lg border border-border-light bg-[#FAFBFF] px-4 py-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">First-Time Owner Setup</p>
+          <p className="mt-2 text-sm text-text-secondary">
+            Creating the primary owner admin account for the first time? Start owner setup here, then return to this portal for future sign-ins.
+          </p>
+          <button
+            type="button"
+            onClick={onStartOwnerSetup}
+            className="mt-3 h-10 w-full rounded-md border border-primary text-primary text-sm font-semibold hover:bg-primary-tint transition-colors"
+          >
+            Start Owner Setup
+          </button>
+        </div>
 
         <div className="mt-6 pt-4 border-t border-border-light">
           <button

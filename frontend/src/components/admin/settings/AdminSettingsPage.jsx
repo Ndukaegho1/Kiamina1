@@ -51,6 +51,8 @@ const ADMIN_ACTIVITY_STORAGE_KEY = 'kiaminaAdminActivityLog'
 const ADMIN_SETTINGS_STORAGE_KEY = 'kiaminaAdminSettings'
 const ADMIN_TRASH_STORAGE_KEY = 'kiaminaAdminTrash'
 const CLIENT_SESSION_CONTROL_STORAGE_KEY = 'kiaminaClientSessionControl'
+const ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT = 'kiamina:admin-client-management-sync'
+const ADMIN_ACTIVITY_SYNC_EVENT = 'kiamina:admin-activity-sync'
 const ADMIN_INVITE_EXPIRY_HOURS = 48
 const adminEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const maskPhoneNumber = (value = '') => {
@@ -136,6 +138,134 @@ const getClientAccounts = (accounts) => (
     .filter((account) => normalizeRoleWithLegacyFallback(account.role, account.email || '') === 'client')
     .sort((left, right) => String(left.fullName || left.email || '').localeCompare(String(right.fullName || right.email || '')))
 )
+
+const mapBackendClientToSettingsAccount = (entry = {}) => {
+  const normalizedEmail = String(entry?.email || '').trim().toLowerCase()
+  const clientProfile = entry?.clientProfile && typeof entry.clientProfile === 'object' ? entry.clientProfile : {}
+  const entityProfile = entry?.entityProfile && typeof entry.entityProfile === 'object' ? entry.entityProfile : {}
+  const clientWorkspace = entry?.clientWorkspace && typeof entry.clientWorkspace === 'object' ? entry.clientWorkspace : {}
+  const settingsProfile = clientWorkspace?.settingsProfile && typeof clientWorkspace.settingsProfile === 'object'
+    ? clientWorkspace.settingsProfile
+    : {}
+  const fullName = String(
+    entry?.displayName
+    || clientProfile?.fullName
+    || settingsProfile?.fullName
+    || normalizedEmail
+    || ''
+  ).trim()
+  const businessName = String(
+    entry?.businessName
+    || entityProfile?.businessName
+    || settingsProfile?.businessName
+    || ''
+  ).trim()
+
+  return {
+    uid: String(entry?.uid || '').trim(),
+    email: normalizedEmail,
+    fullName,
+    businessName,
+    status: String(entry?.status || 'active').trim().toLowerCase() || 'active',
+    verificationStatus: String(entry?.verificationStatus || '').trim(),
+    onboardingCompleted: Boolean(entry?.onboardingCompleted),
+    role: 'client',
+    createdAt: entry?.createdAt || '',
+    updatedAt: entry?.updatedAt || '',
+  }
+}
+
+const normalizeBackendClientSettingsAccounts = (clients = []) => (
+  (Array.isArray(clients) ? clients : [])
+    .map((entry) => mapBackendClientToSettingsAccount(entry))
+    .filter((account) => account.email)
+    .sort((left, right) => String(left.fullName || left.email || '').localeCompare(String(right.fullName || right.email || '')))
+)
+
+const readPersistedAuthUser = () => {
+  if (typeof window === 'undefined') return null
+  try {
+    const sessionUser = sessionStorage.getItem('kiaminaAuthUser')
+    if (sessionUser) {
+      return {
+        storageType: 'session',
+        user: JSON.parse(sessionUser),
+      }
+    }
+  } catch {
+    // Ignore malformed session auth payloads.
+  }
+
+  try {
+    const persistentUser = localStorage.getItem('kiaminaAuthUser')
+    return persistentUser
+      ? {
+          storageType: 'local',
+          user: JSON.parse(persistentUser),
+        }
+      : null
+  } catch {
+    return null
+  }
+}
+
+const writePersistedAuthUser = (nextUser, storageType = 'local') => {
+  if (typeof window === 'undefined' || !nextUser || typeof nextUser !== 'object') return
+  const serialized = JSON.stringify(nextUser)
+  if (storageType === 'session') {
+    sessionStorage.setItem('kiaminaAuthUser', serialized)
+    return
+  }
+  localStorage.setItem('kiaminaAuthUser', serialized)
+}
+
+const mergeBackendAdminAccountsIntoLocal = (staff = []) => {
+  const existingAccounts = readAccounts()
+  const nonAdminAccounts = existingAccounts.filter((account) => !isAdminAccount(account))
+  const existingAdminByEmail = new Map(
+    getAdminAccounts(existingAccounts)
+      .map((account) => [String(account.email || '').trim().toLowerCase(), account]),
+  )
+
+  const nextAdminAccounts = (Array.isArray(staff) ? staff : [])
+    .map((entry) => {
+      const normalizedEmail = String(entry?.email || '').trim().toLowerCase()
+      if (!normalizedEmail) return null
+      const existingAccount = existingAdminByEmail.get(normalizedEmail) || {}
+      const backendSecurityPreferences = entry?.dashboardSecurityPreferences && typeof entry.dashboardSecurityPreferences === 'object'
+        ? entry.dashboardSecurityPreferences
+        : undefined
+      return normalizeAdminAccount({
+        ...existingAccount,
+        uid: String(entry?.uid || existingAccount.uid || '').trim(),
+        email: normalizedEmail,
+        fullName: String(
+          entry?.adminProfile?.displayName
+          || entry?.displayName
+          || existingAccount.fullName
+          || normalizedEmail.split('@')[0]
+          || 'Admin User'
+        ).trim(),
+        role: 'admin',
+        status: String(entry?.status || existingAccount.status || 'active').trim().toLowerCase() || 'active',
+        adminLevel: String(entry?.adminAccess?.adminLevel || existingAccount.adminLevel || '').trim(),
+        adminPermissions: Array.isArray(entry?.adminAccess?.adminPermissions)
+          ? entry.adminAccess.adminPermissions
+          : existingAccount.adminPermissions,
+        mustChangePassword: Boolean(entry?.adminAccess?.mustChangePassword),
+        roleInCompany: String(entry?.adminProfile?.jobTitle || existingAccount.roleInCompany || '').trim(),
+        department: String(entry?.adminProfile?.department || existingAccount.department || '').trim(),
+        phoneNumber: String(entry?.adminProfile?.phone || existingAccount.phoneNumber || '').trim(),
+        adminSecurityPreferences: backendSecurityPreferences || existingAccount.adminSecurityPreferences,
+        createdAt: entry?.createdAt || existingAccount.createdAt || '',
+        updatedAt: entry?.updatedAt || existingAccount.updatedAt || '',
+      })
+    })
+    .filter(Boolean)
+
+  writeAccounts([...nonAdminAccounts, ...nextAdminAccounts])
+  return nextAdminAccounts
+}
 
 const createInviteToken = () => (
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
@@ -243,6 +373,10 @@ const appendActivityLog = (entry) => {
     ...existingLogs,
   ]
   writeArrayToStorage(ADMIN_ACTIVITY_STORAGE_KEY, nextLogs)
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(ADMIN_ACTIVITY_SYNC_EVENT))
+    window.dispatchEvent(new Event('kiamina:admin-dashboard-realtime-sync'))
+  }
 }
 
 const appendAdminTrashEntry = (entry = {}) => {
@@ -372,13 +506,110 @@ function AdminSettingsPage({
     permissions: getDefaultPermissionsForAdminLevel(ADMIN_LEVELS.AREA_ACCOUNTANT),
   })
 
-  const refreshAdminData = () => {
+  const deriveBackendRoleFromAdminLevel = (adminLevel = '') => {
+    const normalizedLevel = normalizeAdminLevel(adminLevel)
+    if (normalizedLevel === ADMIN_LEVELS.OWNER) return 'owner'
+    if (normalizedLevel === ADMIN_LEVELS.SUPER) return 'superadmin'
+    return 'admin'
+  }
+
+  const syncAdminStaffToBackend = async ({
+    uid = '',
+    status,
+    adminLevel,
+    permissions,
+    fullName,
+    roleInCompany,
+    department,
+    phoneNumber,
+  } = {}) => {
+    const normalizedUid = String(uid || '').trim()
+    if (!normalizedUid) return { ok: false }
+
+    const nameParts = String(fullName || '').trim().split(/\s+/).filter(Boolean)
+    const firstName = nameParts[0] || ''
+    const lastName = nameParts.slice(1).join(' ')
+
+    try {
+      const response = await apiFetch(`/api/users/admin/staff/${encodeURIComponent(normalizedUid)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...(status ? { status } : {}),
+          adminProfile: {
+            firstName,
+            lastName,
+            displayName: String(fullName || '').trim(),
+            jobTitle: String(roleInCompany || '').trim(),
+            department: String(department || '').trim(),
+            phone: String(phoneNumber || '').trim(),
+            timezone: 'Africa/Lagos',
+          },
+          adminAccess: {
+            adminLevel: normalizeAdminLevel(adminLevel),
+            adminPermissions: Array.isArray(permissions) ? permissions : [],
+            mustChangePassword: false,
+          },
+        }),
+      })
+      return { ok: response.ok }
+    } catch {
+      return { ok: false }
+    }
+  }
+
+  const refreshAdminData = async () => {
     const accounts = readAccounts()
-    setAdminAccounts(getAdminAccounts(accounts))
     setClientAccounts(getClientAccounts(accounts))
     setAdminInvites(readInvites())
     setClientAssignments(readClientAssignmentsFromStorage())
+
+    try {
+      const response = await apiFetch('/api/users/admin/client-management?limit=200&sortBy=updatedAt&sortOrder=desc')
+      const payload = await response.json().catch(() => ({}))
+      if (response.ok && Array.isArray(payload?.clients)) {
+        setClientAccounts(normalizeBackendClientSettingsAccounts(payload.clients))
+      }
+    } catch {
+      // Fall back to the local client registry below.
+    }
+
+    try {
+      const response = await apiFetch('/api/users/admin/staff')
+      const payload = await response.json().catch(() => ({}))
+      if (response.ok && Array.isArray(payload?.staff)) {
+        setAdminAccounts(mergeBackendAdminAccountsIntoLocal(payload.staff))
+        return
+      }
+    } catch {
+      // Fall back to the local mirror below.
+    }
+
+    setAdminAccounts(getAdminAccounts(readAccounts()))
   }
+
+  useEffect(() => {
+    void refreshAdminData()
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined
+
+    const handleClientManagementSync = () => {
+      void refreshAdminData()
+    }
+    const handleWindowFocus = () => {
+      void refreshAdminData()
+    }
+
+    window.addEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, handleClientManagementSync)
+    window.addEventListener('focus', handleWindowFocus)
+
+    return () => {
+      window.removeEventListener(ADMIN_CLIENT_MANAGEMENT_SYNC_EVENT, handleClientManagementSync)
+      window.removeEventListener('focus', handleWindowFocus)
+    }
+  }, [])
 
   useEffect(() => {
     const validClientEmailSet = new Set(
@@ -425,13 +656,26 @@ function AdminSettingsPage({
       if (savedSecurity) {
         const parsedSecurity = JSON.parse(savedSecurity)
         setSecurityForm(normalizeAdminSecurityPreferences(parsedSecurity))
+      } else if (currentAdmin.adminSecurityPreferences && typeof currentAdmin.adminSecurityPreferences === 'object') {
+        setSecurityForm(normalizeAdminSecurityPreferences(currentAdmin.adminSecurityPreferences))
       } else {
         setSecurityForm(normalizeAdminSecurityPreferences())
       }
     } catch {
-      setSecurityForm(normalizeAdminSecurityPreferences())
+      if (currentAdmin.adminSecurityPreferences && typeof currentAdmin.adminSecurityPreferences === 'object') {
+        setSecurityForm(normalizeAdminSecurityPreferences(currentAdmin.adminSecurityPreferences))
+      } else {
+        setSecurityForm(normalizeAdminSecurityPreferences())
+      }
     }
-  }, [currentAdmin.email, currentAdmin.fullName, currentAdmin.roleInCompany, currentAdmin.department, currentAdmin.phoneNumber])
+  }, [
+    currentAdmin.adminSecurityPreferences,
+    currentAdmin.email,
+    currentAdmin.fullName,
+    currentAdmin.roleInCompany,
+    currentAdmin.department,
+    currentAdmin.phoneNumber,
+  ])
 
   useEffect(() => {
     setEmailChangeForm({ nextEmail: '', otpCode: '' })
@@ -525,7 +769,7 @@ function AdminSettingsPage({
     }
   }
 
-  const saveProfile = () => {
+  const saveProfile = async () => {
     const normalizedEmail = currentAdmin.email?.trim()?.toLowerCase()
     if (!normalizedEmail) return
     if (!profileForm.fullName.trim()) {
@@ -533,7 +777,36 @@ function AdminSettingsPage({
       return
     }
 
+    const normalizedProfilePhoneNumber = formatPhoneNumber(profileForm.phoneCountryCode, profileForm.phoneNumber)
     setFormError('')
+
+    try {
+      const nameParts = profileForm.fullName.trim().split(/\s+/).filter(Boolean)
+      const response = await apiFetch('/api/users/me/admin-dashboard', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          adminProfile: {
+            firstName: nameParts[0] || '',
+            lastName: nameParts.slice(1).join(' '),
+            displayName: profileForm.fullName.trim(),
+            jobTitle: profileForm.roleInCompany.trim(),
+            department: profileForm.department.trim(),
+            phone: normalizedProfilePhoneNumber,
+            timezone: 'Africa/Lagos',
+          },
+        }),
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        setFormError(payload?.message || 'Unable to save admin profile right now.')
+        return
+      }
+    } catch {
+      setFormError('Unable to save admin profile right now.')
+      return
+    }
+
     const allAccounts = readAccounts()
     const matchIndex = allAccounts.findIndex((account) => account.email?.trim()?.toLowerCase() === normalizedEmail)
     if (matchIndex === -1) {
@@ -542,7 +815,6 @@ function AdminSettingsPage({
     }
 
     const nextAccounts = [...allAccounts]
-    const normalizedProfilePhoneNumber = formatPhoneNumber(profileForm.phoneCountryCode, profileForm.phoneNumber)
     nextAccounts[matchIndex] = normalizeAdminAccount({
       ...nextAccounts[matchIndex],
       fullName: profileForm.fullName.trim(),
@@ -593,15 +865,43 @@ function AdminSettingsPage({
     notify('success', 'System settings saved.')
   }
 
-  const saveSecuritySettings = () => {
+  const saveSecuritySettings = async () => {
     const normalizedEmail = currentAdmin.email?.trim()?.toLowerCase()
     if (!normalizedEmail) return
     const normalizedSecurityForm = normalizeAdminSecurityPreferences(securityForm)
+
+    try {
+      const response = await apiFetch('/api/users/me/admin-dashboard', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          securityPreferences: normalizedSecurityForm,
+        }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setFormError(payload?.message || 'Unable to save security preferences right now.')
+        return
+      }
+    } catch {
+      setFormError('Unable to save security preferences right now.')
+      return
+    }
+
     localStorage.setItem(
       getAdminSecurityStorageKey(normalizedEmail),
       JSON.stringify(normalizedSecurityForm),
     )
     setSecurityForm(normalizedSecurityForm)
+
+    const persistedAuth = readPersistedAuthUser()
+    if (persistedAuth?.user && String(persistedAuth.user.email || '').trim().toLowerCase() === normalizedEmail) {
+      writePersistedAuthUser({
+        ...persistedAuth.user,
+        adminSecurityPreferences: normalizedSecurityForm,
+      }, persistedAuth.storageType)
+    }
+
     appendScopedActivityLog({
       action: 'Updated security preferences',
       details: normalizedEmail,
@@ -609,7 +909,7 @@ function AdminSettingsPage({
     notify('success', 'Security preferences saved.')
   }
 
-  const updatePassword = () => {
+  const updatePassword = async () => {
     const normalizedEmail = currentAdmin.email?.trim()?.toLowerCase()
     if (!normalizedEmail) return
 
@@ -626,25 +926,38 @@ function AdminSettingsPage({
       return
     }
 
-    const allAccounts = readAccounts()
-    const matchIndex = allAccounts.findIndex((account) => account.email?.trim()?.toLowerCase() === normalizedEmail)
-    if (matchIndex === -1) {
-      setFormError('Unable to locate your admin account.')
-      return
-    }
-    if (allAccounts[matchIndex].password !== passwordForm.currentPassword) {
-      setFormError('Current password is incorrect.')
+    setFormError('')
+    try {
+      const response = await apiFetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          currentPassword: passwordForm.currentPassword,
+          newPassword: passwordForm.newPassword,
+          confirmPassword: passwordForm.confirmPassword,
+        }),
+      })
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setFormError(payload?.message || 'Unable to update your password right now.')
+        return
+      }
+    } catch {
+      setFormError('Unable to update your password right now.')
       return
     }
 
-    setFormError('')
-    const nextAccounts = [...allAccounts]
-    nextAccounts[matchIndex] = {
-      ...nextAccounts[matchIndex],
-      password: passwordForm.newPassword,
-      mustChangePassword: false,
+    const allAccounts = readAccounts()
+    const matchIndex = allAccounts.findIndex((account) => account.email?.trim()?.toLowerCase() === normalizedEmail)
+    if (matchIndex !== -1) {
+      const nextAccounts = [...allAccounts]
+      nextAccounts[matchIndex] = {
+        ...nextAccounts[matchIndex],
+        password: passwordForm.newPassword,
+        mustChangePassword: false,
+      }
+      writeAccounts(nextAccounts)
     }
-    writeAccounts(nextAccounts)
     setPasswordForm({
       currentPassword: '',
       newPassword: '',
@@ -1374,7 +1687,62 @@ function AdminSettingsPage({
             return
           }
 
+          let createdUid = ''
+          try {
+            const createResponse = await apiFetch('/api/auth/admin/accounts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                email: confirmAction.payload.email,
+                fullName: confirmAction.payload.fullName,
+                password: confirmAction.payload.password,
+                role: deriveBackendRoleFromAdminLevel(targetAdminLevel),
+                status: 'active',
+              }),
+            })
+            const createPayload = await createResponse.json().catch(() => ({}))
+            if (!createResponse.ok) {
+              setFormError(createPayload?.message || 'Unable to create admin account right now.')
+              return
+            }
+            createdUid = String(createPayload?.account?.uid || '').trim()
+          } catch {
+            setFormError('Unable to create admin account right now.')
+            return
+          }
+
+          if (createdUid) {
+            try {
+              await apiFetch('/api/users/sync-from-auth', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  uid: createdUid,
+                  email: confirmAction.payload.email,
+                  displayName: confirmAction.payload.fullName,
+                  roles: ['admin'],
+                }),
+              })
+            } catch {
+              // Best effort. Admin can still sign in because auth account creation already succeeded.
+            }
+            await syncAdminStaffToBackend({
+              uid: createdUid,
+              status: 'active',
+              adminLevel: targetAdminLevel,
+              permissions: resolvePermissionSelection(
+                confirmAction.payload.permissions,
+                targetAdminLevel,
+              ),
+              fullName: confirmAction.payload.fullName,
+              roleInCompany: confirmAction.payload.roleInCompany || '',
+              department: confirmAction.payload.department || '',
+              phoneNumber: confirmAction.payload.phoneNumber || '',
+            })
+          }
+
           const createdAdmin = normalizeAdminAccount({
+            uid: createdUid,
             fullName: confirmAction.payload.fullName,
             email: confirmAction.payload.email,
             password: confirmAction.payload.password,
@@ -1550,6 +1918,16 @@ function AdminSettingsPage({
             adminPermissions: selectedPermissions,
           })
           writeAccounts(allAccounts)
+          await syncAdminStaffToBackend({
+            uid: allAccounts[targetIndex]?.uid || '',
+            status: allAccounts[targetIndex]?.status || 'active',
+            adminLevel: allAccounts[targetIndex]?.adminLevel,
+            permissions: selectedPermissions,
+            fullName: allAccounts[targetIndex]?.fullName || '',
+            roleInCompany: allAccounts[targetIndex]?.roleInCompany || '',
+            department: allAccounts[targetIndex]?.department || '',
+            phoneNumber: allAccounts[targetIndex]?.phoneNumber || '',
+          })
           appendScopedActivityLog({
             action: 'Updated admin permissions',
             details: `${targetEmail} now has ${selectedPermissions.length} permission(s).`,
@@ -1604,11 +1982,41 @@ function AdminSettingsPage({
           }
 
           const nextStatus = confirmAction.type === 'suspend-admin' ? 'suspended' : 'active'
+          const targetUid = String(allAccounts[targetIndex]?.uid || '').trim()
+          if (targetUid) {
+            try {
+              const response = await apiFetch(`/api/auth/admin/accounts/${encodeURIComponent(targetUid)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  status: nextStatus,
+                }),
+              })
+              const payload = await response.json().catch(() => ({}))
+              if (!response.ok) {
+                setFormError(payload?.message || 'Unable to update admin status right now.')
+                return
+              }
+            } catch {
+              setFormError('Unable to update admin status right now.')
+              return
+            }
+          }
           allAccounts[targetIndex] = normalizeAdminAccount({
             ...allAccounts[targetIndex],
             status: nextStatus,
           })
           writeAccounts(allAccounts)
+          await syncAdminStaffToBackend({
+            uid: targetUid,
+            status: nextStatus,
+            adminLevel: allAccounts[targetIndex]?.adminLevel,
+            permissions: allAccounts[targetIndex]?.adminPermissions,
+            fullName: allAccounts[targetIndex]?.fullName || '',
+            roleInCompany: allAccounts[targetIndex]?.roleInCompany || '',
+            department: allAccounts[targetIndex]?.department || '',
+            phoneNumber: allAccounts[targetIndex]?.phoneNumber || '',
+          })
           appendScopedActivityLog({
             action: `${nextStatus === 'suspended' ? 'Suspended' : 'Activated'} admin account`,
             details: targetEmail,
@@ -1641,6 +2049,24 @@ function AdminSettingsPage({
           if (targetAdminLevel === ADMIN_LEVELS.SUPER && !isOwnerAdmin) {
             setFormError('Only Owner can delete a Super Admin account.')
             return
+          }
+          const targetUid = String(targetAccount?.uid || '').trim()
+          if (targetUid) {
+            try {
+              const response = await apiFetch(`/api/auth/account/${encodeURIComponent(targetUid)}`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: 'admin-account-deleted' }),
+              })
+              const payload = await response.json().catch(() => ({}))
+              if (!response.ok) {
+                setFormError(payload?.message || 'Unable to delete admin account right now.')
+                return
+              }
+            } catch {
+              setFormError('Unable to delete admin account right now.')
+              return
+            }
           }
           appendAdminTrashEntry({
             entityType: 'admin-account',
@@ -1691,12 +2117,42 @@ function AdminSettingsPage({
             return
           }
           if (previousAdminLevel === nextAdminLevel) return
+          const targetUid = String(allAccounts[targetIndex]?.uid || '').trim()
+          if (targetUid) {
+            try {
+              const response = await apiFetch(`/api/auth/admin/accounts/${encodeURIComponent(targetUid)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  role: deriveBackendRoleFromAdminLevel(nextAdminLevel),
+                }),
+              })
+              const payload = await response.json().catch(() => ({}))
+              if (!response.ok) {
+                setFormError(payload?.message || 'Unable to update admin role right now.')
+                return
+              }
+            } catch {
+              setFormError('Unable to update admin role right now.')
+              return
+            }
+          }
           allAccounts[targetIndex] = normalizeAdminAccount({
             ...allAccounts[targetIndex],
             adminLevel: nextAdminLevel,
             adminPermissions: getDefaultPermissionsForAdminLevel(nextAdminLevel),
           })
           writeAccounts(allAccounts)
+          await syncAdminStaffToBackend({
+            uid: targetUid,
+            status: allAccounts[targetIndex]?.status || 'active',
+            adminLevel: nextAdminLevel,
+            permissions: allAccounts[targetIndex]?.adminPermissions,
+            fullName: allAccounts[targetIndex]?.fullName || '',
+            roleInCompany: allAccounts[targetIndex]?.roleInCompany || '',
+            department: allAccounts[targetIndex]?.department || '',
+            phoneNumber: allAccounts[targetIndex]?.phoneNumber || '',
+          })
 
           const previousLabel = getAdminLevelLabel(previousAdminLevel)
           const nextLabel = getAdminLevelLabel(nextAdminLevel)
@@ -1732,13 +2188,42 @@ function AdminSettingsPage({
             setFormError('Only Owner can reset Super Admin password.')
             return
           }
-          const tempPassword = `Temp@${Math.floor(100000 + Math.random() * 900000)}`
+          const targetUid = String(allAccounts[targetIndex]?.uid || '').trim()
+          let tempPassword = ''
+          if (targetUid) {
+            try {
+              const response = await apiFetch(`/api/auth/admin/accounts/${encodeURIComponent(targetUid)}/reset-password`, {
+                method: 'POST',
+              })
+              const payload = await response.json().catch(() => ({}))
+              if (!response.ok) {
+                setFormError(payload?.message || 'Unable to reset password right now.')
+                return
+              }
+              tempPassword = String(payload?.temporaryPassword || '').trim()
+            } catch {
+              setFormError('Unable to reset password right now.')
+              return
+            }
+          } else {
+            tempPassword = `Temp@${Math.floor(100000 + Math.random() * 900000)}`
+          }
           allAccounts[targetIndex] = {
             ...allAccounts[targetIndex],
             password: tempPassword,
             mustChangePassword: true,
           }
           writeAccounts(allAccounts)
+          await syncAdminStaffToBackend({
+            uid: targetUid,
+            status: allAccounts[targetIndex]?.status || 'active',
+            adminLevel: allAccounts[targetIndex]?.adminLevel,
+            permissions: allAccounts[targetIndex]?.adminPermissions,
+            fullName: allAccounts[targetIndex]?.fullName || '',
+            roleInCompany: allAccounts[targetIndex]?.roleInCompany || '',
+            department: allAccounts[targetIndex]?.department || '',
+            phoneNumber: allAccounts[targetIndex]?.phoneNumber || '',
+          })
           appendScopedActivityLog({
             action: 'Reset admin password',
             details: `${targetEmail} temporary password issued by ${getAdminLevelLabel(currentAdminLevel)}.`,

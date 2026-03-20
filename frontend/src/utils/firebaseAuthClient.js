@@ -5,12 +5,10 @@ import {
   browserPopupRedirectResolver,
   checkActionCode,
   confirmPasswordReset,
-  getRedirectResult,
   GoogleAuthProvider,
   getAuth,
   initializeAuth,
   signInWithPopup,
-  signInWithRedirect,
   signOut,
   verifyPasswordResetCode,
 } from 'firebase/auth'
@@ -22,9 +20,6 @@ const FIREBASE_AUTH_DOMAIN = String(
 ).trim()
 
 const hasFirebaseWebConfig = Boolean(FIREBASE_WEB_API_KEY && FIREBASE_PROJECT_ID && FIREBASE_AUTH_DOMAIN)
-const GOOGLE_REDIRECT_INTENT_STORAGE_KEY = 'kiaminaGoogleRedirectIntent'
-const GOOGLE_REDIRECT_INTENT_FALLBACK_STORAGE_KEY = 'kiaminaGoogleRedirectIntentFallback'
-const SHOULD_USE_GOOGLE_POPUP_IN_DEV = Boolean(import.meta.env.DEV)
 const GOOGLE_AUTH_DEBUG = Boolean(import.meta.env.DEV)
 
 const logGoogleAuthDebug = (...args) => {
@@ -136,65 +131,6 @@ export const clearFirebaseAuthSession = async () => {
   }
 }
 
-const getGoogleRedirectIntent = () => {
-  if (typeof window === 'undefined') return ''
-  try {
-    const sessionIntent = String(window.sessionStorage.getItem(GOOGLE_REDIRECT_INTENT_STORAGE_KEY) || '').trim().toLowerCase()
-    if (sessionIntent) return sessionIntent
-    return String(window.localStorage.getItem(GOOGLE_REDIRECT_INTENT_FALLBACK_STORAGE_KEY) || '').trim().toLowerCase()
-  } catch {
-    return ''
-  }
-}
-
-const setGoogleRedirectIntent = (intent = '') => {
-  if (typeof window === 'undefined') return
-  try {
-    const normalizedIntent = String(intent || '').trim().toLowerCase()
-    if (!normalizedIntent) {
-      window.sessionStorage.removeItem(GOOGLE_REDIRECT_INTENT_STORAGE_KEY)
-      window.localStorage.removeItem(GOOGLE_REDIRECT_INTENT_FALLBACK_STORAGE_KEY)
-      return
-    }
-    window.sessionStorage.setItem(GOOGLE_REDIRECT_INTENT_STORAGE_KEY, normalizedIntent)
-    window.localStorage.setItem(GOOGLE_REDIRECT_INTENT_FALLBACK_STORAGE_KEY, normalizedIntent)
-  } catch {
-    // Best-effort only.
-  }
-}
-
-const waitForFirebaseCurrentUser = async (auth, timeoutMs = 8000) => {
-  if (!auth) return null
-  if (auth.currentUser) return auth.currentUser
-
-  if (typeof auth.authStateReady === 'function') {
-    try {
-      await Promise.race([
-        auth.authStateReady(),
-        new Promise((resolve) => {
-          window.setTimeout(resolve, timeoutMs)
-        }),
-      ])
-    } catch {
-      // Fall back to a lightweight poll below.
-    }
-  }
-
-  if (auth.currentUser) return auth.currentUser
-
-  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0)
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => {
-      window.setTimeout(resolve, 100)
-    })
-    if (auth.currentUser) {
-      return auth.currentUser
-    }
-  }
-
-  return null
-}
-
 const buildGoogleAuthPayload = async (user = null) => {
   const idToken = String((await user?.getIdToken?.()) || '').trim()
   const email = String(user?.email || '').trim().toLowerCase()
@@ -229,7 +165,7 @@ export const startGoogleSignInRedirect = async ({ intent = 'login' } = {}) => {
     hasFirebaseWebConfig,
     projectId: FIREBASE_PROJECT_ID,
     authDomain: FIREBASE_AUTH_DOMAIN,
-    mode: SHOULD_USE_GOOGLE_POPUP_IN_DEV ? 'popup' : 'redirect',
+    mode: 'popup',
   })
   if (!auth) {
     return {
@@ -245,36 +181,23 @@ export const startGoogleSignInRedirect = async ({ intent = 'login' } = {}) => {
     if (auth.currentUser) {
       await signOut(auth)
     }
-    if (SHOULD_USE_GOOGLE_POPUP_IN_DEV) {
-      const authResult = await signInWithPopup(auth, provider)
-      const payload = await buildGoogleAuthPayload(authResult?.user || null)
-      logGoogleAuthDebug('popup-result', {
-        ok: payload.ok,
-        email: payload.email,
-        uid: payload.uid,
-      })
-      await signOut(auth).catch(() => {})
-      setGoogleRedirectIntent('')
-      return {
-        ...payload,
-        pendingRedirect: false,
-      }
-    }
-
-    setGoogleRedirectIntent(intent)
-    await signInWithRedirect(auth, provider)
-    logGoogleAuthDebug('redirect-started', { intent })
+    const authResult = await signInWithPopup(auth, provider)
+    const payload = await buildGoogleAuthPayload(authResult?.user || null)
+    logGoogleAuthDebug('popup-result', {
+      ok: payload.ok,
+      email: payload.email,
+      uid: payload.uid,
+    })
+    await signOut(auth).catch(() => {})
     return {
-      ok: true,
-      pendingRedirect: true,
-      message: 'Redirecting to Google sign-in...',
+      ...payload,
+      pendingRedirect: false,
     }
   } catch (error) {
     logGoogleAuthDebug('start-failed', {
       code: String(error?.code || '').trim(),
       message: String(error?.message || '').trim(),
     })
-    setGoogleRedirectIntent('')
     return {
       ok: false,
       code: String(error?.code || '').trim(),
@@ -284,62 +207,12 @@ export const startGoogleSignInRedirect = async ({ intent = 'login' } = {}) => {
 }
 
 export const consumeGoogleSignInRedirectResult = async () => {
-  const auth = getFirebaseAuth()
-  const intent = getGoogleRedirectIntent()
-  logGoogleAuthDebug('consume-start', { intent, hasAuth: Boolean(auth) })
-  if (!auth) {
-    return {
-      ok: false,
-      hasResult: false,
-      intent,
-      pendingRedirect: Boolean(intent),
-      message: '',
-    }
-  }
-
-  try {
-    const authResult = await getRedirectResult(auth)
-    const resolvedUser = authResult?.user || await waitForFirebaseCurrentUser(auth, intent ? 8000 : 0)
-    if (!resolvedUser) {
-      logGoogleAuthDebug('consume-empty', { intent })
-      return {
-        ok: false,
-        hasResult: false,
-        intent,
-        pendingRedirect: Boolean(intent),
-        message: '',
-      }
-    }
-
-    const payload = await buildGoogleAuthPayload(resolvedUser)
-    logGoogleAuthDebug('consume-result', {
-      ok: payload.ok,
-      email: payload.email,
-      uid: payload.uid,
-      intent,
-    })
-    await signOut(auth).catch(() => {})
-    setGoogleRedirectIntent('')
-    return {
-      ...payload,
-      hasResult: payload.ok,
-      intent,
-    }
-  } catch (error) {
-    logGoogleAuthDebug('consume-failed', {
-      code: String(error?.code || '').trim(),
-      message: String(error?.message || '').trim(),
-      intent,
-    })
-    await signOut(auth).catch(() => {})
-    setGoogleRedirectIntent('')
-    return {
-      ok: false,
-      hasResult: Boolean(intent),
-      intent,
-      code: String(error?.code || '').trim(),
-      message: getGoogleAuthErrorMessage(error),
-    }
+  return {
+    ok: false,
+    hasResult: false,
+    intent: '',
+    pendingRedirect: false,
+    message: '',
   }
 }
 

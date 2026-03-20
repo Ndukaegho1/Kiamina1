@@ -25,7 +25,44 @@ const CLIENT_MANAGEMENT_SORT_FIELDS = Object.freeze({
   verificationStatus: "verification.status"
 });
 
-export const syncUserFromAuth = async ({ uid, email, displayName, roles }) => {
+const SIGNUP_CAPTURE_FIELDS = Object.freeze([
+  "signupIp",
+  "signupLocation",
+  "signupSource",
+  "capturePage",
+  "capturePath"
+]);
+
+const normalizeSignupCapture = (value = {}) => {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return SIGNUP_CAPTURE_FIELDS.reduce((accumulator, field) => {
+    accumulator[field] = String(source[field] || "").trim();
+    return accumulator;
+  }, {});
+};
+
+const hasSignupCaptureValues = (value = {}) =>
+  SIGNUP_CAPTURE_FIELDS.some((field) => Boolean(String(value?.[field] || "").trim()));
+
+const mergeSignupCapture = ({
+  current = {},
+  next = {}
+} = {}) => {
+  const normalizedCurrent = normalizeSignupCapture(current);
+  const normalizedNext = normalizeSignupCapture(next);
+  return SIGNUP_CAPTURE_FIELDS.reduce((accumulator, field) => {
+    accumulator[field] = normalizedCurrent[field] || normalizedNext[field];
+    return accumulator;
+  }, {});
+};
+
+export const syncUserFromAuth = async ({
+  uid,
+  email,
+  displayName,
+  roles,
+  signupCapture
+}) => {
   const normalizedUid = String(uid || "").trim();
   const normalizedEmail = String(email || "").trim().toLowerCase();
   const existingUser =
@@ -33,25 +70,45 @@ export const syncUserFromAuth = async ({ uid, email, displayName, roles }) => {
     (normalizedEmail ? await findUserByEmail(normalizedEmail) : null);
 
   const user = await upsertUserFromAuth({ uid, email, displayName, roles });
+  const normalizedSignupCapture = normalizeSignupCapture(signupCapture);
+  const shouldBackfillSignupCapture = hasSignupCaptureValues(normalizedSignupCapture) && user;
+  let resolvedUser = user;
 
-  if (user && !existingUser && isClientUser(user)) {
+  if (shouldBackfillSignupCapture) {
+    const mergedSignupCapture = mergeSignupCapture({
+      current: user?.signupCapture,
+      next: normalizedSignupCapture
+    });
+    const changed = SIGNUP_CAPTURE_FIELDS.some((field) => (
+      String(user?.signupCapture?.[field] || "").trim() !== mergedSignupCapture[field]
+    ));
+    if (changed) {
+      resolvedUser = await updateUserByUid(user.uid, {
+        $set: {
+          signupCapture: mergedSignupCapture
+        }
+      });
+    }
+  }
+
+  if (resolvedUser && !existingUser && isClientUser(resolvedUser)) {
     void emitUsersRealtimeEvent({
       eventType: "admin.client-management.updated",
-      actorUid: user.uid,
-      actorEmail: user.email,
-      actorRoles: Array.isArray(user.roles) ? user.roles : [CLIENT_ROLE],
-      audienceUserIds: [user.uid],
+      actorUid: resolvedUser.uid,
+      actorEmail: resolvedUser.email,
+      actorRoles: Array.isArray(resolvedUser.roles) ? resolvedUser.roles : [CLIENT_ROLE],
+      audienceUserIds: [resolvedUser.uid],
       audienceRoles: ADMIN_EVENT_ROLES,
       payload: {
-        uid: user.uid,
-        status: user.status || "active",
-        verificationStatus: user.verification?.status || "pending",
-        assignedToUid: String(user.clientWorkspace?.statusControl?.assignedToUid || "").trim()
+        uid: resolvedUser.uid,
+        status: resolvedUser.status || "active",
+        verificationStatus: resolvedUser.verification?.status || "pending",
+        assignedToUid: String(resolvedUser.clientWorkspace?.statusControl?.assignedToUid || "").trim()
       }
     });
   }
 
-  return user;
+  return resolvedUser;
 };
 
 export const getMeByUid = async (uid) => findUserByUid(uid);
@@ -508,6 +565,28 @@ const buildClientWorkspacePayload = ({ user }) => ({
   workspace: toPlainObject(user.clientWorkspace, {})
 });
 
+const normalizeWorkspaceNotifications = (rows = []) => {
+  const seenIds = new Set();
+  return (Array.isArray(rows) ? rows : [])
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry, index) => {
+      const explicitId = String(entry.id || "").trim();
+      const fallbackId = `notification-${Date.now()}-${index}`;
+      const id = explicitId || fallbackId;
+      if (seenIds.has(id)) {
+        return null;
+      }
+      seenIds.add(id);
+      return {
+        ...entry,
+        id,
+        read: Boolean(entry.read)
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 120);
+};
+
 const buildClientManagementRow = ({ user }) => ({
   uid: user.uid,
   email: user.email,
@@ -522,6 +601,14 @@ const buildClientManagementRow = ({ user }) => ({
   verificationStepsCompleted: Number(user.verification?.stepsCompleted || 0),
   onboardingCompleted: Boolean(user.onboarding?.completed),
   assignedToUid: String(user.clientWorkspace?.statusControl?.assignedToUid || "").trim(),
+  clientProfile: toPlainObject(user.clientProfile, {}),
+  entityProfile: toPlainObject(user.entityProfile, {}),
+  onboarding: toPlainObject(user.onboarding, {}),
+  signupCapture: toPlainObject(user.signupCapture, {}),
+  verification: toPlainObject(user.verification, {}),
+  notificationPreferences: toPlainObject(user.notificationPreferences, {}),
+  clientDashboard: toPlainObject(user.clientDashboard, {}),
+  clientWorkspace: toPlainObject(user.clientWorkspace, {}),
   createdAt: user.createdAt || null,
   updatedAt: user.updatedAt || null
 });
@@ -535,6 +622,7 @@ const buildClientManagementDetail = ({ user }) => ({
   clientProfile: toPlainObject(user.clientProfile, {}),
   entityProfile: toPlainObject(user.entityProfile, {}),
   onboarding: toPlainObject(user.onboarding, {}),
+  signupCapture: toPlainObject(user.signupCapture, {}),
   verification: toPlainObject(user.verification, {}),
   notificationPreferences: toPlainObject(user.notificationPreferences, {}),
   clientDashboard: toPlainObject(user.clientDashboard, {}),
@@ -871,8 +959,10 @@ const buildAdminDashboardPayload = ({ user }) => {
     displayName: user.displayName || "",
     roles: Array.isArray(user.roles) ? user.roles : [],
     adminProfile: toPlainObject(user.adminProfile, {}),
+    adminAccess: toPlainObject(user.adminAccess, {}),
     dashboard: {
       ...adminDashboard,
+      securityPreferences: toPlainObject(adminDashboard.securityPreferences, {}),
       supportLeads,
       newsletters,
       stats: {
@@ -882,6 +972,164 @@ const buildAdminDashboardPayload = ({ user }) => {
       }
     }
   };
+};
+
+const sortAdminSupportLeads = (rows = []) =>
+  [...rows].sort((left, right) => {
+    const rightTime = Date.parse(right?.updatedAt || right?.createdAt || "") || 0;
+    const leftTime = Date.parse(left?.updatedAt || left?.createdAt || "") || 0;
+    if (rightTime !== leftTime) return rightTime - leftTime;
+    return String(left?.leadId || left?.email || "").localeCompare(String(right?.leadId || right?.email || ""));
+  });
+
+const sortAdminNewsletters = (rows = []) =>
+  [...rows].sort((left, right) => {
+    const rightTime = Date.parse(right?.lastEngagedAt || right?.subscribedAt || "") || 0;
+    const leftTime = Date.parse(left?.lastEngagedAt || left?.subscribedAt || "") || 0;
+    if (rightTime !== leftTime) return rightTime - leftTime;
+    return String(left?.email || "").localeCompare(String(right?.email || ""));
+  });
+
+const upsertAdminSupportLead = ({
+  existingEntries = [],
+  lead
+} = {}) => {
+  const safeEntries = Array.isArray(existingEntries) ? existingEntries.map((entry) => ({ ...entry })) : [];
+  const normalizedLeadId = String(lead?.leadId || "").trim();
+  const normalizedEmail = String(lead?.email || "").trim().toLowerCase();
+  const existingIndex = safeEntries.findIndex((entry) => {
+    const entryLeadId = String(entry?.leadId || "").trim();
+    const entryEmail = String(entry?.email || "").trim().toLowerCase();
+    if (normalizedLeadId && entryLeadId && entryLeadId === normalizedLeadId) return true;
+    return normalizedEmail && entryEmail && entryEmail === normalizedEmail;
+  });
+
+  const current = existingIndex >= 0 ? safeEntries[existingIndex] : null;
+  const nextEntry = {
+    leadId: normalizedLeadId || String(current?.leadId || "").trim(),
+    fullName: String(lead?.fullName || current?.fullName || "").trim(),
+    email: normalizedEmail || String(current?.email || "").trim().toLowerCase(),
+    companyName: String(lead?.companyName || current?.companyName || "").trim(),
+    phone: String(lead?.phone || current?.phone || "").trim(),
+    leadIpAddress: String(lead?.leadIpAddress || current?.leadIpAddress || "").trim(),
+    leadCountry: String(lead?.leadCountry || current?.leadCountry || "").trim(),
+    leadLocation: String(lead?.leadLocation || current?.leadLocation || "").trim(),
+    capturePage: String(lead?.capturePage || current?.capturePage || "").trim(),
+    capturePath: String(lead?.capturePath || current?.capturePath || "").trim(),
+    source: String(lead?.source || current?.source || "support-form").trim(),
+    status: String(lead?.status || current?.status || "new").trim().toLowerCase(),
+    interest: String(lead?.interest || current?.interest || "").trim(),
+    assignedToUid: String(lead?.assignedToUid || current?.assignedToUid || "").trim(),
+    notes: String(lead?.notes || current?.notes || "").trim(),
+    createdAt: current?.createdAt || lead?.createdAt || new Date(),
+    updatedAt: lead?.updatedAt || new Date()
+  };
+
+  if (existingIndex >= 0) {
+    safeEntries.splice(existingIndex, 1, nextEntry);
+  } else {
+    safeEntries.push(nextEntry);
+  }
+
+  return sortAdminSupportLeads(safeEntries);
+};
+
+const upsertAdminNewsletter = ({
+  existingEntries = [],
+  newsletter
+} = {}) => {
+  const safeEntries = Array.isArray(existingEntries) ? existingEntries.map((entry) => ({ ...entry })) : [];
+  const normalizedEmail = String(newsletter?.email || "").trim().toLowerCase();
+  const existingIndex = safeEntries.findIndex((entry) => (
+    String(entry?.email || "").trim().toLowerCase() === normalizedEmail
+  ));
+
+  const current = existingIndex >= 0 ? safeEntries[existingIndex] : null;
+  const nextEntry = {
+    email: normalizedEmail,
+    fullName: String(newsletter?.fullName || current?.fullName || "").trim(),
+    leadIpAddress: String(newsletter?.leadIpAddress || current?.leadIpAddress || "").trim(),
+    leadCountry: String(newsletter?.leadCountry || current?.leadCountry || "").trim(),
+    leadLocation: String(newsletter?.leadLocation || current?.leadLocation || "").trim(),
+    capturePage: String(newsletter?.capturePage || current?.capturePage || "").trim(),
+    capturePath: String(newsletter?.capturePath || current?.capturePath || "").trim(),
+    status: String(newsletter?.status || current?.status || "subscribed").trim().toLowerCase(),
+    source: String(newsletter?.source || current?.source || "website").trim(),
+    tags: [...new Set(
+      [
+        ...(Array.isArray(current?.tags) ? current.tags : []),
+        ...(Array.isArray(newsletter?.tags) ? newsletter.tags : [])
+      ]
+        .map((tag) => String(tag || "").trim())
+        .filter(Boolean)
+    )],
+    subscribedAt: current?.subscribedAt || newsletter?.subscribedAt || new Date(),
+    lastEngagedAt: newsletter?.lastEngagedAt || new Date()
+  };
+
+  if (existingIndex >= 0) {
+    safeEntries.splice(existingIndex, 1, nextEntry);
+  } else {
+    safeEntries.push(nextEntry);
+  }
+
+  return sortAdminNewsletters(safeEntries);
+};
+
+const buildAdminDashboardCollectionsPatch = ({
+  supportLeads = [],
+  newsletters = []
+} = {}) => ({
+  "adminDashboard.supportLeads": supportLeads,
+  "adminDashboard.newsletters": newsletters,
+  "adminDashboard.stats.openSupportLeads": supportLeads.filter(
+    (entry) => entry?.status !== "closed" && entry?.status !== "converted"
+  ).length,
+  "adminDashboard.stats.newsletterSubscribers": newsletters.filter(
+    (entry) => entry?.status === "subscribed"
+  ).length,
+  "adminDashboard.stats.newsletterUnsubscribed": newsletters.filter(
+    (entry) => entry?.status === "unsubscribed"
+  ).length
+});
+
+const listAdminUsersForDashboardUpdates = async () =>
+  listUsers({
+    filter: { roles: { $in: ADMIN_EVENT_ROLES } },
+    sort: { createdAt: 1 },
+    limit: 500
+  });
+
+const buildAdminStaffRow = ({ user }) => ({
+  uid: user.uid,
+  email: user.email,
+  displayName: user.displayName || "",
+  status: user.status || "active",
+  roles: Array.isArray(user.roles) ? user.roles : [],
+  createdAt: user.createdAt || null,
+  updatedAt: user.updatedAt || null,
+  adminProfile: toPlainObject(user.adminProfile, {}),
+  adminAccess: toPlainObject(user.adminAccess, {}),
+  dashboardSecurityPreferences: toPlainObject(user.adminDashboard?.securityPreferences, {})
+});
+
+const emitAdminDashboardRealtimeUpdate = ({
+  updatedUser,
+  payload
+} = {}) => {
+  if (!updatedUser) return;
+  void emitUsersRealtimeEvent({
+    eventType: "admin.dashboard.updated",
+    actorUid: "public-web",
+    actorEmail: "",
+    actorRoles: ["public"],
+    audienceUserIds: [updatedUser.uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid: updatedUser.uid,
+      dashboard: payload?.dashboard || {}
+    }
+  });
 };
 
 export const ensureUserFromActor = async ({ uid, email, roles = [], displayName = "" }) => {
@@ -941,24 +1189,34 @@ export const updateClientProfileByUid = async ({
     lastName: normalizedLastName
   });
 
-  const phoneCountryCode =
+  const hasPhoneUpdate =
     payload["clientProfile.phoneCountryCode"] !== undefined
+    || payload["clientProfile.phoneLocalNumber"] !== undefined
+    || payload["clientProfile.phone"] !== undefined;
+  const phoneCountryCode =
+    hasPhoneUpdate && payload["clientProfile.phoneCountryCode"] !== undefined
       ? payload["clientProfile.phoneCountryCode"]
       : existingUser.clientProfile?.phoneCountryCode || "+234";
   const phoneLocalNumber =
-    payload["clientProfile.phoneLocalNumber"] !== undefined
+    hasPhoneUpdate && payload["clientProfile.phoneLocalNumber"] !== undefined
       ? payload["clientProfile.phoneLocalNumber"]
       : existingUser.clientProfile?.phoneLocalNumber || "";
   const rawPhoneValue =
-    payload["clientProfile.phone"] !== undefined
+    hasPhoneUpdate && payload["clientProfile.phone"] !== undefined
       ? payload["clientProfile.phone"]
       : existingUser.clientProfile?.phone || "";
-  const normalizedPhone = await assertClientPhoneAvailable({
-    uid,
-    phoneCountryCode,
-    phoneLocalNumber,
-    phone: rawPhoneValue
-  });
+  const normalizedPhone = hasPhoneUpdate
+    ? await assertClientPhoneAvailable({
+      uid,
+      phoneCountryCode,
+      phoneLocalNumber,
+      phone: rawPhoneValue
+    })
+    : {
+      phoneCountryCode: existingUser.clientProfile?.phoneCountryCode || "+234",
+      phoneLocalNumber: existingUser.clientProfile?.phoneLocalNumber || "",
+      displayPhone: existingUser.clientProfile?.phone || ""
+    };
 
   const nextPayload = {
     ...payload,
@@ -966,11 +1224,13 @@ export const updateClientProfileByUid = async ({
     "clientProfile.lastName": normalizedLastName,
     "clientProfile.otherNames": normalizedOtherNames,
     "clientProfile.fullName": fullName,
-    displayName: fullName || existingUser.displayName || "",
-    "clientProfile.phoneCountryCode": normalizedPhone.phoneCountryCode,
-    "clientProfile.phoneLocalNumber": normalizedPhone.phoneLocalNumber,
-    "clientProfile.phone": normalizedPhone.displayPhone
+    displayName: fullName || existingUser.displayName || ""
   };
+  if (hasPhoneUpdate) {
+    nextPayload["clientProfile.phoneCountryCode"] = normalizedPhone.phoneCountryCode;
+    nextPayload["clientProfile.phoneLocalNumber"] = normalizedPhone.phoneLocalNumber;
+    nextPayload["clientProfile.phone"] = normalizedPhone.displayPhone;
+  }
 
   const businessName =
     payload["entityProfile.businessName"] !== undefined
@@ -1186,6 +1446,19 @@ export const getAdminDashboardByUid = async ({ uid, actorEmail, actorRoles = [] 
   return buildAdminDashboardPayload({ user });
 };
 
+export const listAdminStaffForAdmin = async () => {
+  const users = await listUsers({
+    filter: { roles: { $in: ADMIN_EVENT_ROLES } },
+    sort: { createdAt: 1 },
+    limit: 500
+  });
+
+  return {
+    total: users.length,
+    staff: users.map((user) => buildAdminStaffRow({ user }))
+  };
+};
+
 export const updateAdminDashboardByUid = async ({
   uid,
   actorUid = "",
@@ -1244,6 +1517,127 @@ export const updateAdminDashboardByUid = async ({
   });
 
   return response;
+};
+
+export const updateAdminStaffByUid = async ({
+  uid,
+  actorUid = "",
+  actorEmail,
+  actorRoles = [],
+  payload
+}) => {
+  const existingUser = await findUserByUid(uid);
+  if (!existingUser) return null;
+
+  const nextPayload = {
+    ...payload
+  };
+
+  const firstName =
+    payload["adminProfile.firstName"] !== undefined
+      ? payload["adminProfile.firstName"]
+      : existingUser.adminProfile?.firstName || "";
+  const lastName =
+    payload["adminProfile.lastName"] !== undefined
+      ? payload["adminProfile.lastName"]
+      : existingUser.adminProfile?.lastName || "";
+  const explicitDisplayName =
+    payload["adminProfile.displayName"] !== undefined
+      ? payload["adminProfile.displayName"]
+      : existingUser.adminProfile?.displayName || "";
+  const derivedDisplayName = explicitDisplayName || [firstName, lastName].filter(Boolean).join(" ").trim();
+
+  if (derivedDisplayName) {
+    nextPayload["adminProfile.displayName"] = derivedDisplayName;
+    nextPayload.displayName = derivedDisplayName;
+  }
+
+  const updatedUser = await updateUserByUid(uid, { $set: nextPayload });
+  if (!updatedUser) return null;
+
+  void emitUsersRealtimeEvent({
+    eventType: "admin.dashboard.updated",
+    actorUid: actorUid || uid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: ADMIN_EVENT_ROLES,
+    payload: {
+      uid,
+      adminProfile: toPlainObject(updatedUser.adminProfile, {}),
+      adminAccess: toPlainObject(updatedUser.adminAccess, {})
+    }
+  });
+
+  return updatedUser;
+};
+
+export const upsertPublicSupportLead = async ({
+  payload
+}) => {
+  const adminUsers = await listAdminUsersForDashboardUpdates();
+  const updatedDashboards = [];
+
+  for (const adminUser of adminUsers) {
+    const adminDashboard = toPlainObject(adminUser.adminDashboard, {});
+    const supportLeads = upsertAdminSupportLead({
+      existingEntries: Array.isArray(adminDashboard.supportLeads) ? adminDashboard.supportLeads : [],
+      lead: payload
+    });
+    const newsletters = sortAdminNewsletters(
+      Array.isArray(adminDashboard.newsletters) ? adminDashboard.newsletters : []
+    );
+    const updatedUser = await updateUserByUid(adminUser.uid, {
+      $set: buildAdminDashboardCollectionsPatch({ supportLeads, newsletters })
+    });
+    if (!updatedUser) continue;
+
+    const dashboardPayload = buildAdminDashboardPayload({ user: updatedUser });
+    updatedDashboards.push(dashboardPayload);
+    emitAdminDashboardRealtimeUpdate({
+      updatedUser,
+      payload: dashboardPayload
+    });
+  }
+
+  return {
+    lead: payload,
+    adminsUpdated: updatedDashboards.length
+  };
+};
+
+export const upsertPublicNewsletterSubscription = async ({
+  payload
+}) => {
+  const adminUsers = await listAdminUsersForDashboardUpdates();
+  const updatedDashboards = [];
+
+  for (const adminUser of adminUsers) {
+    const adminDashboard = toPlainObject(adminUser.adminDashboard, {});
+    const supportLeads = sortAdminSupportLeads(
+      Array.isArray(adminDashboard.supportLeads) ? adminDashboard.supportLeads : []
+    );
+    const newsletters = upsertAdminNewsletter({
+      existingEntries: Array.isArray(adminDashboard.newsletters) ? adminDashboard.newsletters : [],
+      newsletter: payload
+    });
+    const updatedUser = await updateUserByUid(adminUser.uid, {
+      $set: buildAdminDashboardCollectionsPatch({ supportLeads, newsletters })
+    });
+    if (!updatedUser) continue;
+
+    const dashboardPayload = buildAdminDashboardPayload({ user: updatedUser });
+    updatedDashboards.push(dashboardPayload);
+    emitAdminDashboardRealtimeUpdate({
+      updatedUser,
+      payload: dashboardPayload
+    });
+  }
+
+  return {
+    newsletter: payload,
+    adminsUpdated: updatedDashboards.length
+  };
 };
 
 export const getClientWorkspaceByUid = async ({ uid, actorEmail, actorRoles = [] }) => {
@@ -1347,6 +1741,19 @@ export const updateClientManagementClientByUidForAdmin = async ({
     "clientWorkspace.statusControl.updatedAt": new Date()
   };
 
+  if (payload["clientWorkspace.notifications"] !== undefined) {
+    const existingNotifications = normalizeWorkspaceNotifications(
+      existing.clientWorkspace?.notifications || []
+    );
+    const incomingNotifications = normalizeWorkspaceNotifications(
+      payload["clientWorkspace.notifications"]
+    );
+    nextPayload["clientWorkspace.notifications"] = normalizeWorkspaceNotifications([
+      ...incomingNotifications,
+      ...existingNotifications
+    ]);
+  }
+
   const nextVerificationStatus = payload["verification.status"];
   if (nextVerificationStatus === "verified") {
     nextPayload["verification.fullyVerifiedAt"] = existing.verification?.fullyVerifiedAt || new Date();
@@ -1378,6 +1785,19 @@ export const updateClientManagementClientByUidForAdmin = async ({
       status: response.status,
       verificationStatus: response.verification?.status || "pending",
       assignedToUid: response.clientWorkspace?.statusControl?.assignedToUid || ""
+    }
+  });
+
+  void emitUsersRealtimeEvent({
+    eventType: "client.workspace.updated",
+    actorUid,
+    actorEmail,
+    actorRoles,
+    audienceUserIds: [uid],
+    audienceRoles: [],
+    payload: {
+      uid,
+      workspaceUpdatedAt: response.clientWorkspace?.updatedAt || null
     }
   });
 

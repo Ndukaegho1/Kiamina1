@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { env } from "../config/env.js";
 import {
   countAuthAccountsByRoles,
   deleteAuthAccountByUid,
@@ -41,6 +42,29 @@ const createUnauthorizedError = (message) => {
   const error = new Error(message);
   error.status = 401;
   return error;
+};
+
+const createServiceUnavailableError = (message) => {
+  const error = new Error(message);
+  error.status = 503;
+  return error;
+};
+
+const isFirebaseDeletionSatisfied = (firebaseResult = {}) => {
+  if (firebaseResult?.deleted) {
+    return true;
+  }
+
+  const reason = String(firebaseResult?.reason || "").trim().toLowerCase();
+  if (reason === "firebase-user-not-found") {
+    return true;
+  }
+
+  if (env.nodeEnv === "test" && reason === "firebase-admin-unavailable") {
+    return true;
+  }
+
+  return false;
 };
 
 const generateLocalUid = () => `local_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -294,6 +318,12 @@ export const deleteAuthAccountForUid = async ({ uid, reason = "account-deleted" 
     reason
   });
   const firebaseResult = await deleteFirebaseUserByUid(normalizedUid);
+  if (!isFirebaseDeletionSatisfied(firebaseResult)) {
+    throw createServiceUnavailableError(
+      "Unable to delete Firebase account right now. Please retry."
+    );
+  }
+
   if (!account) {
     return {
       account: null,
@@ -310,4 +340,37 @@ export const deleteAuthAccountForUid = async ({ uid, reason = "account-deleted" 
     revokedSessionCount: Number(revokeResult?.modifiedCount || 0),
     firebase: firebaseResult
   };
+};
+
+export const updateManagedAuthAccountByUid = async ({
+  uid,
+  email,
+  fullName,
+  role,
+  status
+}) => {
+  const normalizedUid = String(uid || "").trim();
+  if (!normalizedUid) {
+    throw createUnauthorizedError("Missing target user id.");
+  }
+
+  const existingAccount = await findAuthAccountByUid(normalizedUid);
+  if (!existingAccount) {
+    throw createNotFoundError("Auth account not found.");
+  }
+
+  const nextPayload = {
+    email: email !== undefined ? String(email || "").trim().toLowerCase() : existingAccount.email,
+    fullName: fullName !== undefined ? String(fullName || "").trim() : existingAccount.fullName,
+    role: role !== undefined ? String(role || "").trim().toLowerCase() : existingAccount.role,
+    status: status !== undefined ? String(status || "").trim().toLowerCase() : existingAccount.status
+  };
+
+  return upsertAuthAccountByUid({
+    uid: normalizedUid,
+    payload: {
+      ...existingAccount.toObject(),
+      ...nextPayload
+    }
+  });
 };

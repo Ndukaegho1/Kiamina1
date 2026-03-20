@@ -22,7 +22,6 @@ import {
   File,
   ChevronRight,
   User,
-  Shield,
   CheckCircle,
   AlertCircle,
   UploadCloud,
@@ -36,7 +35,6 @@ import {
   Loader2,
 } from 'lucide-react'
 import { INDUSTRY_OPTIONS } from '../../../data/client/mockData'
-import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
 import {
   normalizeClientNotificationSettings,
   persistClientNotificationSettings,
@@ -46,10 +44,13 @@ import { apiFetch } from '../../../utils/apiClient'
 import { buildFileCacheKey, putCachedFileBlob } from '../../../utils/fileCache'
 
 const SETTINGS_REDIRECT_SECTION_KEY = 'kiaminaClientSettingsRedirectSection'
-const GOVERNMENT_ID_TYPE_OPTIONS = ['NIN', "Voter's Card", 'International Passport', "Driver's Licence"]
-const MIN_GOV_ID_FILE_SIZE_BYTES = 80 * 1024
-const MIN_GOV_ID_IMAGE_WIDTH = 600
-const MIN_GOV_ID_IMAGE_HEIGHT = 400
+const CLIENT_VERIFICATION_TOTAL_STEPS = 2
+// Previously `3` when the Dojah-powered identity step was active.
+// import { verifyIdentityWithDojah } from '../../../utils/dojahIdentity'
+// const GOVERNMENT_ID_TYPE_OPTIONS = ['NIN', "Voter's Card", 'International Passport', "Driver's Licence"]
+// const MIN_GOV_ID_FILE_SIZE_BYTES = 80 * 1024
+// const MIN_GOV_ID_IMAGE_WIDTH = 600
+// const MIN_GOV_ID_IMAGE_HEIGHT = 400
 const PHONE_COUNTRY_CODE_OPTIONS = [
   { value: '+234', label: 'NG +234' },
   { value: '+1', label: 'US/CA +1' },
@@ -145,6 +146,7 @@ const CLIENT_NOTIFICATION_EDITABLE_KEYS = [
   ...CLIENT_EMAIL_NOTIFICATION_OPTIONS.map((item) => item.key),
 ]
 const PASSWORD_SECURITY_REGEX = /^(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}$/
+const CLIENT_IMAGE_ASSET_MAX_SIZE_BYTES = 5 * 1024 * 1024
 const DEFAULT_ACCOUNT_SETTINGS = Object.freeze({
   twoStepEnabled: false,
   twoStepMethod: '',
@@ -340,15 +342,16 @@ function SettingsPage({
   clientEmail = '',
   clientName = '',
   verificationState = 'pending',
-  identityApprovedByAdmin = false,
   businessApprovedByAdmin = false,
   clientTeamRole = 'owner',
   initialSettingsProfile = {},
   initialVerificationDocs = {},
   initialAccountSettings = {},
+  initialNotificationSettings = {},
   onSettingsProfileChange,
   onVerificationDocsChange,
   onAccountSettingsChange,
+  onNotificationSettingsChange,
   verificationLockEnforced = false,
   canManageAccountSecurity = false,
   onRequestPasswordResetLink,
@@ -361,7 +364,6 @@ function SettingsPage({
     'account-settings': false,
     'user-profile': false,
     'notifications': false,
-    'identity': false,
     'team-management': false,
     'business-profile': false,
     'tax-details': false,
@@ -500,7 +502,16 @@ function SettingsPage({
   const [formData, setFormData] = useState(getInitialFormData)
   const [draftData, setDraftData] = useState(getInitialFormData)
   const [errors, setErrors] = useState({})
-  const readNotificationPreferences = () => readClientNotificationSettings(clientEmail || '')
+  const readNotificationPreferences = () => {
+    const localSettings = readClientNotificationSettings(clientEmail || '')
+    const backendSettings = initialNotificationSettings && typeof initialNotificationSettings === 'object'
+      ? initialNotificationSettings
+      : {}
+    return normalizeClientNotificationSettings({
+      ...localSettings,
+      ...backendSettings,
+    })
+  }
   const [notifications, setNotifications] = useState(readNotificationPreferences)
   const [notificationDraft, setNotificationDraft] = useState(readNotificationPreferences)
   const [verificationDocs, setVerificationDocs] = useState(() => {
@@ -534,7 +545,6 @@ function SettingsPage({
     role: 'manager',
   })
   const [generatedInviteLink, setGeneratedInviteLink] = useState('')
-  const [isIdentitySubmitting, setIsIdentitySubmitting] = useState(false)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [deleteAccountStep, setDeleteAccountStep] = useState(1)
   const [isDeletingAccount, setIsDeletingAccount] = useState(false)
@@ -814,6 +824,8 @@ function SettingsPage({
   const lastAppliedVerificationDocsSyncSignatureRef = useRef('')
   const initialAccountSettingsSyncSignature = JSON.stringify(normalizeAccountSettingsState(initialAccountSettings))
   const lastAppliedAccountSettingsSyncSignatureRef = useRef('')
+  const initialNotificationSettingsSyncSignature = `${String(clientEmail || '').trim().toLowerCase()}::${JSON.stringify(normalizeClientNotificationSettings(initialNotificationSettings))}`
+  const lastAppliedNotificationSettingsSyncSignatureRef = useRef('')
   const normalizedBusinessType = toTrimmedValue(formData.businessType).toLowerCase()
   const isIndividualBusinessType = normalizedBusinessType === 'individual'
   const profileStepCompleted = Boolean(
@@ -822,16 +834,6 @@ function SettingsPage({
     && normalizedProfileForVerification.phone
     && normalizedProfileForVerification.address,
   )
-  const identityDocumentCaptured = Boolean(
-    toTrimmedValue(verificationDocs.govId)
-    && toTrimmedValue(verificationDocs.govIdType)
-    && toTrimmedValue(verificationDocs.govIdNumber),
-  )
-  const identityVerifiedByAutomation = Boolean(
-    identityDocumentCaptured && toTrimmedValue(verificationDocs.govIdVerifiedAt),
-  )
-  const identityLockedForClient = Boolean(identityVerifiedByAutomation)
-  const identityVerified = Boolean(identityVerifiedByAutomation)
   const businessVerificationDocumentReady = isIndividualBusinessType || Boolean(toTrimmedValue(verificationDocs.businessReg))
   const normalizedVerificationState = toTrimmedValue(verificationState).toLowerCase()
   const verificationApprovedByAdmin = (
@@ -855,34 +857,29 @@ function SettingsPage({
         ? 'Submitted - Awaiting Approval'
         : 'Pending'
   const businessLockedForClient = Boolean(!isIndividualBusinessType && businessVerified)
+  /*
+  const identityDocumentCaptured = Boolean(
+    toTrimmedValue(verificationDocs.govId)
+    && toTrimmedValue(verificationDocs.govIdType)
+    && toTrimmedValue(verificationDocs.govIdNumber),
+  )
+  const identityVerifiedByAutomation = Boolean(
+    identityDocumentCaptured && toTrimmedValue(verificationDocs.govIdVerifiedAt),
+  )
+  const identityLockedForClient = Boolean(identityVerifiedByAutomation)
+  const identityVerified = Boolean(identityVerifiedByAutomation)
   const canStartBusinessVerification = Boolean(identityVerified)
-  const verificationStepsCompleted = Number(profileStepCompleted) + Number(identityVerified) + Number(businessVerified)
-  const verificationProgress = Math.round((verificationStepsCompleted / 3) * 100)
+  */
+  const verificationStepsCompleted = Number(profileStepCompleted) + Number(businessVerified)
+  const verificationProgress = Math.round((verificationStepsCompleted / CLIENT_VERIFICATION_TOTAL_STEPS) * 100)
   const nextVerificationSection = !profileStepCompleted
     ? 'user-profile'
-    : (!identityVerified ? 'identity' : (!businessVerified ? 'business-profile' : 'identity'))
-  const clientVerificationStatus = verificationStepsCompleted === 3 && finalBusinessApproval
+    : (!businessVerified ? 'business-profile' : 'team-management')
+  const clientVerificationStatus = verificationStepsCompleted === CLIENT_VERIFICATION_TOTAL_STEPS && finalBusinessApproval
     ? 'Fully Verified'
     : 'Pending Verification'
   const teamInviteUnlocked = clientVerificationStatus === 'Fully Verified'
-  const verificationRatioLabel = `${verificationStepsCompleted}/3`
-  const hasAnyVerificationSignal = Boolean(
-    verificationDocs.govId || verificationDocs.businessReg || profileStepCompleted,
-  )
-  const identityVerificationBadge = identityVerified
-    ? {
-      label: 'Verified',
-      className: 'bg-success-bg text-success',
-    }
-    : hasAnyVerificationSignal
-      ? {
-        label: 'Verification Pending',
-        className: 'bg-warning-bg text-warning',
-      }
-      : {
-        label: 'Unverified',
-      className: 'bg-error-bg text-error',
-    }
+  const verificationRatioLabel = `${verificationStepsCompleted}/${CLIENT_VERIFICATION_TOTAL_STEPS}`
   const activePendingInvites = teamInvites.filter((invite) => getInviteStatus(invite) === 'Pending')
   const hasNotificationChanges = CLIENT_NOTIFICATION_EDITABLE_KEYS.some((key) => (
     Boolean(notificationDraft[key]) !== Boolean(notifications[key])
@@ -970,18 +967,36 @@ function SettingsPage({
   }, [initialAccountSettings, initialAccountSettingsSyncSignature])
 
   useEffect(() => {
-    const normalizedSettings = normalizeClientNotificationSettings(readClientNotificationSettings(clientEmail || ''))
-    setNotifications(normalizedSettings)
-    setNotificationDraft(normalizedSettings)
+    const normalizedSettings = readNotificationPreferences()
+    if (lastAppliedNotificationSettingsSyncSignatureRef.current === initialNotificationSettingsSyncSignature) return
+    lastAppliedNotificationSettingsSyncSignatureRef.current = initialNotificationSettingsSyncSignature
+    setNotifications((previous) => {
+      if (JSON.stringify(previous || {}) === JSON.stringify(normalizedSettings || {})) {
+        return previous
+      }
+      return normalizedSettings
+    })
+    setNotificationDraft((previous) => {
+      if (JSON.stringify(previous || {}) === JSON.stringify(normalizedSettings || {})) {
+        return previous
+      }
+      return normalizedSettings
+    })
     persistClientNotificationSettings(clientEmail || '', normalizedSettings)
-  }, [clientEmail])
+  }, [clientEmail, initialNotificationSettings, initialNotificationSettingsSyncSignature])
 
   useEffect(() => {
     try {
       const pendingSection = sessionStorage.getItem(SETTINGS_REDIRECT_SECTION_KEY)
       if (!pendingSection) return
-      if (pendingSection === 'user-profile' || pendingSection === 'account-settings' || pendingSection === 'identity' || pendingSection === 'team-management') {
-        setActiveSection(pendingSection)
+      const normalizedPendingSection = pendingSection === 'identity' ? 'business-profile' : pendingSection
+      if (
+        normalizedPendingSection === 'user-profile'
+        || normalizedPendingSection === 'account-settings'
+        || normalizedPendingSection === 'business-profile'
+        || normalizedPendingSection === 'team-management'
+      ) {
+        setActiveSection(normalizedPendingSection)
       }
       sessionStorage.removeItem(SETTINGS_REDIRECT_SECTION_KEY)
     } catch {
@@ -1109,8 +1124,10 @@ function SettingsPage({
 
   const isFieldLocked = (field) => {
     if (
-      (field === 'firstName' || field === 'lastName' || field === 'otherNames' || field === 'fullName')
-      && !identityLockedForClient
+      field === 'firstName'
+      || field === 'lastName'
+      || field === 'otherNames'
+      || field === 'fullName'
     ) {
       return false
     }
@@ -1137,7 +1154,7 @@ function SettingsPage({
       return
     }
     if (normalizedSection === 'team-management' && !teamInviteUnlocked) {
-      showToast('error', 'Team Management unlocks only after full verification (3/3).')
+      showToast('error', 'Team Management unlocks only after full verification (2/2).')
       setActiveSection(nextVerificationSection)
       return
     }
@@ -1148,7 +1165,7 @@ function SettingsPage({
     { id: 'user-profile', label: 'User Profile', icon: User },
     { id: 'account-settings', label: 'Account Settings', icon: Settings },
     { id: 'notifications', label: 'Notification Settings', icon: Bell },
-    { id: 'identity', label: 'Identity Verification', icon: Shield },
+    // { id: 'identity', label: 'Identity Verification', icon: Shield },
     { id: 'team-management', label: 'Team Management', icon: Users },
   ]
 
@@ -1395,10 +1412,14 @@ function SettingsPage({
     const normalized = persistClientNotificationSettings(clientEmail || '', notificationDraft)
     setNotifications(normalized)
     setNotificationDraft(normalized)
+    if (typeof onNotificationSettingsChange === 'function') {
+      onNotificationSettingsChange(normalized)
+    }
     setEditMode((prev) => ({ ...prev, notifications: false }))
     showToast('success', 'Notification preferences updated.')
   }
 
+  /*
   const handleSubmitVerification = async () => {
     if (identityLockedForClient) {
       showToast('success', 'Identity verification is already completed.')
@@ -1464,6 +1485,38 @@ function SettingsPage({
     showToast('success', 'Identity verification completed successfully.')
   }
 
+  const verifyGovernmentIdClarity = (file) => new Promise((resolve) => {
+    if (!file) {
+      resolve({ ok: false, message: 'No file selected.' })
+      return
+    }
+    if (!file.type?.startsWith('image/')) {
+      resolve({ ok: false, message: 'Government ID must be an image file.' })
+      return
+    }
+    if (file.size < MIN_GOV_ID_FILE_SIZE_BYTES) {
+      resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
+      return
+    }
+    const image = new Image()
+    const objectUrl = URL.createObjectURL(file)
+    image.onload = () => {
+      const isClear = image.width >= MIN_GOV_ID_IMAGE_WIDTH && image.height >= MIN_GOV_ID_IMAGE_HEIGHT
+      URL.revokeObjectURL(objectUrl)
+      if (!isClear) {
+        resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
+        return
+      }
+      resolve({ ok: true, message: 'Government ID verified successfully.' })
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      resolve({ ok: false, message: 'Unable to read image. Re-upload a clear government ID.' })
+    }
+    image.src = objectUrl
+  })
+  */
+
   const handleSubmitBusinessVerification = () => {
     if (isIndividualBusinessType) {
       showToast('success', 'Business verification step is automatically completed for Individual accounts.')
@@ -1471,10 +1524,6 @@ function SettingsPage({
     }
     if (businessLockedForClient) {
       showToast('success', 'Business verification is already approved and locked.')
-      return
-    }
-    if (!canStartBusinessVerification) {
-      showToast('error', 'Complete identity verification before business verification starts.')
       return
     }
     if (!verificationDocs.businessReg) {
@@ -1527,37 +1576,6 @@ function SettingsPage({
     await saveSection('registered-address', validateAddress)
   }
 
-  const verifyGovernmentIdClarity = (file) => new Promise((resolve) => {
-    if (!file) {
-      resolve({ ok: false, message: 'No file selected.' })
-      return
-    }
-    if (!file.type?.startsWith('image/')) {
-      resolve({ ok: false, message: 'Government ID must be an image file.' })
-      return
-    }
-    if (file.size < MIN_GOV_ID_FILE_SIZE_BYTES) {
-      resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
-      return
-    }
-    const image = new Image()
-    const objectUrl = URL.createObjectURL(file)
-    image.onload = () => {
-      const isClear = image.width >= MIN_GOV_ID_IMAGE_WIDTH && image.height >= MIN_GOV_ID_IMAGE_HEIGHT
-      URL.revokeObjectURL(objectUrl)
-      if (!isClear) {
-        resolve({ ok: false, message: 'Government ID is not clear, re-upload.' })
-        return
-      }
-      resolve({ ok: true, message: 'Government ID verified successfully.' })
-    }
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
-      resolve({ ok: false, message: 'Unable to read image. Re-upload a clear government ID.' })
-    }
-    image.src = objectUrl
-  })
-
   const handleFileUpload = async (docType, e) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -1565,6 +1583,7 @@ function SettingsPage({
       if (e?.target) e.target.value = ''
     }
 
+    /*
     if (docType === 'govId') {
       if (identityLockedForClient) {
         showToast('error', 'Identity is already verified and locked. Contact admin for changes.')
@@ -1609,6 +1628,13 @@ function SettingsPage({
       return
     }
 
+    if (docType === 'businessReg' && !canStartBusinessVerification) {
+      showToast('error', 'Complete identity verification before business verification starts.')
+      resetInput()
+      return
+    }
+    */
+
     if (docType === 'businessReg' && isIndividualBusinessType) {
       showToast('error', 'Business registration document is not required for Individual business type.')
       resetInput()
@@ -1616,11 +1642,6 @@ function SettingsPage({
     }
     if (docType === 'businessReg' && businessLockedForClient) {
       showToast('error', 'Business verification is approved and locked. Contact admin for changes.')
-      resetInput()
-      return
-    }
-    if (docType === 'businessReg' && !canStartBusinessVerification) {
-      showToast('error', 'Complete identity verification before business verification starts.')
       resetInput()
       return
     }
@@ -1691,37 +1712,69 @@ function SettingsPage({
       return
     }
 
-    if (file.size > 5 * 1024 * 1024) {
+    if (file.size > CLIENT_IMAGE_ASSET_MAX_SIZE_BYTES) {
       showToast('error', 'Company logo must be 5 MB or less.')
       input.value = ''
       return
     }
 
-    const objectUrl = URL.createObjectURL(file)
-    const image = new Image()
-    image.onload = () => {
-      setLogoFile(objectUrl)
-      setCompanyLogo(objectUrl)
-      writeLegacyString(companyLogoKey, objectUrl)
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '').trim()
+      if (!dataUrl) {
+        showToast('error', 'Unable to read selected image file.')
+        input.value = ''
+        return
+      }
+      setLogoFile(dataUrl)
+      setCompanyLogo(dataUrl)
+      writeLegacyString(companyLogoKey, dataUrl)
       showToast('success', 'Company logo updated successfully.')
       input.value = ''
     }
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl)
+    reader.onerror = () => {
       showToast('error', 'Invalid file format. Please upload an image file.')
       input.value = ''
     }
-    image.src = objectUrl
+    reader.readAsDataURL(file)
   }
 
   const handlePhotoUpload = (e) => {
-    const file = e.target.files[0]
-    if (file) {
-      const objectUrl = URL.createObjectURL(file)
-      setPhotoFile(objectUrl)
-      setProfilePhoto(objectUrl)
-      writeLegacyString(profilePhotoKey, objectUrl)
+    const input = e.target
+    const file = input.files?.[0]
+    if (!file) return
+
+    if (!file.type?.startsWith('image/')) {
+      showToast('error', 'Invalid file format. Please upload an image file.')
+      input.value = ''
+      return
     }
+
+    if (file.size > CLIENT_IMAGE_ASSET_MAX_SIZE_BYTES) {
+      showToast('error', 'Profile picture must be 5 MB or less.')
+      input.value = ''
+      return
+    }
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '').trim()
+      if (!dataUrl) {
+        showToast('error', 'Unable to read selected image file.')
+        input.value = ''
+        return
+      }
+      setPhotoFile(dataUrl)
+      setProfilePhoto(dataUrl)
+      writeLegacyString(profilePhotoKey, dataUrl)
+      showToast('success', 'Profile picture updated successfully.')
+      input.value = ''
+    }
+    reader.onerror = () => {
+      showToast('error', 'Invalid file format. Please upload an image file.')
+      input.value = ''
+    }
+    reader.readAsDataURL(file)
   }
 
   const getInviteLink = (invite = {}) => {
@@ -2803,165 +2856,29 @@ function SettingsPage({
       }
 
       case 'identity': {
+        /*
         const isIdentityEditMode = editMode['identity']
+        Original disabled UI kept here for later restore:
+        - Government ID type selector
+        - ID card number input
+        - Government ID upload dropzone
+        - Dojah submission button wired to handleSubmitVerification
+        */
         return (
-          <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div>
-                <h3 className="text-lg font-semibold text-text-primary mb-1">Identity Verification</h3>
-                <p className="text-sm text-text-muted">Verify your identity to comply with regulations</p>
-                <p className="text-xs text-text-muted mt-1">Fields marked with <span className="text-error">*</span> are mandatory.</p>
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <span className={`inline-flex items-center h-7 px-3 rounded-full text-xs font-medium ${identityVerificationBadge.className}`}>
-                  {identityVerificationBadge.label}
-                </span>
-                <button
-                  disabled={identityLockedForClient && !isIdentityEditMode}
-                  onClick={() => isIdentityEditMode ? cancelSectionEdit('identity') : startSectionEdit('identity')}
-                  className={`h-9 px-4 rounded-md text-sm font-medium transition-colors ${
-                    isIdentityEditMode ? 'bg-error-bg text-error hover:bg-error/10' : 'bg-primary text-white hover:bg-primary-light'
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
-                >
-                  {identityLockedForClient && !isIdentityEditMode ? 'Verified (Locked)' : (isIdentityEditMode ? 'Cancel Edit' : 'Edit')}
-                </button>
-              </div>
+          <div className="space-y-4">
+            <div className="rounded-lg border border-border-light bg-background/40 p-4">
+              <h3 className="text-lg font-semibold text-text-primary">Identity Verification Removed</h3>
+              <p className="text-sm text-text-secondary mt-1">
+                Identity verification is currently unavailable. Continue with your business verification document under Business Profile.
+              </p>
             </div>
-
-            <div className="rounded-lg border border-border-light bg-background/40 p-4 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-text-primary">Verification Progress</p>
-                <span className="inline-flex items-center h-6 px-2.5 rounded text-xs font-medium bg-primary-tint text-primary">
-                  {verificationRatioLabel}
-                </span>
-              </div>
-              <div className="h-2 w-full rounded-full bg-white border border-border-light overflow-hidden">
-                <div
-                  className="h-full bg-primary transition-all"
-                  style={{ width: `${verificationProgress}%` }}
-                />
-              </div>
-              <div className="flex flex-wrap items-center justify-between text-xs text-text-muted gap-2">
-                <span>User Profile Step: {profileStepCompleted ? 'Completed' : 'Pending'}</span>
-                <span>Identity Step: {identityVerified ? 'Completed' : 'Pending'}</span>
-                <span>Business Step: {businessStepStatusLabel}</span>
-              </div>
-            </div>
-
-            {!isIdentityEditMode ? (
-              <div className="grid grid-cols-1 gap-4">
-                {renderReadonlyField('Government ID Type', verificationDocs.govIdType, true)}
-                {renderReadonlyField('ID Card Number', verificationDocs.govIdNumber, true)}
-                {renderReadonlyField('Government-issued ID', verificationDocs.govId, true)}
-                {verificationDocs.govIdClarityStatus === 'not-clear' && (
-                  <div className="rounded-md border border-error/30 bg-error-bg/40 px-3 py-2.5 text-xs text-error">
-                    Government ID was not clear. Re-upload a clearer image.
-                  </div>
-                )}
-                {verificationDocs.govIdVerificationStatus === 'failed' && (
-                  <div className="rounded-md border border-error/30 bg-error-bg/40 px-3 py-2.5 text-xs text-error">
-                    Verification failed. Please re-upload.
-                  </div>
-                )}
-              </div>
-            ) : (
-              <>
-                <div>
-                  <label className="block text-sm font-medium text-text-primary mb-1.5">Government ID Type <span className="text-error">*</span></label>
-                  <select
-                    value={verificationDocs.govIdType || ''}
-                    onChange={(event) => {
-                      if (identityLockedForClient) return
-                      const nextType = event.target.value
-                      const next = {
-                        ...verificationDocs,
-                        govIdType: nextType,
-                        govIdNumber: nextType === verificationDocs.govIdType ? verificationDocs.govIdNumber : '',
-                        govId: nextType === verificationDocs.govIdType ? verificationDocs.govId : '',
-                        govIdVerifiedAt: nextType === verificationDocs.govIdType ? verificationDocs.govIdVerifiedAt : '',
-                        govIdVerificationStatus: nextType === verificationDocs.govIdType ? verificationDocs.govIdVerificationStatus : '',
-                        govIdClarityStatus: nextType === verificationDocs.govIdType ? verificationDocs.govIdClarityStatus : '',
-                      }
-                      setVerificationDocs(next)
-                      writeLegacyJson(verificationDocsKey, next)
-                    }}
-                    disabled={identityLockedForClient}
-                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary disabled:bg-gray-100 disabled:cursor-not-allowed"
-                  >
-                    <option value="">Select ID type</option>
-                    {GOVERNMENT_ID_TYPE_OPTIONS.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-text-primary mb-1.5">ID Card Number <span className="text-error">*</span></label>
-                  <input
-                    type="text"
-                    value={verificationDocs.govIdNumber || ''}
-                    onChange={(event) => {
-                      if (identityLockedForClient) return
-                      const next = {
-                        ...verificationDocs,
-                        govIdNumber: sanitizeAlphaNumeric(event.target.value),
-                        govIdVerifiedAt: '',
-                        govIdVerificationStatus: '',
-                      }
-                      setVerificationDocs(next)
-                      writeLegacyJson(verificationDocsKey, next)
-                    }}
-                    disabled={identityLockedForClient}
-                    placeholder="Enter ID card number"
-                    className="w-full h-10 px-3 border border-border rounded-md text-sm focus:outline-none focus:border-primary disabled:bg-gray-100 disabled:cursor-not-allowed"
-                  />
-                </div>
-
-                <div className="border border-border rounded-lg p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <label className="text-sm font-medium text-text-primary">Government-issued ID <span className="text-error">*</span></label>
-                    {verificationDocs.govId && (
-                      <span className="text-xs text-success flex items-center gap-1">
-                        <CheckCircle className="w-3 h-3" /> Uploaded: {verificationDocs.govId}
-                      </span>
-                    )}
-                  </div>
-                  <div className={`border-2 border-dashed rounded-lg p-4 text-center transition-colors ${identityLockedForClient ? 'border-border-light bg-background/50 cursor-not-allowed' : 'border-border hover:border-primary cursor-pointer'}`} onClick={() => { if (identityLockedForClient) return; const input = document.querySelector('#verification-upload-govId'); if (input) input.click() }}>
-                    <UploadCloud className="w-8 h-8 mx-auto mb-2 text-text-muted" />
-                    <p className="text-sm text-text-primary mb-1">{identityLockedForClient ? 'Identity verification is locked' : 'Upload government ID'}</p>
-                    <input
-                      type="file"
-                      id="verification-upload-govId"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={(e) => { handleFileUpload('govId', e) }}
-                      disabled={identityLockedForClient}
-                    />
-                    <p className="text-xs text-text-muted">Accepted: clear image files.</p>
-                  </div>
-                  {verificationDocs.govIdClarityStatus === 'not-clear' && (
-                    <p className="text-xs text-error mt-2">Government ID is not clear, re-upload.</p>
-                  )}
-                  {verificationDocs.govId && (
-                    <p className="text-xs text-success mt-2">Selected file: {verificationDocs.govId}</p>
-                  )}
-                  {verificationDocs.govIdVerificationStatus === 'failed' && (
-                    <p className="text-xs text-error mt-2">Verification failed. Please re-upload.</p>
-                  )}
-                </div>
-
-                <div className="pt-4">
-                  <button
-                    disabled={identityLockedForClient || isIdentitySubmitting}
-                    onClick={handleSubmitVerification}
-                    className="h-10 px-6 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center gap-2"
-                  >
-                    {isIdentitySubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                    {isIdentitySubmitting ? 'Identifying...' : 'Submit Identity Verification'}
-                  </button>
-                </div>
-              </>
-            )}
+            <button
+              type="button"
+              onClick={() => setActiveSection('business-profile')}
+              className="h-9 px-4 rounded-md bg-primary text-white text-sm font-medium hover:bg-primary-light transition-colors"
+            >
+              Open Business Profile
+            </button>
           </div>
         )
       }
@@ -2970,11 +2887,11 @@ function SettingsPage({
         const inviteButtonDisabled = !teamInviteUnlocked || !canManageTeam
         const progressLabel = `${verificationRatioLabel} verification steps completed.`
         const verificationMessage = verificationStepsCompleted === 0
-          ? 'Complete user profile, identity, and business verification to invite team members.'
+          ? 'Complete your user profile and business verification to invite team members.'
           : businessVerificationSubmitted && !businessVerified
             ? 'Business verification is submitted and awaiting admin approval before invite access can be enabled.'
-          : verificationStepsCompleted < 3
-            ? 'Invite access remains locked until all verification steps are completed and approved.'
+          : verificationStepsCompleted < CLIENT_VERIFICATION_TOTAL_STEPS
+            ? 'Invite access remains locked until your profile and business verification are completed and approved.'
             : 'Awaiting final compliance approval before invite access can be enabled.'
         const sortedTeamMembers = [...teamMembers].sort((left, right) => {
           if (left.isPrimaryOwner && !right.isPrimaryOwner) return -1
@@ -3035,7 +2952,6 @@ function SettingsPage({
                     </div>
                     <div className="flex flex-wrap items-center justify-between text-xs text-text-muted gap-2">
                       <span>User Profile Verified: {profileStepCompleted ? 'Yes' : 'No'}</span>
-                      <span>Identity Verified: {identityVerified ? 'Yes' : 'No'}</span>
                       <span>Business Verified: {businessVerified ? 'Yes' : 'No'}</span>
                     </div>
                   </div>
@@ -3232,11 +3148,7 @@ function SettingsPage({
                   <h4 className="text-sm font-semibold text-text-primary mb-4">Business Verification</h4>
                   {isIndividualBusinessType ? (
                     <div className="rounded-md border border-success/30 bg-success-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Stage 3 is auto verified for Individual accounts. No business registration upload is required.
-                    </div>
-                  ) : !canStartBusinessVerification ? (
-                    <div className="rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Complete identity verification before starting business verification.
+                      Business verification is auto approved for Individual accounts. No business registration upload is required.
                     </div>
                   ) : businessLockedForClient ? (
                     <div className="rounded-md border border-success/30 bg-success-bg/40 px-3 py-2.5 text-sm text-text-secondary">
@@ -3457,11 +3369,7 @@ function SettingsPage({
                   <h4 className="text-sm font-semibold text-text-primary mb-4">Business Verification</h4>
                   {isIndividualBusinessType ? (
                     <div className="rounded-md border border-success/30 bg-success-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Stage 3 is auto verified for Individual accounts. No business registration upload is required.
-                    </div>
-                  ) : !canStartBusinessVerification ? (
-                    <div className="rounded-md border border-warning/30 bg-warning-bg/40 px-3 py-2.5 text-sm text-text-secondary">
-                      Complete identity verification before business verification can start.
+                      Business verification is auto approved for Individual accounts. No business registration upload is required.
                     </div>
                   ) : (
                     <>
@@ -3490,7 +3398,7 @@ function SettingsPage({
                   {!isIndividualBusinessType && (
                     <div className="pt-4">
                       <button
-                        disabled={!canStartBusinessVerification || businessLockedForClient || businessVerificationSubmitted}
+                        disabled={businessLockedForClient || businessVerificationSubmitted}
                         onClick={handleSubmitBusinessVerification}
                         className="h-9 px-4 bg-primary text-white rounded-md text-sm font-medium hover:bg-primary-light transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                       >
