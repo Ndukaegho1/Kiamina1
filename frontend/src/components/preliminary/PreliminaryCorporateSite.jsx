@@ -7,7 +7,7 @@ import { apiFetch } from '../../utils/apiClient'
 import { registerNewsletterSubscriberLead } from '../../utils/supportCenter'
 import {
   ChevronDown,
-  Menu,
+  Rows3,
   ArrowRight,
   ArrowUp,
   X,
@@ -2580,10 +2580,10 @@ function PreliminaryCorporateSite({
           <button
             type="button"
             onClick={() => setMobileOpen((prev) => !prev)}
-            className="inline-flex rounded-lg border border-slate-300 bg-white p-2 text-slate-700 xl:hidden"
+            className="inline-flex rounded-2xl border border-slate-200/90 bg-white/95 p-2.5 text-slate-700 shadow-[0_12px_32px_rgba(15,23,42,0.08)] backdrop-blur xl:hidden"
             aria-label="Toggle menu"
           >
-            {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+            {mobileOpen ? <X className="h-5 w-5" strokeWidth={2.1} /> : <Rows3 className="h-5 w-5" strokeWidth={2.1} />}
           </button>
         </div>
 
