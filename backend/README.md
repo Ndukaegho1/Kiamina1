@@ -215,6 +215,11 @@ Documents service:
 
 Notifications service:
 
+- `BREVO_API_BASE_URL` (default `https://api.brevo.com/v3`)
+- `BREVO_API_KEY`
+- `BREVO_API_TIMEOUT_MS` (default `10000`)
+- `BREVO_SENDER_EMAIL` (falls back to `SMTP_FROM_EMAIL`)
+- `BREVO_SENDER_NAME` (falls back to `SMTP_FROM_NAME`)
 - `SMTP_HOST`
 - `SMTP_PORT` (default `587`)
 - `SMTP_SECURE` (`true` for SMTPS 465)
