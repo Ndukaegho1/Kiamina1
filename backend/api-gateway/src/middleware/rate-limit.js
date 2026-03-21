@@ -58,6 +58,45 @@ const getPublicRouteLimiterKey = (methodValue, pathValue) => {
   return "";
 };
 
+const isRateLimitExemptPublicRoute = (methodValue, pathValue) => {
+  const normalizedMethod = methodValue.toUpperCase();
+  const normalizedPath = stripApiPrefix(pathValue);
+
+  if (normalizedMethod === "POST" && normalizedPath === "/users/public/support-leads") {
+    return true;
+  }
+
+  if (
+    normalizedMethod === "POST" &&
+    normalizedPath === "/notifications/insights/analytics/events"
+  ) {
+    return true;
+  }
+
+  if (
+    normalizedMethod === "GET" &&
+    (normalizedPath === "/notifications/insights/articles" || normalizedPath === "/notifications/insights/articles/search")
+  ) {
+    return true;
+  }
+
+  if (
+    (normalizedMethod === "GET" || normalizedMethod === "POST") &&
+    normalizedPath.startsWith("/notifications/insights/articles/")
+  ) {
+    return true;
+  }
+
+  if (
+    (normalizedMethod === "GET" || normalizedMethod === "POST") &&
+    normalizedPath.startsWith("/notifications/support/public/tickets")
+  ) {
+    return true;
+  }
+
+  return false;
+};
+
 const getRequestLimit = (publicRouteLimiterKey) => {
   if (!publicRouteLimiterKey) {
     return env.requestsPerMinute;
@@ -86,6 +125,10 @@ const callUpstash = async (commandPath) => {
 
 export const rateLimitMiddleware = async (req, res, next) => {
   if (!env.upstashRestUrl || !env.upstashRestToken) {
+    return next();
+  }
+
+  if (isRateLimitExemptPublicRoute(req.method, req.path)) {
     return next();
   }
 
